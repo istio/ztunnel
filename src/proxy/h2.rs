@@ -60,7 +60,13 @@ async fn do_ping_pong(
                         // drive_connection() exits first, no need to error again
                         return;
                     }
-                    log::error!("ping error: {e}");
+                    // If this was a broken pipe error, then the connection is already closed and we
+                    // we can't ping it. This isn't an error, but more of a race condition we cannot
+                    // catch.
+                    if Some(std::io::ErrorKind::BrokenPipe) != e.get_io().map(|io| io.kind()) {
+                        log::error!("ping error: {e}");
+                    }
+
                     let _ = tx.send(());
                     return;
                 }
