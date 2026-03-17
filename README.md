@@ -137,6 +137,17 @@ accessible by making an HTTP request to either "/stats/prometheus" or "/metrics"
 
 - XDS Connection terminations (`istio_xds_connection_terminations_total`)
 
+#### Tokio metrics
+
+Metrics for the data plane worker pool Tokio runtime.
+
+- Number of worker threads (`tokio_num_workers`)
+- Tasks in global queue (`tokio_global_queue_depth`)
+- Alive tasks (`tokio_num_alive_tasks`)
+- Worker busy duration (`tokio_worker_total_busy_duration_seconds`): Per-worker counter with `worker` label
+- Worker park count (`tokio_worker_park_count`): Per-worker counter with `worker` label
+- Worker park/unpark count (`tokio_worker_park_unpark_count`): Per-worker counter with `worker` label
+
 ## Logging
 
 Ztunnel exposes a variety of logs, both operational and "access logs".
