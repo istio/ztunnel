@@ -37,7 +37,7 @@ pub async fn build_with_cert(
     cert_manager: Arc<SecretManager>,
 ) -> anyhow::Result<Bound> {
     // Start the data plane worker pool.
-    let data_plane_pool = new_data_plane_pool(config.num_worker_threads);
+    let (data_plane_pool, data_plane_handle) = new_data_plane_pool(config.num_worker_threads);
 
     let shutdown = signal::Shutdown::new();
     // Setup a drain channel. drain_tx is used to trigger a drain, which will complete
@@ -78,6 +78,7 @@ pub async fn build_with_cert(
     // Register metrics.
     let mut registry = Registry::default();
     register_process_metrics(&mut registry);
+    metrics::tokio_runtime::TokioRuntimeCollector::register(&mut registry, &data_plane_handle);
     let istio_registry = metrics::sub_registry(&mut registry);
     let _ = metrics::meta::Metrics::new(istio_registry);
     let xds_metrics = xds::Metrics::new(istio_registry);
@@ -261,23 +262,27 @@ struct DataPlaneTask {
     fut: Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync + 'static>>,
 }
 
-fn new_data_plane_pool(num_worker_threads: usize) -> mpsc::Sender<DataPlaneTask> {
+fn new_data_plane_pool(
+    num_worker_threads: usize,
+) -> (mpsc::Sender<DataPlaneTask>, tokio::runtime::Handle) {
     let (tx, rx) = mpsc::channel();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(num_worker_threads)
+        .thread_name_fn(|| {
+            static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+            let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+            format!("ztunnel-{id}")
+        })
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let handle = runtime.handle().clone();
 
     let span = tracing::span::Span::current();
     thread::spawn(move || {
         let _span = span.enter();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(num_worker_threads)
-            .thread_name_fn(|| {
-                static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
-                let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-                // Thread name can only be 16 chars so keep it short
-                format!("ztunnel-{id}")
-            })
-            .enable_all()
-            .build()
-            .unwrap();
         runtime.block_on(
             async move {
                 let mut join_set = JoinSet::new();
@@ -309,7 +314,7 @@ fn new_data_plane_pool(num_worker_threads: usize) -> mpsc::Sender<DataPlaneTask>
         );
     });
 
-    tx
+    (tx, handle)
 }
 
 pub async fn build(config: Arc<config::Config>) -> anyhow::Result<Bound> {
