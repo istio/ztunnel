@@ -14,8 +14,7 @@
 
 use notify::RecommendedWatcher;
 use notify_debouncer_full::{
-    DebounceEventResult, Debouncer, NoCache, new_debouncer,
-    notify::RecursiveMode,
+    DebounceEventResult, Debouncer, NoCache, new_debouncer, notify::RecursiveMode,
 };
 use rustls::pki_types::CertificateRevocationListDer;
 use rustls_pemfile::Item;
