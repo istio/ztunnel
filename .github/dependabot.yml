@@ -6,6 +6,9 @@ updates:
       interval: "weekly"
     rebase-strategy: "disabled"
     target-branch: "master"
+    ignore:
+      - dependency-name: "criterion"
+        versions: [">= 0.6"]
     groups:
       all-dependencies:
         patterns:
@@ -17,6 +20,9 @@ updates:
       interval: "weekly"
     rebase-strategy: "disabled"
     target-branch: "release-1.29"
+    ignore:
+      - dependency-name: "criterion"
+        versions: [">= 0.6"]
     groups:
       all-dependencies:
         patterns:
@@ -28,6 +34,9 @@ updates:
       interval: "weekly"
     rebase-strategy: "disabled"
     target-branch: "release-1.28"
+    ignore:
+      - dependency-name: "criterion"
+        versions: [">= 0.6"]
     groups:
       all-dependencies:
         patterns:
@@ -39,6 +48,9 @@ updates:
       interval: "weekly"
     rebase-strategy: "disabled"
     target-branch: "release-1.27"
+    ignore:
+      - dependency-name: "criterion"
+        versions: [">= 0.6"]
     groups:
       all-dependencies:
         patterns:
