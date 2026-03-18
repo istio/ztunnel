@@ -141,7 +141,7 @@ impl PoolState {
             async move {
                 debug!("starting an idle timeout for connection {:?}", pool_key_ref);
                 pool_ref
-                    .idle_timeout(&pool_key_ref, release_timeout, evict, rx, pickup)
+                    .idle_timeout(&pool_key_ref, Some(release_timeout), evict, rx, pickup)
                     .await;
                 debug!(
                     "connection {:?} was removed/checked out/timed out of the pool",
