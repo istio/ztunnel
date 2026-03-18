@@ -384,6 +384,12 @@ async fn test_stats_exist() {
             "istio_tcp_sent_bytes",
             "process_max_fds",
             "process_open_fds",
+            "tokio_num_workers",
+            "tokio_global_queue_depth",
+            "tokio_num_alive_tasks",
+            "tokio_worker_park_count",
+            "tokio_worker_park_unpark_count",
+            "tokio_worker_total_busy_duration_seconds",
         ]);
         {
             for (name, doc) in metric_info {
