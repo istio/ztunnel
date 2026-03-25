@@ -363,19 +363,20 @@ impl RootCertManager {
             Duration::from_secs(2),
             None,
             move |result: DebounceEventResult| match result {
-                Ok(events) if !events.is_empty() => {
+                Ok(events) => {
                     debug!(
                         event_count = events.len(),
                         "root cert directory changed; scheduling TLS channel rebuild"
                     );
-                    manager.dirty.store(true, Ordering::Release);
+                    if !events.is_empty() {
+                        manager.dirty.store(true, Ordering::Release);
+                    }
                 }
                 Err(errors) => {
                     for e in errors {
                         debug!(error = ?e, "root cert watcher error");
                     }
                 }
-                _ => {}
             },
         )
         .map_err(|e| Error::InvalidRootCert(format!("failed to create root cert watcher: {e}")))?;
