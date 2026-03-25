@@ -119,7 +119,7 @@ tokio-util = { version = "0.7", features = ["io-util"] }
 educe = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-netns-rs = "0.1"
+netns-rs = "0.2"
 pprof = { version = "0.15", features = ["protobuf", "protobuf-codec", "criterion"] }
 
 [build-dependencies]
@@ -150,7 +150,7 @@ incremental = true
 # Enable testing utils on this crate.
 ztunnel = { version = "0.0.0", path = ".", default-features = false, features = ["testing"] }
 
-criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+criterion = { version = "0.8", features = ["async_tokio", "html_reports"] }
 diff = "0.1"
 local-ip-address = "0.6"
 matches = "0.1"
