@@ -118,8 +118,12 @@ impl CaClient {
             match self.rebuild_channel().await {
                 Ok(new_client) => {
                     // Replace current client
+                    let t = std::time::Instant::now();
                     *self.client.write().unwrap() = new_client;
-                    debug!("TLS channel rebuild after CA root cert rotation");
+                    debug!(
+                        write_lock_wait_ms = t.elapsed().as_millis(),
+                        "TLS channel rebuild after CA root cert rotation"
+                    );
                 }
                 Err(e) => {
                     warn!(error = %e, "failed to rebuild TLS channel after root cert rotation; retaining old channel, will retry on next fetch");
