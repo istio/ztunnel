@@ -30,8 +30,10 @@ pub use metrics::*;
 pub use types::*;
 use xds::istio::security::Authorization as XdsAuthorization;
 use xds::istio::workload::Address as XdsAddress;
+use xds::istio::workload::MeshSettings as XdsMeshSettings;
 use xds::istio::workload::PortList;
 use xds::istio::workload::Service as XdsService;
+use xds::istio::workload::TlsVersion as XdsTlsVersion;
 use xds::istio::workload::Workload as XdsWorkload;
 use xds::istio::workload::address::Type as XdsType;
 
@@ -385,6 +387,59 @@ impl Handler<XdsAuthorization> for ProxyStateUpdater {
     }
 }
 
+impl Handler<XdsMeshSettings> for ProxyStateUpdater {
+    fn no_on_demand(&self) -> bool {
+        true
+    }
+
+    fn handle(
+        &self,
+        updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsMeshSettings>>>,
+    ) -> Result<(), Vec<RejectedConfig>> {
+        let mut state = self.state.write().unwrap();
+        let handle = |res: XdsUpdate<XdsMeshSettings>| {
+            match res {
+                XdsUpdate::Update(w) => {
+                    let settings = convert_mesh_settings(&w.resource);
+                    info!(
+                        trust_domain = %settings.trust_domain,
+                        trust_domain_aliases = ?settings.trust_domain_aliases,
+                        tls = ?settings.tls,
+                        "received MeshSettings update from xDS"
+                    );
+                    state.mesh_settings = Some(Arc::new(settings));
+                }
+                XdsUpdate::Remove(_name) => {
+                    info!("MeshSettings removed, reverting to defaults");
+                    state.mesh_settings = None;
+                }
+            }
+            Ok(())
+        };
+        handle_single_resource(updates, handle)
+    }
+}
+
+fn convert_mesh_settings(proto: &XdsMeshSettings) -> tls::MeshSettings {
+    let tls = proto.tls.as_ref().map(|tls_config| {
+        let min_protocol_version = match tls_config.min_protocol_version() {
+            XdsTlsVersion::Tls12 => tls::TlsVersion::Tls12,
+            XdsTlsVersion::Tls13 => tls::TlsVersion::Tls13,
+        };
+        tls::TlsConfig {
+            min_protocol_version: Some(min_protocol_version),
+            cipher_suites: tls_config.cipher_suites.clone(),
+            ecdh_curves: tls_config.ecdh_curves.clone(),
+        }
+    });
+
+    tls::MeshSettings {
+        trust_domain: proto.trust_domain.as_str().into(),
+        trust_domain_aliases: proto.trust_domain_aliases.iter().map(|a| a.as_str().into()).collect(),
+        tls,
+    }
+}
+
 /// LocalClient serves as a local file reader alternative for XDS. This is intended for testing.
 pub struct LocalClient {
     pub cfg: ConfigSource,
@@ -487,5 +542,96 @@ impl LocalClient {
         }
         info!(%num_workloads, %num_policies, "local config initialized");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_convert_mesh_settings_empty() {
+        let proto = XdsMeshSettings::default();
+        let result = convert_mesh_settings(&proto);
+
+        assert!(result.trust_domain.is_empty());
+        assert!(result.trust_domain_aliases.is_empty());
+        assert!(result.tls.is_none());
+    }
+
+    #[test]
+    fn test_convert_mesh_settings_trust_domain() {
+        let proto = XdsMeshSettings {
+            trust_domain: "cluster.local".to_string(),
+            trust_domain_aliases: vec!["old.cluster.local".to_string()],
+            tls: None,
+        };
+        let result = convert_mesh_settings(&proto);
+
+        assert_eq!(result.trust_domain, "cluster.local");
+        assert_eq!(result.trust_domain_aliases, vec!["old.cluster.local"]);
+        assert!(result.tls.is_none());
+    }
+
+    #[test]
+    fn test_convert_mesh_settings_with_tls_config_tls12() {
+        use xds::istio::workload::TlsConfig;
+
+        let proto = XdsMeshSettings {
+            trust_domain: "cluster.local".to_string(),
+            trust_domain_aliases: vec![],
+            tls: Some(TlsConfig {
+                min_protocol_version: XdsTlsVersion::Tls12.into(),
+                cipher_suites: vec!["TLS_AES_256_GCM_SHA384".to_string()],
+                ecdh_curves: vec!["P-256".to_string()],
+            }),
+        };
+        let result = convert_mesh_settings(&proto);
+
+        assert!(result.tls.is_some());
+        let tls = result.tls.unwrap();
+        assert_eq!(tls.min_protocol_version, Some(tls::TlsVersion::Tls12));
+        assert_eq!(tls.cipher_suites, vec!["TLS_AES_256_GCM_SHA384"]);
+        assert_eq!(tls.ecdh_curves, vec!["P-256"]);
+    }
+
+    #[test]
+    fn test_convert_mesh_settings_with_tls_config_tls13() {
+        use xds::istio::workload::TlsConfig;
+
+        let proto = XdsMeshSettings {
+            trust_domain: "cluster.local".to_string(),
+            trust_domain_aliases: vec![],
+            tls: Some(TlsConfig {
+                min_protocol_version: XdsTlsVersion::Tls13.into(),
+                cipher_suites: vec![],
+                ecdh_curves: vec![],
+            }),
+        };
+        let result = convert_mesh_settings(&proto);
+
+        assert!(result.tls.is_some());
+        let tls = result.tls.unwrap();
+        assert_eq!(tls.min_protocol_version, Some(tls::TlsVersion::Tls13));
+    }
+
+    #[test]
+    fn test_convert_mesh_settings_multiple_aliases() {
+        let proto = XdsMeshSettings {
+            trust_domain: "primary.local".to_string(),
+            trust_domain_aliases: vec![
+                "alias1.local".to_string(),
+                "alias2.local".to_string(),
+                "alias3.local".to_string(),
+            ],
+            tls: None,
+        };
+        let result = convert_mesh_settings(&proto);
+
+        assert_eq!(result.trust_domain, "primary.local");
+        assert_eq!(result.trust_domain_aliases.len(), 3);
+        assert_eq!(result.trust_domain_aliases[0], "alias1.local");
+        assert_eq!(result.trust_domain_aliases[1], "alias2.local");
+        assert_eq!(result.trust_domain_aliases[2], "alias3.local");
     }
 }

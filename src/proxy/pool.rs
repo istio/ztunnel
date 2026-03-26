@@ -31,6 +31,7 @@ use tracing::{Instrument, debug, trace};
 
 use crate::baggage::Baggage;
 use crate::config;
+use crate::state::DemandProxyState;
 
 use flurry;
 
@@ -71,6 +72,7 @@ struct PoolState {
 
 struct ConnSpawner {
     cfg: Arc<config::Config>,
+    state: DemandProxyState,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     local_workload: Arc<LocalWorkloadInformation>,
     timeout_rx: watch::Receiver<bool>,
@@ -82,7 +84,8 @@ impl ConnSpawner {
         debug!("spawning new pool conn for {}", key);
 
         let cert = self.local_workload.fetch_certificate().await?;
-        let connector = cert.outbound_connector(key.dst_id.clone())?;
+        let mesh_settings = self.state.mesh_settings();
+        let connector = cert.outbound_connector(key.dst_id.clone(), mesh_settings.as_deref())?;
         let tcp_stream = super::freebind_connect(None, key.dst, self.socket_factory.as_ref())
             .await
             .map_err(|e: io::Error| match e.kind() {
@@ -336,6 +339,7 @@ impl WorkloadHBONEPool {
     // Callers should then be safe to drop() the pool instance.
     pub fn new(
         cfg: Arc<crate::config::Config>,
+        state: DemandProxyState,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         local_workload: Arc<LocalWorkloadInformation>,
     ) -> WorkloadHBONEPool {
@@ -345,6 +349,7 @@ impl WorkloadHBONEPool {
 
         let spawner = ConnSpawner {
             cfg,
+            state,
             socket_factory,
             local_workload,
             timeout_rx: timeout_recv.clone(),
@@ -1025,10 +1030,10 @@ mod test {
                 namespace: wl.namespace.to_string(),
                 service_account: wl.service_account.to_string(),
             }),
-            mock_proxy_state,
+            mock_proxy_state.clone(),
             identity::mock::new_secret_manager(Duration::from_secs(10)),
         ));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, local_workload);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), mock_proxy_state, sock_fact, local_workload);
         let server = TestServer {
             conn_counter,
             drop_rx,

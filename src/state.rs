@@ -29,6 +29,7 @@ use crate::strng::Strng;
 use crate::tls;
 use crate::xds::istio::security::Authorization as XdsAuthorization;
 use crate::xds::istio::workload::Address as XdsAddress;
+use crate::xds::istio::workload::MeshSettings as XdsMeshSettings;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, xds};
 use crate::{proxy, strng};
@@ -179,6 +180,10 @@ pub struct ProxyState {
     pub services: ServiceStore,
 
     pub policies: PolicyStore,
+
+    /// Runtime mesh settings received from xDS.
+    /// When set, overrides environment variable settings for TLS, trust domain, etc.
+    pub mesh_settings: Option<Arc<crate::tls::MeshSettings>>,
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -188,6 +193,7 @@ struct ProxyStateSerialization<'a> {
     services: Vec<Arc<Service>>,
     policies: Vec<Authorization>,
     staged_services: &'a HashMap<NamespacedHostname, HashMap<Strng, Endpoint>>,
+    mesh_settings: &'a Option<Arc<crate::tls::MeshSettings>>,
 }
 
 impl serde::Serialize for ProxyState {
@@ -226,6 +232,7 @@ impl serde::Serialize for ProxyState {
             services,
             policies,
             staged_services: &self.services.staged_services,
+            mesh_settings: &self.mesh_settings,
         };
         serializable.serialize(serializer)
     }
@@ -237,6 +244,7 @@ impl ProxyState {
             workloads: WorkloadStore::new(local_node),
             services: Default::default(),
             policies: Default::default(),
+            mesh_settings: None,
         }
     }
 
@@ -515,6 +523,12 @@ impl DemandProxyState {
             .expect("mutex")
             .services
             .get_by_workload(wl)
+    }
+
+    /// Get the current mesh settings from xDS, if available.
+    /// Returns None if no mesh settings have been received from the control plane.
+    pub fn mesh_settings(&self) -> Option<Arc<crate::tls::MeshSettings>> {
+        self.state.read().expect("mutex").mesh_settings.clone()
     }
 }
 
@@ -1129,7 +1143,8 @@ impl ProxyStateManager {
             Some(
                 xds::Config::new(config.clone(), tls_client_fetcher)
                     .with_watched_handler::<XdsAddress>(xds::ADDRESS_TYPE, updater.clone())
-                    .with_watched_handler::<XdsAuthorization>(xds::AUTHORIZATION_TYPE, updater)
+                    .with_watched_handler::<XdsAuthorization>(xds::AUTHORIZATION_TYPE, updater.clone())
+                    .with_watched_handler::<XdsMeshSettings>(xds::MESH_SETTINGS_TYPE, updater)
                     .build(xds_metrics, awaiting_ready),
             )
         } else {

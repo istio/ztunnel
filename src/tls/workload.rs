@@ -37,7 +37,7 @@ use crate::strng::Strng;
 use crate::tls;
 use tokio::net::TcpStream;
 use tokio_rustls::client;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 #[derive(Clone, Debug)]
 pub struct InboundAcceptor<F: ServerCertProvider> {
@@ -53,12 +53,23 @@ impl<F: ServerCertProvider> InboundAcceptor<F> {
 #[derive(Debug)]
 pub(super) struct TrustDomainVerifier {
     base: Arc<dyn ClientCertVerifier>,
+    /// Primary trust domain to validate against
     trust_domain: Option<Strng>,
+    /// Additional trust domains that are also accepted (aliases)
+    trust_domain_aliases: Vec<Strng>,
 }
 
 impl TrustDomainVerifier {
-    pub fn new(base: Arc<dyn ClientCertVerifier>, trust_domain: Option<Strng>) -> Arc<Self> {
-        Arc::new(Self { base, trust_domain })
+    pub fn new(
+        base: Arc<dyn ClientCertVerifier>,
+        trust_domain: Option<Strng>,
+        trust_domain_aliases: Vec<Strng>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            base,
+            trust_domain,
+            trust_domain_aliases,
+        })
     }
 
     fn verify_trust_domain(&self, client_cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
@@ -76,22 +87,29 @@ impl TrustDomainVerifier {
             )
         })?;
         trace!(
-            "verifying client identities {ids:?} against trust domain {:?}",
-            want_trust_domain
+            "verifying client identities {ids:?} against trust domain {:?} (aliases: {:?})",
+            want_trust_domain,
+            self.trust_domain_aliases
         );
-        ids.iter()
-            .find(|id| match id {
-                Identity::Spiffe { trust_domain, .. } => trust_domain == want_trust_domain,
-            })
-            .ok_or_else(|| {
-                rustls::Error::InvalidCertificate(rustls::CertificateError::Other(
-                    rustls::OtherError(Arc::new(TlsError::SanTrustDomainError(
-                        want_trust_domain.to_string(),
-                        ids.clone(),
-                    ))),
-                ))
-            })
-            .map(|_| ())
+        let accepted = ids.iter().any(|id| {
+            let Identity::Spiffe { trust_domain, .. } = id;
+            trust_domain == want_trust_domain
+                || self.trust_domain_aliases.iter().any(|a| trust_domain == a)
+        });
+        if accepted {
+            Ok(())
+        } else {
+            warn!(
+                "trust domain verification failed: peer identities {ids:?} did not match \
+                 trust domain {:?} or aliases {:?}",
+                want_trust_domain, self.trust_domain_aliases
+            );
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::Other(rustls::OtherError(Arc::new(
+                    TlsError::SanTrustDomainError(want_trust_domain.to_string(), ids.clone()),
+                ))),
+            ))
+        }
     }
 }
 
@@ -250,7 +268,7 @@ impl ServerCertVerifier for IdentityVerifier {
     ) -> Result<ServerCertVerified, rustls::Error> {
         let cert = ParsedCertificate::try_from(end_entity)?;
 
-        let algs = provider().signature_verification_algorithms;
+        let algs = provider(None).signature_verification_algorithms;
         rustls::client::verify_server_cert_signed_by_trust_anchor(
             &cert,
             &self.roots,
@@ -280,7 +298,7 @@ impl ServerCertVerifier for IdentityVerifier {
             message,
             cert,
             dss,
-            &provider().signature_verification_algorithms,
+            &provider(None).signature_verification_algorithms,
         )
     }
 
@@ -294,12 +312,12 @@ impl ServerCertVerifier for IdentityVerifier {
             message,
             cert,
             dss,
-            &provider().signature_verification_algorithms,
+            &provider(None).signature_verification_algorithms,
         )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        provider()
+        provider(None)
             .signature_verification_algorithms
             .supported_schemes()
     }

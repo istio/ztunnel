@@ -183,8 +183,8 @@ impl MockServerCertProvider {
 #[async_trait::async_trait]
 impl ServerCertProvider for MockServerCertProvider {
     async fn fetch_cert(&mut self) -> Result<Arc<ServerConfig>, TlsError> {
-        let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
-            .with_protocol_versions(tls_versions())
+        let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider(None))
+            .with_protocol_versions(tls_versions(None))
             .expect("server config must be valid")
             .with_no_client_auth()
             .with_single_cert(

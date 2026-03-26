@@ -301,15 +301,26 @@ impl WorkloadCertificate {
     pub fn server_config(
         &self,
         crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
+        mesh_settings: Option<&crate::tls::MeshSettings>,
     ) -> Result<ServerConfig, Error> {
-        let td = self.cert.identity().map(|i| match i {
-            Identity::Spiffe { trust_domain, .. } => trust_domain,
-        });
+        // Trust domain priority: xDS > certificate
+        let td = mesh_settings
+            .filter(|ms| !ms.trust_domain.is_empty())
+            .map(|ms| ms.trust_domain.clone())
+            .or_else(|| {
+                self.cert.identity().map(|i| match i {
+                    Identity::Spiffe { trust_domain, .. } => trust_domain,
+                })
+            });
+
+        let td_aliases = mesh_settings
+            .map(|ms| ms.trust_domain_aliases.clone())
+            .unwrap_or_default();
 
         // build the base client cert verifier with optional CRL support
         let mut builder = WebPkiClientVerifier::builder_with_provider(
             self.root_store.clone(),
-            crate::tls::lib::provider(),
+            crate::tls::lib::provider(mesh_settings),
         );
 
         // add CRLs if available
@@ -324,9 +335,9 @@ impl WorkloadCertificate {
         let raw_client_cert_verifier = builder.build()?;
 
         let client_cert_verifier =
-            crate::tls::workload::TrustDomainVerifier::new(raw_client_cert_verifier, td);
-        let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
-            .with_protocol_versions(tls::tls_versions())
+            crate::tls::workload::TrustDomainVerifier::new(raw_client_cert_verifier, td, td_aliases);
+        let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider(mesh_settings))
+            .with_protocol_versions(tls::tls_versions(mesh_settings))
             .expect("server config must be valid")
             .with_client_cert_verifier(client_cert_verifier)
             .with_single_cert(
@@ -339,11 +350,15 @@ impl WorkloadCertificate {
 
     // TODO: add CRL support for outbound connections (client verifying server certs)
     // this requires a separate design due to complexity - deferred for follow-up
-    pub fn client_config(&self, identity: Vec<Identity>) -> Result<ClientConfig, rustls::Error> {
+    pub fn client_config(
+        &self,
+        identity: Vec<Identity>,
+        mesh_settings: Option<&crate::tls::MeshSettings>,
+    ) -> Result<ClientConfig, rustls::Error> {
         let roots = self.root_store.clone();
         let verifier = IdentityVerifier { roots, identity };
-        let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
-            .with_protocol_versions(tls::tls_versions())
+        let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider(mesh_settings))
+            .with_protocol_versions(tls::tls_versions(mesh_settings))
             .expect("client config must be valid")
             .dangerous() // Customer verifier is requires "dangerous" opt-in
             .with_custom_certificate_verifier(Arc::new(verifier))
@@ -357,8 +372,12 @@ impl WorkloadCertificate {
         Ok(cc)
     }
 
-    pub fn outbound_connector(&self, identity: Vec<Identity>) -> Result<OutboundConnector, Error> {
-        let cc = self.client_config(identity)?;
+    pub fn outbound_connector(
+        &self,
+        identity: Vec<Identity>,
+        mesh_settings: Option<&crate::tls::MeshSettings>,
+    ) -> Result<OutboundConnector, Error> {
+        let cc = self.client_config(identity, mesh_settings)?;
         Ok(OutboundConnector {
             client_config: Arc::new(cc),
         })
@@ -466,7 +485,7 @@ mod test {
             WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![&joined]).unwrap();
 
         // Do a simple handshake between them; we should be able to accept the trusted root
-        let server = cert1.server_config(None).unwrap();
+        let server = cert1.server_config(None, None).unwrap();
         let tls = TlsAcceptor::from(Arc::new(server));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -477,12 +496,201 @@ mod test {
         });
 
         let stream = TcpStream::connect(addr).await.unwrap();
-        let client = cert2.outbound_connector(vec![id]).unwrap();
+        let client = cert2.outbound_connector(vec![id], None).unwrap();
         let mut tls = client.connect(stream).await.unwrap();
 
         let _ = tls.write(b"hi").await.unwrap();
         let mut buf = [0u8; 4];
         tls.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"serv");
+    }
+
+    #[tokio::test]
+    async fn test_trust_domain_from_mesh_settings() {
+        helpers::initialize_telemetry();
+        let id = Identity::from_str("spiffe://cluster.local/ns/n/sa/a").unwrap();
+
+        // Generate certs with trust domain "cluster.local"
+        let (key, cert) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(id.clone()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(60),
+            None,
+            TEST_ROOT_KEY,
+        );
+        let cert1 =
+            WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![TEST_ROOT]).unwrap();
+
+        // MeshSettings with matching trust domain
+        let mesh_settings = crate::tls::MeshSettings {
+            trust_domain: "cluster.local".into(),
+            trust_domain_aliases: vec![],
+            tls: None,
+        };
+
+        // server_config should work with matching trust domain
+        let server = cert1.server_config(None, Some(&mesh_settings));
+        assert!(server.is_ok(), "server_config should succeed with matching trust domain");
+    }
+
+    #[tokio::test]
+    async fn test_trust_domain_alias_accepted() {
+        helpers::initialize_telemetry();
+        // Client has identity in "old.cluster.local" trust domain
+        let client_id = Identity::from_str("spiffe://old.cluster.local/ns/n/sa/a").unwrap();
+        // Server expects "cluster.local" but has "old.cluster.local" as alias
+        let server_id = Identity::from_str("spiffe://cluster.local/ns/n/sa/b").unwrap();
+
+        // Generate client cert with "old.cluster.local" trust domain
+        let (client_key, client_cert) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(client_id.clone()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(60),
+            None,
+            TEST_ROOT_KEY,
+        );
+        let client_certs = WorkloadCertificate::new(
+            client_key.as_bytes(),
+            client_cert.as_bytes(),
+            vec![TEST_ROOT],
+        )
+        .unwrap();
+
+        // Generate server cert with "cluster.local" trust domain
+        let (server_key, server_cert) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(server_id.clone()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(60),
+            None,
+            TEST_ROOT_KEY,
+        );
+        let server_certs = WorkloadCertificate::new(
+            server_key.as_bytes(),
+            server_cert.as_bytes(),
+            vec![TEST_ROOT],
+        )
+        .unwrap();
+
+        // MeshSettings with alias that matches client's trust domain
+        let mesh_settings = crate::tls::MeshSettings {
+            trust_domain: "cluster.local".into(),
+            trust_domain_aliases: vec!["old.cluster.local".into()],
+            tls: None,
+        };
+
+        // Server config with trust domain alias
+        let server = server_certs
+            .server_config(None, Some(&mesh_settings))
+            .unwrap();
+        let tls = TlsAcceptor::from(Arc::new(server));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::task::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // This should succeed because old.cluster.local is in the alias list
+            let mut tls = tls.accept(stream).await.unwrap();
+            let _ = tls.write(b"ok").await.unwrap();
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let client = client_certs
+            .outbound_connector(vec![server_id], None)
+            .unwrap();
+        let mut tls = client.connect(stream).await.unwrap();
+
+        let _ = tls.write(b"hi").await.unwrap();
+        let mut buf = [0u8; 2];
+        tls.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ok");
+    }
+
+    #[tokio::test]
+    async fn test_trust_domain_alias_rejected() {
+        helpers::initialize_telemetry();
+        // Client has identity in "evil.cluster.local" — not in aliases
+        let client_id = Identity::from_str("spiffe://evil.cluster.local/ns/n/sa/a").unwrap();
+        let server_id = Identity::from_str("spiffe://cluster.local/ns/n/sa/b").unwrap();
+
+        let (client_key, client_cert) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(client_id.clone()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(60),
+            None,
+            TEST_ROOT_KEY,
+        );
+        let client_certs = WorkloadCertificate::new(
+            client_key.as_bytes(),
+            client_cert.as_bytes(),
+            vec![TEST_ROOT],
+        )
+        .unwrap();
+
+        let (server_key, server_cert) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(server_id.clone()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(60),
+            None,
+            TEST_ROOT_KEY,
+        );
+        let server_certs = WorkloadCertificate::new(
+            server_key.as_bytes(),
+            server_cert.as_bytes(),
+            vec![TEST_ROOT],
+        )
+        .unwrap();
+
+        let mesh_settings = crate::tls::MeshSettings {
+            trust_domain: "cluster.local".into(),
+            trust_domain_aliases: vec!["old.cluster.local".into()],
+            tls: None,
+        };
+
+        let server = server_certs
+            .server_config(None, Some(&mesh_settings))
+            .unwrap();
+        let tls = TlsAcceptor::from(Arc::new(server));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::task::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Handshake should fail — evil.cluster.local is not in the alias list
+            let result = tls.accept(stream).await;
+            assert!(result.is_err());
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let client = client_certs
+            .outbound_connector(vec![server_id], None)
+            .unwrap();
+        let result = client.connect(stream).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_empty_mesh_settings_trust_domain_falls_back_to_cert() {
+        helpers::initialize_telemetry();
+        let id = Identity::from_str("spiffe://cluster.local/ns/n/sa/a").unwrap();
+
+        let (key, cert) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(id.clone()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(60),
+            None,
+            TEST_ROOT_KEY,
+        );
+        let cert1 =
+            WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![TEST_ROOT]).unwrap();
+
+        // MeshSettings present but trust_domain is empty — should fall back to certificate
+        let mesh_settings = crate::tls::MeshSettings {
+            trust_domain: Default::default(),
+            trust_domain_aliases: vec![],
+            tls: None,
+        };
+
+        let server = cert1.server_config(None, Some(&mesh_settings));
+        assert!(server.is_ok(), "empty trust_domain should fall back to certificate extraction");
     }
 }
