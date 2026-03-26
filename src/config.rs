@@ -58,6 +58,7 @@ const PREFERED_SERVICE_NAMESPACE: &str = "PREFERED_SERVICE_NAMESPACE";
 const CA_ADDRESS: &str = "CA_ADDRESS";
 const SECRET_TTL: &str = "SECRET_TTL";
 const FAKE_CA: &str = "FAKE_CA";
+const CA_CERT_WATCHER: &str = "CA_CERT_WATCHER";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const ZTUNNEL_CPU_LIMIT: &str = "ZTUNNEL_CPU_LIMIT";
 const POOL_MAX_STREAMS_PER_CONNECTION: &str = "POOL_MAX_STREAMS_PER_CONNECTION";
@@ -234,6 +235,10 @@ pub struct Config {
     pub ca_address: Option<String>,
     /// Root cert for CA TLS verification.
     pub ca_root_cert: RootCert,
+    /// if true (default), a file watcher is started on the CA root cert folder
+    /// and the gRPC channel is rebuilt automatically on cert rotation.
+    /// Only effective when ca_root_cert is a file path.
+    pub ca_cert_watcher: bool,
     // Allow custom alternative CA hostname verification
     pub alt_ca_hostname: Option<String>,
     /// XDS address to use. If unset, XDS will not be used.
@@ -553,6 +558,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     } else {
         RootCert::Static(Bytes::from(ca_root_cert_provider))
     };
+    let ca_cert_watcher = parse_default(CA_CERT_WATCHER, true)?;
 
     let auth = match parse::<String>(TOKEN_PROVIDER_ENV)? {
         None => {
@@ -787,6 +793,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         prefered_service_namespace,
         ca_address,
         ca_root_cert,
+        ca_cert_watcher,
         alt_xds_hostname: parse(ALT_XDS_HOSTNAME)?,
         alt_ca_hostname: parse(ALT_CA_HOSTNAME)?,
 
