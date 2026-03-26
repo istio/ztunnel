@@ -10,6 +10,8 @@ updates:
       all-dependencies:
         patterns:
           - "*"
+        exclude-patterns:
+          - "criterion"
 
   - package-ecosystem: "cargo"
     directory: "/"
@@ -21,6 +23,8 @@ updates:
       all-dependencies:
         patterns:
           - "*"
+        exclude-patterns:
+          - "criterion"
 
   - package-ecosystem: "cargo"
     directory: "/"
@@ -32,6 +36,8 @@ updates:
       all-dependencies:
         patterns:
           - "*"
+        exclude-patterns:
+          - "criterion"
 
   - package-ecosystem: "cargo"
     directory: "/"
@@ -43,3 +49,5 @@ updates:
       all-dependencies:
         patterns:
           - "*"
+        exclude-patterns:
+          - "criterion"

@@ -14,8 +14,7 @@
 
 use notify::RecommendedWatcher;
 use notify_debouncer_full::{
-    DebounceEventResult, Debouncer, FileIdMap, new_debouncer,
-    notify::{RecursiveMode, Watcher},
+    DebounceEventResult, Debouncer, NoCache, new_debouncer, notify::RecursiveMode,
 };
 use rustls::pki_types::CertificateRevocationListDer;
 use rustls_pemfile::Item;
@@ -55,7 +54,7 @@ impl std::fmt::Debug for CrlManager {
 struct CrlManagerInner {
     crl_ders: Option<Vec<Vec<u8>>>, // None = not loaded, Some = loaded (may be empty)
     crl_path: PathBuf,
-    _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
+    _debouncer: Option<Debouncer<RecommendedWatcher, NoCache>>,
 }
 
 impl CrlManager {
@@ -247,7 +246,6 @@ impl CrlManager {
 
         // start watching the directory
         debouncer
-            .watcher()
             .watch(watch_path, RecursiveMode::NonRecursive)
             .map_err(|e| CrlError::ParseError(format!("failed to watch directory: {}", e)))?;
 
