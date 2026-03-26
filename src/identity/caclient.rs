@@ -50,6 +50,7 @@ impl CaClient {
         address: String,
         alt_hostname: Option<String>,
         root_cert: RootCert,
+        enable_ca_cert_watcher: bool,
         auth: AuthSource,
         enable_impersonated_identity: bool,
         secret_ttl: i64,
@@ -60,12 +61,9 @@ impl CaClient {
         let tls_grpc_channel = tls::grpc_connector(address.clone(), auth.clone(), client_config)?;
         let initial_client = IstioCertificateServiceClient::new(tls_grpc_channel);
 
-        // Start the file watcher only for file-based certs.
-        let root_cert_manager = if let RootCert::File(_) = &root_cert {
-            Some(RootCertManager::new(root_cert.clone())?)
-        } else {
-            None
-        };
+        let root_cert_manager = (enable_ca_cert_watcher && matches!(root_cert, RootCert::File(_)))
+            .then(|| RootCertManager::new(root_cert.clone()))
+            .transpose()?;
 
         Ok(CaClient {
             client: std::sync::RwLock::new(initial_client),

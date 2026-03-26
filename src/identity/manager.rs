@@ -554,6 +554,7 @@ impl SecretManager {
                 .expect("ca_address must be set to use CA"),
             cfg.alt_ca_hostname.clone(),
             cfg.ca_root_cert.clone(),
+            cfg.ca_cert_watcher,
             cfg.auth.clone(),
             cfg.proxy_mode == ProxyMode::Shared,
             cfg.secret_ttl.as_secs().try_into().unwrap_or(60 * 60 * 24),

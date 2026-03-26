@@ -80,6 +80,7 @@ impl CaServer {
             "https://".to_string() + &server_addr.to_string(),
             None,
             root_cert,
+            false,
             AuthSource::Token(
                 PathBuf::from(r"src/test_helpers/fake-jwt"),
                 "Kubernetes".to_string(),
