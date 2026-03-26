@@ -868,6 +868,7 @@ mod tests {
             Arc::new(wi.clone()),
             state.clone(),
             identity::mock::new_secret_manager(Duration::from_secs(10)),
+            cfg.clone(),
         ));
         let outbound = OutboundConnection {
             pi: Arc::new(ProxyInputs {
@@ -1974,6 +1975,7 @@ mod tests {
             Arc::new(wi.clone()),
             state.clone(),
             identity::mock::new_secret_manager(Duration::from_secs(10)),
+            cfg.clone(),
         ));
 
         let outbound = OutboundConnection {

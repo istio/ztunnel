@@ -622,13 +622,23 @@ impl AdsClient {
         };
 
         let addr = self.config.address.clone();
-        let tls_grpc_channel = tls::grpc_connector(
+        let is_unix = tls::unix_socket_path(&self.config.address).is_some();
+
+        let tls_config = if is_unix {
+            None // Unix domain sockets provide local IPC, TLS is not required
+        } else {
+            Some(
+                self.config
+                    .tls_builder
+                    .fetch_cert(self.config.alt_hostname.clone())
+                    .await?,
+            )
+        };
+
+        let grpc_channel = tls::grpc_channel(
             self.config.address.clone(),
             self.config.auth.clone(),
-            self.config
-                .tls_builder
-                .fetch_cert(self.config.alt_hostname.clone())
-                .await?,
+            tls_config,
         )?;
 
         let mut req = tonic::Request::new(outbound);
@@ -640,7 +650,7 @@ impl AdsClient {
             }
         });
 
-        let ads_connection = AggregatedDiscoveryServiceClient::new(tls_grpc_channel)
+        let ads_connection = AggregatedDiscoveryServiceClient::new(grpc_channel)
             .max_decoding_message_size(200 * 1024 * 1024)
             .delta_aggregated_resources(req)
             .await;
@@ -1295,5 +1305,31 @@ mod tests {
         // JSON null
         v = serde_json::json!(());
         assert_eq!(Config::json_to_value(v).kind.unwrap(), NullValue(0));
+    }
+
+    #[test]
+    fn test_unix_uri_scheme_detection() {
+        use crate::tls::unix_socket_path;
+
+        // unix:///path extracts the socket path
+        assert_eq!(
+            unix_socket_path("unix:///run/xds.sock"),
+            Some("/run/xds.sock")
+        );
+
+        // unix:/path also works
+        assert_eq!(
+            unix_socket_path("unix:/run/xds.sock"),
+            Some("/run/xds.sock")
+        );
+
+        // relative path rejected
+        assert_eq!(unix_socket_path("unix://run/xds.sock"), None);
+
+        // https is not a unix socket
+        assert_eq!(unix_socket_path("https://istiod:15012"), None);
+
+        // plain hostname is not a unix socket
+        assert_eq!(unix_socket_path("istiod:15012"), None);
     }
 }

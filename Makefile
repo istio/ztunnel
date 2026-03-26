@@ -65,5 +65,6 @@ export
 
 export GOBIN ?= $(GOPATH)/bin
 include Makefile.core.mk
+include Makefile.docker
 
 endif

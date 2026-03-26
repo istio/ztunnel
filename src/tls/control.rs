@@ -20,6 +20,7 @@ use hyper::Uri;
 use hyper::body::Incoming;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioIo;
 use itertools::Itertools;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -30,6 +31,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::net::UnixStream;
 use tonic::body::Body;
 use tracing::debug;
 
@@ -273,5 +275,249 @@ impl tower::Service<http::Request<Body>> for TlsGrpcChannel {
             auth.insert_headers(req.headers_mut()).await?;
             Ok(client.request(req).await?)
         })
+    }
+}
+
+/// UdsConnector provides a hyper connector for Unix domain sockets.
+#[derive(Clone)]
+struct UdsConnector {
+    path: String,
+}
+
+impl tower::Service<Uri> for UdsConnector {
+    type Response = TokioIo<UnixStream>;
+    type Error = std::io::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _uri: Uri) -> Self::Future {
+        let path = self.path.clone();
+        Box::pin(async move {
+            let stream = tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(&path))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("unix socket connect timeout: {path}"),
+                    )
+                })?
+                .map_err(|e| std::io::Error::other(format!("unix socket {path}: {e}")))?;
+            Ok(TokioIo::new(stream))
+        })
+    }
+}
+
+/// UdsGrpcChannel provides a gRPC channel over Unix domain sockets.
+/// Unix domain sockets are used for local inter-process communication and are
+/// not exposed over the network, so TLS is not required.
+#[derive(Clone)]
+pub struct UdsGrpcChannel {
+    client: hyper_util::client::legacy::Client<UdsConnector, Body>,
+    auth: Arc<AuthSource>,
+}
+
+/// uds_grpc_connector creates a gRPC channel over a Unix domain socket.
+pub fn uds_grpc_connector(socket_path: String, auth: AuthSource) -> Result<UdsGrpcChannel, Error> {
+    let connector = UdsConnector { path: socket_path };
+    let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+        .http2_only(true)
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .http2_keep_alive_timeout(Duration::from_secs(10))
+        .timer(crate::hyper_util::TokioTimer)
+        .build(connector);
+
+    Ok(UdsGrpcChannel {
+        client,
+        auth: Arc::new(auth),
+    })
+}
+
+impl tower::Service<http::Request<Body>> for UdsGrpcChannel {
+    type Response = http::Response<Incoming>;
+    type Error = anyhow::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Ok(()).into()
+    }
+
+    fn call(&mut self, mut req: http::Request<Body>) -> Self::Future {
+        // For Unix sockets, use a dummy authority since we connect to a path
+        let uri = Uri::builder()
+            .scheme("http")
+            .authority("localhost")
+            .path_and_query(
+                req.uri()
+                    .path_and_query()
+                    .map(|pq| pq.to_owned())
+                    .unwrap_or_else(|| "/".parse().unwrap()),
+            )
+            .build()
+            .expect("uri must be valid");
+        *req.uri_mut() = uri;
+
+        let client = self.client.clone();
+        let auth = self.auth.clone();
+        Box::pin(async move {
+            auth.insert_headers(req.headers_mut()).await?;
+            Ok(client.request(req).await?)
+        })
+    }
+}
+
+/// GrpcChannel represents a gRPC channel that can be either TLS-based or Unix socket-based.
+#[derive(Clone)]
+pub enum GrpcChannel {
+    Tls(TlsGrpcChannel),
+    Uds(UdsGrpcChannel),
+}
+
+impl tower::Service<http::Request<Body>> for GrpcChannel {
+    type Response = http::Response<Incoming>;
+    type Error = anyhow::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match self {
+            GrpcChannel::Tls(c) => c.poll_ready(cx),
+            GrpcChannel::Uds(c) => c.poll_ready(cx),
+        }
+    }
+
+    fn call(&mut self, req: http::Request<Body>) -> Self::Future {
+        match self {
+            GrpcChannel::Tls(c) => c.call(req),
+            GrpcChannel::Uds(c) => c.call(req),
+        }
+    }
+}
+
+/// Creates a gRPC channel based on the URI scheme.
+/// - `unix:///path` -> Unix socket connection (no TLS)
+/// - `https://host:port` -> TLS connection
+pub fn grpc_channel(
+    uri: String,
+    auth: AuthSource,
+    tls_config: Option<ClientConfig>,
+) -> Result<GrpcChannel, Error> {
+    if let Some(path) = unix_socket_path(&uri) {
+        return Ok(GrpcChannel::Uds(uds_grpc_connector(
+            path.to_string(),
+            auth,
+        )?));
+    }
+
+    // Use TLS connector (existing behavior)
+    let tls_config = tls_config.ok_or_else(|| {
+        Error::InvalidRootCert("TLS config required for HTTPS connections".to_string())
+    })?;
+    Ok(GrpcChannel::Tls(grpc_connector(uri, auth, tls_config)?))
+}
+
+/// Checks if a URI string uses the unix: scheme and extracts the socket path.
+/// Only absolute paths (starting with `/`) are accepted.
+/// Supported forms: `unix:///path`, `unix:/path`.
+/// hyper's Uri parser does not support unix: URIs, so this uses string parsing.
+pub fn unix_socket_path(uri: &str) -> Option<&str> {
+    let path = uri
+        .strip_prefix("unix://")
+        .or_else(|| uri.strip_prefix("unix:"))?;
+    // Only accept absolute paths with a real filename (not just "/")
+    if path.starts_with('/') && path.len() > 1 {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::AuthSource;
+
+    #[test]
+    fn test_grpc_channel_returns_uds_for_unix_scheme() {
+        // unix:///path form
+        let channel = grpc_channel("unix:///tmp/test.sock".to_string(), AuthSource::None, None);
+        assert!(channel.is_ok(), "expected Ok, got: {:?}", channel.err());
+        assert!(matches!(channel.unwrap(), GrpcChannel::Uds(_)));
+
+        // unix:/path form
+        let channel = grpc_channel("unix:/tmp/test.sock".to_string(), AuthSource::None, None);
+        assert!(channel.is_ok(), "expected Ok, got: {:?}", channel.err());
+        assert!(matches!(channel.unwrap(), GrpcChannel::Uds(_)));
+
+        // relative path rejected — falls through to TLS path which fails without TLS config
+        let channel = grpc_channel(
+            "unix://relative/test.sock".to_string(),
+            AuthSource::None,
+            None,
+        );
+        assert!(channel.is_err());
+    }
+
+    #[test]
+    fn test_grpc_channel_requires_tls_for_https() {
+        let channel = grpc_channel(
+            "https://localhost:15012".to_string(),
+            AuthSource::None,
+            None,
+        );
+        assert!(channel.is_err());
+    }
+
+    #[test]
+    fn test_grpc_channel_invalid_uri() {
+        let channel = grpc_channel("".to_string(), AuthSource::None, None);
+        assert!(channel.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_uds_connector_connects_to_socket() {
+        use tempfile::tempdir;
+        use tokio::net::UnixListener;
+        use tower::Service;
+
+        let dir = tempdir().unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let _listener = UnixListener::bind(&sock_path).unwrap();
+
+        let mut connector = UdsConnector {
+            path: sock_path.to_str().unwrap().to_string(),
+        };
+
+        let ready = futures::future::poll_fn(|cx| connector.poll_ready(cx)).await;
+        assert!(ready.is_ok());
+
+        let result = connector.call("http://localhost".parse().unwrap()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_uds_connector_fails_on_nonexistent_socket() {
+        use tower::Service;
+
+        let mut connector = UdsConnector {
+            path: "/tmp/ztunnel_test_nonexistent.sock".to_string(),
+        };
+
+        let result = connector.call("http://localhost".parse().unwrap()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_uds_grpc_connector_builds_channel() {
+        use tempfile::tempdir;
+        use tokio::net::UnixListener;
+
+        let dir = tempdir().unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let _listener = UnixListener::bind(&sock_path).unwrap();
+
+        let channel = uds_grpc_connector(sock_path.to_str().unwrap().to_string(), AuthSource::None);
+        assert!(channel.is_ok());
     }
 }

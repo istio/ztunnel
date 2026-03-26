@@ -122,6 +122,13 @@ pub static AUTHZ_POLICY_INFO_LOGGING: once_cell::sync::Lazy<bool> =
     once_cell::sync::Lazy::new(|| {
         env::var("AUTHZ_POLICY_INFO_LOGGING").unwrap_or_default() == "true"
     });
+const SPIRE_ENABLED: &str = "SPIRE_ENABLED";
+
+const SPIRE_TIMEOUT: &str = "SPIRE_TIMEOUT";
+
+const SPIRE_ADMIN_SOCKET: &str = "SPIRE_ADMIN_ENDPOINT_SOCKET";
+
+const CONTAINER_RUNTIME_SOCK_PATH: &str = "CONTAINER_RUNTIME_SOCK_PATH";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -324,6 +331,10 @@ pub struct Config {
     // path to CRL file; if set, enables CRL checking
     pub crl_path: Option<PathBuf>,
     pub enable_enhanced_baggage: bool,
+    pub spire_enabled: bool,
+    pub spire_timeout: Duration,
+    pub spire_admin_socket: String,
+    pub container_runtime_sock_path: String,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -775,10 +786,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             bind_wildcard,
             pc.stats_port.unwrap_or(DEFAULT_STATS_PORT),
         )),
-        readiness_addr: Address::SocketAddr(SocketAddr::new(
-            bind_wildcard,
-            DEFAULT_READINESS_PORT, // There is no config for this in ProxyConfig currently
-        )),
+        // readiness probe should only be accessible over localhost (kubelet runs on same node)
+        readiness_addr: Address::Localhost(ipv6_localhost_enabled, DEFAULT_READINESS_PORT),
 
         socks5_addr,
         inbound_addr,
@@ -884,6 +893,16 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .filter(|s| !s.is_empty())
             .map(PathBuf::from),
         enable_enhanced_baggage: parse_default(ENABLE_ENHANCED_BAGGAGE, true)?,
+        spire_enabled: parse_default(SPIRE_ENABLED, false)?,
+        container_runtime_sock_path: parse_default(
+            CONTAINER_RUNTIME_SOCK_PATH,
+            "/run/containerd/containerd.sock".to_string(),
+        )?,
+        spire_timeout: parse_duration_default(SPIRE_TIMEOUT, Duration::from_secs(10))?,
+        spire_admin_socket: parse_default(
+            SPIRE_ADMIN_SOCKET,
+            "unix:///run/spire/sockets/admin.sock".to_string(),
+        )?,
     })
 }
 
@@ -908,11 +927,25 @@ fn validate_uri(uri_str: Option<String>) -> Result<Option<String>, Error> {
     let Some(uri_str) = uri_str else {
         return Ok(uri_str);
     };
-    let uri = Uri::try_from(&uri_str)?;
-    if uri.scheme().is_none() {
-        return Ok(Some("https://".to_owned() + &uri_str));
+    // Unix socket URIs are not supported by hyper's Uri parser, so handle them separately.
+    // Only absolute paths are accepted (e.g., unix:///path or unix:/path).
+    if uri_str.starts_with("unix:") {
+        if crate::tls::unix_socket_path(&uri_str).is_some() {
+            return Ok(Some(uri_str));
+        }
+        return Err(Error::ProxyConfig(anyhow::anyhow!(
+            "unix URI must include an absolute socket path (e.g., unix:///run/sock)"
+        )));
     }
-    Ok(Some(uri_str))
+    let uri = Uri::try_from(&uri_str)?;
+    match uri.scheme_str() {
+        Some("https") | Some("http") => Ok(Some(uri_str)),
+        None => Ok(Some("https://".to_owned() + &uri_str)), // Default to https
+        Some(scheme) => Err(Error::ProxyConfig(anyhow::anyhow!(
+            "unsupported URI scheme: {}",
+            scheme
+        ))),
+    }
 }
 
 #[derive(serde::Deserialize, Default, Clone, PartialEq, Eq)]
@@ -1188,6 +1221,56 @@ pub mod tests {
             let value: AsciiMetadataValue = AsciiMetadataValue::from_str(&v).unwrap();
             assert!(metadata.vec.contains(&(key, value)));
         }
+    }
+
+    #[test]
+    fn test_validate_uri_unix_schemes() {
+        // unix:///path - standard triple-slash form
+        assert_eq!(
+            validate_uri(Some("unix:///run/spire/sockets/agent.sock".to_string())).unwrap(),
+            Some("unix:///run/spire/sockets/agent.sock".to_string())
+        );
+
+        // unix:/path - single-slash form
+        assert_eq!(
+            validate_uri(Some("unix:/run/sockets/agent.sock".to_string())).unwrap(),
+            Some("unix:/run/sockets/agent.sock".to_string())
+        );
+
+        // relative path - rejected (unix://relative is not an absolute path)
+        assert!(validate_uri(Some("unix://run/sockets/agent.sock".to_string())).is_err());
+
+        // empty path - rejected
+        assert!(validate_uri(Some("unix:".to_string())).is_err());
+        assert!(validate_uri(Some("unix://".to_string())).is_err());
+        assert!(validate_uri(Some("unix:///".to_string())).is_err());
+    }
+
+    #[test]
+    fn test_validate_uri_existing_schemes() {
+        // https - accepted unchanged
+        assert_eq!(
+            validate_uri(Some("https://istiod:15012".to_string())).unwrap(),
+            Some("https://istiod:15012".to_string())
+        );
+
+        // http - accepted unchanged
+        assert_eq!(
+            validate_uri(Some("http://localhost:15012".to_string())).unwrap(),
+            Some("http://localhost:15012".to_string())
+        );
+
+        // No scheme - defaults to https://
+        assert_eq!(
+            validate_uri(Some("istiod:15012".to_string())).unwrap(),
+            Some("https://istiod:15012".to_string())
+        );
+
+        // None input - returns None
+        assert_eq!(validate_uri(None).unwrap(), None);
+
+        // Unsupported scheme - returns error
+        assert!(validate_uri(Some("ftp://example.com".to_string())).is_err());
     }
 
     #[test]
