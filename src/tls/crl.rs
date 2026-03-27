@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use notify::RecommendedWatcher;
+use notify::{Config, RecommendedWatcher};
 use notify_debouncer_full::{
-    DebounceEventResult, Debouncer, FileIdMap, new_debouncer,
-    notify::{RecursiveMode, Watcher},
+    DebounceEventResult, Debouncer, FileIdMap, new_debouncer_opt, notify::RecursiveMode,
 };
 use rustls::pki_types::CertificateRevocationListDer;
 use rustls_pemfile::Item;
@@ -214,7 +213,7 @@ impl CrlManager {
 
         // create debouncer with 2-second timeout
         // this collapses multiple events (CREATE/CHMOD/RENAME/REMOVE) into a single reload
-        let mut debouncer = new_debouncer(
+        let mut debouncer = new_debouncer_opt(
             Duration::from_secs(2),
             None,
             move |result: DebounceEventResult| {
@@ -242,12 +241,13 @@ impl CrlManager {
                     }
                 }
             },
+            FileIdMap::new(),
+            Config::default(),
         )
         .map_err(|e| CrlError::ParseError(format!("failed to create debouncer: {}", e)))?;
 
         // start watching the directory
         debouncer
-            .watcher()
             .watch(watch_path, RecursiveMode::NonRecursive)
             .map_err(|e| CrlError::ParseError(format!("failed to watch directory: {}", e)))?;
 

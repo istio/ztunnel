@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: "weekly"
     rebase-strategy: "disabled"
+    ignore:
+      # at present, pprof-rs only works with older builds of criterion
+      - dependency-name: "criterion"
+        versions: [">= 0.6"]
     target-branch: "master"
     groups:
       all-dependencies:
