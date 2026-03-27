@@ -152,7 +152,8 @@ incremental = true
 # Enable testing utils on this crate.
 ztunnel = { version = "0.0.0", path = ".", default-features = false, features = ["testing"] }
 
-criterion = { version = "0.8", features = ["async_tokio", "html_reports"] }
+# presently pprof-rs is pinned to this old version of criterion
+criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
 diff = "0.1"
 local-ip-address = "0.6"
 matches = "0.1"
