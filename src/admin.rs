@@ -690,6 +690,7 @@ mod tests {
                 routing_preference: vec![1, 2],
                 mode: 1,
                 health_policy: 1,
+                dns_connect_strategy: 0,
             }), // ..Default::default() // intentionally don't default. we want all fields populated
             ip_families: 0,
             extensions: Default::default(),
