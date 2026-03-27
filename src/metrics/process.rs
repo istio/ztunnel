@@ -12,15 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(unix)]
 use nix::sys::resource::{Resource, getrlimit};
 use prometheus_client::collector::Collector;
 use prometheus_client::encoding::{DescriptorEncoder, EncodeMetric};
 use prometheus_client::metrics;
+#[cfg(unix)]
 use tracing::error;
 
 // Track open fds
 #[derive(Debug)]
 pub struct ProcessMetrics {}
+
+#[cfg(unix)]
 const FD_PATH: &str = "/dev/fd";
 
 impl ProcessMetrics {
@@ -28,6 +32,7 @@ impl ProcessMetrics {
         Self {}
     }
 
+    #[cfg(unix)]
     fn encode_open_fds(&self, encoder: &mut DescriptorEncoder) -> Result<(), std::fmt::Error> {
         // Count open fds by listing /proc/self/fd
         let open_fds = match std::fs::read_dir(FD_PATH) {
@@ -49,6 +54,7 @@ impl ProcessMetrics {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn encode_max_fds(&self, encoder: &mut DescriptorEncoder) -> Result<(), std::fmt::Error> {
         let fds = match getrlimit(Resource::RLIMIT_NOFILE) {
             Ok((soft_limit, _)) => soft_limit,
@@ -75,6 +81,7 @@ impl Default for ProcessMetrics {
     }
 }
 
+#[cfg(unix)]
 impl Collector for ProcessMetrics {
     fn encode(&self, mut encoder: DescriptorEncoder) -> Result<(), std::fmt::Error> {
         match self.encode_open_fds(&mut encoder) {
@@ -90,6 +97,14 @@ impl Collector for ProcessMetrics {
                 error!("Failed to encode max fds: {}", e);
             }
         }
+        Ok(())
+    }
+}
+
+#[cfg(not(unix))]
+impl Collector for ProcessMetrics {
+    fn encode(&self, _encoder: DescriptorEncoder) -> Result<(), std::fmt::Error> {
+        // Process metrics not available on non-Unix platforms
         Ok(())
     }
 }

@@ -14,6 +14,7 @@
 
 extern crate core;
 
+#[cfg(unix)]
 use nix::sys::resource::{Resource, getrlimit, setrlimit};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -33,8 +34,8 @@ pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0
 // if possible. This is useful for high-load scenarios where the default limit
 // is too low, which can lead to droopped connections and other issues:
 // see: https://github.com/istio/ztunnel/issues/1585
+#[cfg(unix)]
 fn increase_open_files_limit() {
-    #[cfg(unix)]
     if let Ok((soft_limit, hard_limit)) = getrlimit(Resource::RLIMIT_NOFILE) {
         if let Err(e) = setrlimit(Resource::RLIMIT_NOFILE, hard_limit, hard_limit) {
             warn!("failed to set file descriptor limits: {e}");
@@ -47,6 +48,11 @@ fn increase_open_files_limit() {
     } else {
         warn!("failed to get file descriptor limits");
     }
+}
+
+#[cfg(not(unix))]
+fn increase_open_files_limit() {
+    // No-op on non-Unix platforms
 }
 
 fn main() -> anyhow::Result<()> {
