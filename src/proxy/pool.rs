@@ -29,6 +29,7 @@ use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tracing::{Instrument, debug, trace};
 
+use crate::baggage::Baggage;
 use crate::config;
 
 use flurry;
@@ -370,7 +371,7 @@ impl WorkloadHBONEPool {
         &mut self,
         workload_key: &WorkloadKey,
         request: http::Request<()>,
-    ) -> Result<H2Stream, Error> {
+    ) -> Result<(H2Stream, Option<Baggage>), Error> {
         let mut connection = self.connect(workload_key).await?;
 
         connection.send_request(request).await
@@ -599,9 +600,10 @@ mod test {
     }
 
     /// This is really a test for TokioH2Stream, but its nicer here because we have access to
-    /// streams
+    /// streams.
+    /// Most important, we make sure there are no panics.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn small_reads() {
+    async fn read_buffering() {
         let (mut pool, srv) = setup_test(3).await;
 
         let key = key(&srv, 2);
@@ -614,16 +616,31 @@ mod test {
                 .unwrap()
         };
 
-        let c = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
+        let (c, _baggage) = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
         let mut c = TokioH2Stream::new(c);
         c.write_all(b"abcde").await.unwrap();
-        let mut b = [0u8; 0];
-        // Crucially, this should error rather than panic.
-        if let Err(e) = c.read(&mut b).await {
-            assert_eq!(e.kind(), io::ErrorKind::Other);
-        } else {
-            panic!("Should have errored");
-        }
+        let mut b = [0u8; 100];
+        // Properly buffer reads and don't error
+        assert_eq!(c.read(&mut b).await.unwrap(), 8);
+        assert_eq!(&b[..8], b"poolsrv\n"); // this is added by itself
+        assert_eq!(c.read(&mut b[..1]).await.unwrap(), 1);
+        assert_eq!(&b[..1], b"a");
+        assert_eq!(c.read(&mut b[..1]).await.unwrap(), 1);
+        assert_eq!(&b[..1], b"b");
+        assert_eq!(c.read(&mut b[..1]).await.unwrap(), 1);
+        assert_eq!(&b[..1], b"c");
+        assert_eq!(c.read(&mut b).await.unwrap(), 2); // there are only two bytes left
+        assert_eq!(&b[..2], b"de");
+
+        // Once we drop the pool, we should still retained the buffered data,
+        // but then we should error.
+        c.write_all(b"abcde").await.unwrap();
+        assert_eq!(c.read(&mut b[..3]).await.unwrap(), 3);
+        assert_eq!(&b[..3], b"abc");
+        drop(pool);
+        assert_eq!(c.read(&mut b[..2]).await.unwrap(), 2);
+        assert_eq!(&b[..2], b"de");
+        assert!(c.read(&mut b).await.is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

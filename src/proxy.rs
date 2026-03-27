@@ -115,11 +115,10 @@ impl DefaultSocketFactory {
                 .with_time(cfg.keepalive_time)
                 .with_retries(cfg.keepalive_retries)
                 .with_interval(cfg.keepalive_interval);
-            tracing::trace!(
-                "set keepalive: {:?}",
-                socket2::SockRef::from(&s).set_tcp_keepalive(&ka)
-            );
+            let res = socket2::SockRef::from(&s).set_tcp_keepalive(&ka);
+            tracing::trace!("set keepalive: {:?}", res);
         }
+        #[cfg(target_os = "linux")]
         if cfg.user_timeout_enabled {
             self.set_tcp_user_timeout(s)?;
         }
@@ -275,6 +274,7 @@ pub(super) struct ProxyInputs {
     resolver: Option<Arc<dyn Resolver + Send + Sync>>,
     // If true, inbound connections created with these inputs will not attempt to preserve the original source IP.
     pub disable_inbound_freebind: bool,
+    pub(super) crl_manager: Option<Arc<tls::crl::CrlManager>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -288,6 +288,7 @@ impl ProxyInputs {
         resolver: Option<Arc<dyn Resolver + Send + Sync>>,
         local_workload_information: Arc<LocalWorkloadInformation>,
         disable_inbound_freebind: bool,
+        crl_manager: Option<Arc<tls::crl::CrlManager>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             cfg,
@@ -298,6 +299,7 @@ impl ProxyInputs {
             local_workload_information,
             resolver,
             disable_inbound_freebind,
+            crl_manager,
         })
     }
 }
@@ -319,7 +321,7 @@ impl Proxy {
             old_cfg.inbound_addr = inbound.address();
             let mut new_pi = (*pi).clone();
             new_pi.cfg = Arc::new(old_cfg);
-            std::mem::swap(&mut pi, &mut Arc::new(new_pi));
+            pi = Arc::new(new_pi);
             warn!("TEST FAKE: new address is {:?}", pi.cfg.inbound_addr);
         }
 
@@ -386,7 +388,7 @@ impl fmt::Display for AuthorizationRejectionError {
         match self {
             Self::NoWorkload => write!(fmt, "workload not found"),
             Self::WorkloadMismatch => write!(fmt, "workload mismatch"),
-            Self::ExplicitlyDenied(a, b) => write!(fmt, "explicitly denied by: {}/{}", a, b),
+            Self::ExplicitlyDenied(a, b) => write!(fmt, "explicitly denied by: {a}/{b}"),
             Self::NotAllowed => write!(fmt, "allow policies exist, but none allowed"),
         }
     }
@@ -497,6 +499,9 @@ pub enum Error {
     #[error("requested service {0} found, but has no IP addresses")]
     NoIPForService(String),
 
+    #[error("no service for target address: {0}")]
+    NoService(SocketAddr),
+
     #[error(
         "ip addresses were resolved for workload {0}, but valid dns response had no A/AAAA records"
     )]
@@ -568,6 +573,7 @@ pub struct TraceParent {
 
 pub const BAGGAGE_HEADER: &str = "baggage";
 pub const TRACEPARENT_HEADER: &str = "traceparent";
+pub const X_FORWARDED_NETWORK_HEADER: &str = "x-forwarded-network";
 
 impl TraceParent {
     pub fn header(&self) -> hyper::header::HeaderValue {
@@ -857,8 +863,8 @@ impl HboneAddress {
 impl std::fmt::Display for HboneAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HboneAddress::SocketAddr(addr) => write!(f, "{}", addr),
-            HboneAddress::SvcHostname(host, port) => write!(f, "{}:{}", host, port),
+            HboneAddress::SocketAddr(addr) => write!(f, "{addr}"),
+            HboneAddress::SvcHostname(host, port) => write!(f, "{host}:{port}"),
         }
     }
 }

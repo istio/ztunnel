@@ -77,6 +77,7 @@ pub async fn build_with_cert(
 
     // Register metrics.
     let mut registry = Registry::default();
+    register_process_metrics(&mut registry);
     let istio_registry = metrics::sub_registry(&mut registry);
     let _ = metrics::meta::Metrics::new(istio_registry);
     let xds_metrics = xds::Metrics::new(istio_registry);
@@ -250,6 +251,11 @@ pub async fn build_with_cert(
     })
 }
 
+fn register_process_metrics(registry: &mut Registry) {
+    #[cfg(unix)]
+    registry.register_collector(Box::new(metrics::process::ProcessMetrics::new()));
+}
+
 struct DataPlaneTask {
     block_shutdown: bool,
     fut: Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync + 'static>>,
@@ -266,7 +272,8 @@ fn new_data_plane_pool(num_worker_threads: usize) -> mpsc::Sender<DataPlaneTask>
             .thread_name_fn(|| {
                 static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
                 let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-                format!("ztunnel-proxy-{id}")
+                // Thread name can only be 16 chars so keep it short
+                format!("ztunnel-{id}")
             })
             .enable_all()
             .build()

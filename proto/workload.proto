@@ -89,6 +89,10 @@ message Service {
 
   // Extension provides a mechanism to attach arbitrary additional configuration to an object.
   repeated Extension extensions = 10;
+
+  // canonical marks this Service as taking priority during hostname lookups,
+  // when there is not a match in the namespace of the client.
+  bool canonical = 11;
 }
 
 enum IPFamilies {
@@ -143,6 +147,9 @@ message LoadBalancing {
     // 3. Endpoints matching `[NETWORK]`
     // 4. Any endpoints
     FAILOVER = 2;
+    // In PASSTHROUGH mode, endpoint selection will not be done and traffic passes directly through to the original
+    // desitnation address.
+    PASSTHROUGH = 3;
   }
   enum HealthPolicy {
     // Only select healthy endpoints

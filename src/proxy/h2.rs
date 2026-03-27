@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::copy;
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
 use futures_core::ready;
 use h2::Reason;
 use std::io::Error;
@@ -60,7 +60,13 @@ async fn do_ping_pong(
                         // drive_connection() exits first, no need to error again
                         return;
                     }
-                    log::error!("ping error: {e}");
+                    // If this was a broken pipe error, then the connection is already closed and we
+                    // we can't ping it. This isn't an error, but more of a race condition we cannot
+                    // catch.
+                    if Some(std::io::ErrorKind::BrokenPipe) != e.get_io().map(|io| io.kind()) {
+                        log::error!("ping error: {e}");
+                    }
+
                     let _ = tx.send(());
                     return;
                 }
@@ -85,7 +91,10 @@ pub struct H2StreamWriteHalf {
     _dropped: Option<DropCounter>,
 }
 
-pub struct TokioH2Stream(H2Stream);
+pub struct TokioH2Stream {
+    stream: H2Stream,
+    buf: Bytes,
+}
 
 struct DropCounter {
     // Whether the other end of this shared counter has already dropped.
@@ -144,7 +153,10 @@ impl Drop for DropCounter {
 // then the specific implementation will conflict with the generic one.
 impl TokioH2Stream {
     pub fn new(stream: H2Stream) -> Self {
-        Self(stream)
+        Self {
+            stream,
+            buf: Bytes::new(),
+        }
     }
 }
 
@@ -154,24 +166,21 @@ impl tokio::io::AsyncRead for TokioH2Stream {
         cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        let pinned = std::pin::Pin::new(&mut self.0.read);
-        copy::ResizeBufRead::poll_bytes(pinned, cx).map(|r| match r {
-            Ok(bytes) => {
-                if buf.remaining() < bytes.len() {
-                    Err(Error::new(
-                        std::io::ErrorKind::Other,
-                        format!(
-                            "kould overflow buffer of with {} remaining",
-                            buf.remaining()
-                        ),
-                    ))
-                } else {
-                    buf.put(bytes);
-                    Ok(())
-                }
-            }
-            Err(e) => Err(e),
-        })
+        // Just return the bytes we have left over and don't poll the stream because
+        // its unclear what to do if there are bytes left over from the previous read, and when we
+        // poll, we get an error.
+        if self.buf.is_empty() {
+            // If we have no unread bytes, we can poll the stream
+            // and fill self.buf with the bytes we read.
+            let pinned = std::pin::Pin::new(&mut self.stream.read);
+            let res = ready!(copy::ResizeBufRead::poll_bytes(pinned, cx))?;
+            self.buf = res;
+        }
+        // Copy as many bytes as we can from self.buf.
+        let cnt = Ord::min(buf.remaining(), self.buf.len());
+        buf.put_slice(&self.buf[..cnt]);
+        self.buf = self.buf.split_off(cnt);
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -181,7 +190,7 @@ impl tokio::io::AsyncWrite for TokioH2Stream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, tokio::io::Error>> {
-        let pinned = std::pin::Pin::new(&mut self.0.write);
+        let pinned = std::pin::Pin::new(&mut self.stream.write);
         let buf = Bytes::copy_from_slice(buf);
         copy::AsyncWriteBuf::poll_write_buf(pinned, cx, buf)
     }
@@ -190,7 +199,7 @@ impl tokio::io::AsyncWrite for TokioH2Stream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        let pinned = std::pin::Pin::new(&mut self.0.write);
+        let pinned = std::pin::Pin::new(&mut self.stream.write);
         copy::AsyncWriteBuf::poll_flush(pinned, cx)
     }
 
@@ -198,7 +207,7 @@ impl tokio::io::AsyncWrite for TokioH2Stream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        let pinned = std::pin::Pin::new(&mut self.0.write);
+        let pinned = std::pin::Pin::new(&mut self.stream.write);
         copy::AsyncWriteBuf::poll_shutdown(pinned, cx)
     }
 }
@@ -302,6 +311,6 @@ fn h2_to_io_error(e: h2::Error) -> std::io::Error {
     if e.is_io() {
         e.into_io().unwrap()
     } else {
-        std::io::Error::new(std::io::ErrorKind::Other, e)
+        std::io::Error::other(e)
     }
 }

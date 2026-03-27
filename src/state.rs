@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::authpol_log;
 use crate::identity::{Identity, SecretManager};
 use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::rbac::Authorization;
@@ -71,6 +72,12 @@ pub struct Upstream {
     pub service_sans: Vec<Strng>,
     /// If this was from a service, the service info.
     pub destination_service: Option<ServiceDescription>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum UpstreamDestination {
+    UpstreamParts(Arc<Workload>, u16, Option<Arc<Service>>),
+    OriginalDestination,
 }
 
 impl Upstream {
@@ -275,10 +282,14 @@ impl ProxyState {
     }
 
     /// Find services by hostname.
-    pub fn find_service_by_hostname(&self, hostname: &Strng) -> Result<Vec<Arc<Service>>, Error> {
+    pub fn find_service_by_hostname(
+        &self,
+        hostname: &Strng,
+        namespace: &Strng,
+    ) -> Result<Arc<Service>, Error> {
         // Hostnames for services are more common, so lookup service first and fallback to workload.
         self.services
-            .get_by_host(hostname)
+            .get_best_by_host(hostname, Some(namespace))
             .ok_or_else(|| Error::NoHostname(hostname.to_string()))
     }
 
@@ -288,11 +299,16 @@ impl ProxyState {
         source_workload: &Workload,
         addr: SocketAddr,
         resolution_mode: ServiceResolutionMode,
-    ) -> Option<(Arc<Workload>, u16, Option<Arc<Service>>)> {
+    ) -> Option<UpstreamDestination> {
         if let Some(svc) = self
             .services
             .get_by_vip(&network_addr(network.clone(), addr.ip()))
         {
+            if let Some(lb) = &svc.load_balancer
+                && lb.mode == LoadBalancerMode::Passthrough
+            {
+                return Some(UpstreamDestination::OriginalDestination);
+            }
             return self.find_upstream_from_service(
                 source_workload,
                 addr.port(),
@@ -304,7 +320,7 @@ impl ProxyState {
             .workloads
             .find_address(&network_addr(network, addr.ip()))
         {
-            return Some((wl, addr.port(), None));
+            return Some(UpstreamDestination::UpstreamParts(wl, addr.port(), None));
         }
         None
     }
@@ -315,7 +331,7 @@ impl ProxyState {
         svc_port: u16,
         resolution_mode: ServiceResolutionMode,
         svc: Arc<Service>,
-    ) -> Option<(Arc<Workload>, u16, Option<Arc<Service>>)> {
+    ) -> Option<UpstreamDestination> {
         // Randomly pick an upstream
         // TODO: do this more efficiently, and not just randomly
         let Some((ep, wl)) = self.load_balance(source_workload, &svc, svc_port, resolution_mode)
@@ -343,7 +359,11 @@ impl ProxyState {
             return None;
         };
 
-        Some((wl, target_port, Some(svc)))
+        Some(UpstreamDestination::UpstreamParts(
+            wl,
+            target_port,
+            Some(svc),
+        ))
     }
 
     fn load_balance<'a>(
@@ -366,6 +386,19 @@ impl ProxyState {
                 debug!("failed to fetch workload for {}", ep.workload_uid);
                 return None;
             };
+
+            let in_network = wl.network == src.network;
+            let has_network_gateway = wl.network_gateway.is_some();
+            let has_address = !wl.workload_ips.is_empty() || !wl.hostname.is_empty();
+            if !has_address {
+                // Workload has no IP. We can only reach it via a network gateway
+                // WDS is client-agnostic, so we will get a network gateway for a workload
+                // even if it's in the same network; we should never use it.
+                if in_network || !has_network_gateway {
+                    return None;
+                }
+            }
+
             match resolution_mode {
                 ServiceResolutionMode::Standard => {
                     if target_port.unwrap_or_default() == 0 && !ep.port.contains_key(&svc_port) {
@@ -519,7 +552,7 @@ impl DemandProxyState {
         let workload = wl.authorization_policies.iter();
 
         // Aggregate all of them based on type
-        let (allow, deny): (Vec<_>, Vec<_>) = ns
+        let (all_allow, all_deny): (Vec<_>, Vec<_>) = ns
             .iter()
             .chain(global.iter())
             .chain(workload)
@@ -534,6 +567,11 @@ impl DemandProxyState {
             })
             .partition(|p| p.action == rbac::RbacAction::Allow);
 
+        let (deny, deny_dry_run): (Vec<&Authorization>, Vec<&Authorization>) =
+            all_deny.iter().partition(|p| !p.dry_run);
+        let (allow, allow_dry_run): (Vec<&Authorization>, Vec<&Authorization>) =
+            all_allow.iter().partition(|p| !p.dry_run);
+
         trace!(
             allow = allow.len(),
             deny = deny.len(),
@@ -542,10 +580,15 @@ impl DemandProxyState {
 
         // Allow and deny logic follows https://istio.io/latest/docs/reference/config/security/authorization-policy/
 
+        for pol in deny_dry_run.iter() {
+            if pol.matches(conn) {
+                authpol_log!(policy = pol.to_key().as_str(), "dry-run: deny policy match");
+            }
+        }
         // "If there are any DENY policies that match the request, deny the request."
         for pol in deny.iter() {
             if pol.matches(conn) {
-                debug!(policy = pol.to_key().as_str(), "deny policy match");
+                authpol_log!(policy = pol.to_key().as_str(), "deny policy match");
                 return Err(proxy::AuthorizationRejectionError::ExplicitlyDenied(
                     pol.namespace.to_owned(),
                     pol.name.to_owned(),
@@ -554,15 +597,30 @@ impl DemandProxyState {
                 trace!(policy = pol.to_key().as_str(), "deny policy does not match");
             }
         }
+        let mut dry_run_allow_matched = false;
+        for pol in allow_dry_run.iter() {
+            if pol.matches(conn) {
+                dry_run_allow_matched = true;
+                authpol_log!(
+                    policy = pol.to_key().as_str(),
+                    "dry-run: allow policy match"
+                );
+            }
+        }
+        if allow.is_empty() && !allow_dry_run.is_empty() && !dry_run_allow_matched {
+            // this is going to be an allow, but the conn would be denied if dry-run policies
+            // became enforced because none matched
+            authpol_log!("dry-run: no allow policies match");
+        }
         // "If there are no ALLOW policies for the workload, allow the request."
         if allow.is_empty() {
-            debug!("no allow policies, allow");
+            authpol_log!("no allow policies, allow");
             return Ok(());
         }
         // "If any of the ALLOW policies match the request, allow the request."
         for pol in allow.iter() {
             if pol.matches(conn) {
-                debug!(policy = pol.to_key().as_str(), "allow policy match");
+                authpol_log!(policy = pol.to_key().as_str(), "allow policy match");
                 return Ok(());
             } else {
                 trace!(
@@ -572,7 +630,7 @@ impl DemandProxyState {
             }
         }
         // "Deny the request."
-        debug!("no allow policies matched");
+        authpol_log!("no allow policies matched");
         Err(proxy::AuthorizationRejectionError::NotAllowed)
     }
 
@@ -776,10 +834,11 @@ impl DemandProxyState {
         &self,
         source_workload: &Workload,
         original_target_address: SocketAddr,
-        upstream: Option<(Arc<Workload>, u16, Option<Arc<Service>>)>,
+        upstream: Option<UpstreamDestination>,
     ) -> Result<Option<Upstream>, Error> {
-        let Some((wl, port, svc)) = upstream else {
-            return Ok(None);
+        let (wl, port, svc) = match upstream {
+            Some(UpstreamDestination::UpstreamParts(wl, port, svc)) => (wl, port, svc),
+            None | Some(UpstreamDestination::OriginalDestination) => return Ok(None),
         };
         let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
         let ip_family_restriction = svc.as_ref().and_then(|s| s.ip_families);
@@ -842,7 +901,11 @@ impl DemandProxyState {
                         (us, original_destination_address)
                     }
                     Some(Address::Workload(w)) => {
-                        let us = Some((w, gw_address.hbone_mtls_port, None));
+                        let us = Some(UpstreamDestination::UpstreamParts(
+                            w,
+                            gw_address.hbone_mtls_port,
+                            None,
+                        ));
                         (us, original_destination_address)
                     }
                     None => {
@@ -857,7 +920,7 @@ impl DemandProxyState {
         self.finalize_upstream(source_workload, target_address, res)
             .await?
             .ok_or_else(|| {
-                Error::UnknownNetworkGateway(format!("network gateway {:?} not found", gw_address))
+                Error::UnknownNetworkGateway(format!("network gateway {gw_address:?} not found"))
             })
     }
 
@@ -899,7 +962,11 @@ impl DemandProxyState {
                         (us, original_destination_address)
                     }
                     Some(Address::Workload(w)) => {
-                        let us = Some((w, gw_address.hbone_mtls_port, None));
+                        let us = Some(UpstreamDestination::UpstreamParts(
+                            w,
+                            gw_address.hbone_mtls_port,
+                            None,
+                        ));
                         (us, original_destination_address)
                     }
                     None => {
@@ -913,7 +980,7 @@ impl DemandProxyState {
         };
         self.finalize_upstream(source_workload, target_address, res)
             .await?
-            .ok_or_else(|| Error::UnknownWaypoint(format!("waypoint {:?} not found", gw_address)))
+            .ok_or_else(|| Error::UnknownWaypoint(format!("waypoint {gw_address:?} not found")))
     }
 
     pub async fn fetch_service_waypoint(
@@ -1356,26 +1423,28 @@ mod tests {
             _ => ServiceResolutionMode::Standard,
         };
 
-        let (_, port, _) = state
-            .find_upstream("".into(), &wl, "10.0.0.1:80".parse().unwrap(), mode)
-            .expect("upstream to be found");
+        let port = match state.find_upstream("".into(), &wl, "10.0.0.1:80".parse().unwrap(), mode) {
+            Some(UpstreamDestination::UpstreamParts(_, port, _)) => port,
+            _ => panic!("upstream to be found"),
+        };
+
         assert_eq!(port, tc.expected_port());
     }
 
     fn create_workload(dest_uid: u8) -> Workload {
         Workload {
             name: "test".into(),
-            namespace: format!("ns{}", dest_uid).into(),
+            namespace: format!("ns{dest_uid}").into(),
             trust_domain: "cluster.local".into(),
             service_account: "defaultacct".into(),
             workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, dest_uid))],
-            uid: format!("{}", dest_uid).into(),
+            uid: format!("{dest_uid}").into(),
             ..test_helpers::test_default_workload()
         }
     }
 
     fn get_workload(state: &DemandProxyState, dest_uid: u8) -> Arc<Workload> {
-        let key: Strng = format!("{}", dest_uid).into();
+        let key: Strng = format!("{dest_uid}").into();
         state.read().workloads.by_uid[&key].clone()
     }
 
@@ -1384,7 +1453,7 @@ mod tests {
         dest_uid: u8,
         src_svc_acct: &str,
     ) -> crate::state::ProxyRbacContext {
-        let key: Strng = format!("{}", dest_uid).into();
+        let key: Strng = format!("{dest_uid}").into();
         let workload = &state.read().workloads.by_uid[&key];
         crate::state::ProxyRbacContext {
             conn: rbac::Connection {
@@ -1415,6 +1484,17 @@ mod tests {
         )
     }
 
+    fn create_dry_run_wildcard_rbac_policy(action: rbac::RbacAction) -> rbac::Authorization {
+        rbac::Authorization {
+            action,
+            namespace: "ns1".into(),
+            name: "wildcard".into(),
+            rules: vec![vec![]],
+            scope: rbac::RbacScope::Namespace,
+            dry_run: true,
+        }
+    }
+
     // test that we confirm with https://istio.io/latest/docs/reference/config/security/authorization-policy/.
     // We don't test #1 as ztunnel doesn't support custom policies.
     // 1. If there are any CUSTOM policies that match the request, evaluate and deny the request if the evaluation result is deny.
@@ -1427,6 +1507,15 @@ mod tests {
         let mut state = ProxyState::new(None);
         state.workloads.insert(Arc::new(create_workload(1)));
         state.workloads.insert(Arc::new(create_workload(2)));
+        // Dry run policies should have no effect.
+        state.policies.insert(
+            "wildcard-allow".into(),
+            create_dry_run_wildcard_rbac_policy(rbac::RbacAction::Allow),
+        );
+        state.policies.insert(
+            "wildcard-deny".into(),
+            create_dry_run_wildcard_rbac_policy(rbac::RbacAction::Deny),
+        );
         state.policies.insert(
             "allow".into(),
             rbac::Authorization {
@@ -1446,6 +1535,7 @@ mod tests {
                     ],
                 ],
                 scope: rbac::RbacScope::Namespace,
+                dry_run: false,
             },
         );
         state.policies.insert(
@@ -1467,6 +1557,7 @@ mod tests {
                     ],
                 ],
                 scope: rbac::RbacScope::Namespace,
+                dry_run: false,
             },
         );
 
@@ -1529,6 +1620,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assert_rbac_dry_run_with_real_policies() {
+        initialize_telemetry();
+        crate::telemetry::set_level(true, "debug").ok();
+
+        let mut state = ProxyState::new(None);
+        state.workloads.insert(Arc::new(create_workload(1)));
+
+        // Real deny policy that matches denyacct
+        state.policies.insert(
+            "real-deny".into(),
+            rbac::Authorization {
+                action: rbac::RbacAction::Deny,
+                namespace: "ns1".into(),
+                name: "real-deny".into(),
+                rules: vec![vec![vec![rbac::RbacMatch {
+                    principals: vec![StringMatch::Exact(
+                        "cluster.local/ns/default/sa/denyacct".into(),
+                    )],
+                    ..Default::default()
+                }]]],
+                scope: rbac::RbacScope::Namespace,
+                dry_run: false,
+            },
+        );
+
+        // Dry-run deny policy that matches both defaultacct and denyacct
+        state.policies.insert(
+            "dry-run-deny".into(),
+            rbac::Authorization {
+                action: rbac::RbacAction::Deny,
+                namespace: "ns1".into(),
+                name: "dry-run-deny".into(),
+                rules: vec![
+                    vec![vec![rbac::RbacMatch {
+                        principals: vec![StringMatch::Exact(
+                            "cluster.local/ns/default/sa/defaultacct".into(),
+                        )],
+                        ..Default::default()
+                    }]],
+                    vec![vec![rbac::RbacMatch {
+                        principals: vec![StringMatch::Exact(
+                            "cluster.local/ns/default/sa/denyacct".into(),
+                        )],
+                        ..Default::default()
+                    }]],
+                ],
+                scope: rbac::RbacScope::Namespace,
+                dry_run: true,
+            },
+        );
+
+        // Real allow policy that matches defaultacct
+        state.policies.insert(
+            "real-allow".into(),
+            rbac::Authorization {
+                action: rbac::RbacAction::Allow,
+                namespace: "ns1".into(),
+                name: "real-allow".into(),
+                rules: vec![vec![vec![rbac::RbacMatch {
+                    principals: vec![StringMatch::Exact(
+                        "cluster.local/ns/default/sa/defaultacct".into(),
+                    )],
+                    ..Default::default()
+                }]]],
+                scope: rbac::RbacScope::Namespace,
+                dry_run: false,
+            },
+        );
+
+        // Dry-run allow policy that matches defaultacct
+        state.policies.insert(
+            "dry-run-allow".into(),
+            rbac::Authorization {
+                action: rbac::RbacAction::Allow,
+                namespace: "ns1".into(),
+                name: "dry-run-allow".into(),
+                rules: vec![vec![vec![rbac::RbacMatch {
+                    principals: vec![StringMatch::Exact(
+                        "cluster.local/ns/default/sa/defaultacct".into(),
+                    )],
+                    ..Default::default()
+                }]]],
+                scope: rbac::RbacScope::Namespace,
+                dry_run: true,
+            },
+        );
+
+        let mock_proxy_state = create_state(state);
+
+        let ctx = get_rbac_context(&mock_proxy_state, 1, "defaultacct");
+        assert!(mock_proxy_state.assert_rbac(&ctx).await.is_ok());
+
+        crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
+            ("policy", "ns1/dry-run-deny"),
+            ("message", "dry-run: deny policy match"),
+        ]));
+        crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
+            ("policy", "ns1/dry-run-allow"),
+            ("message", "dry-run: allow policy match"),
+        ]));
+    }
+
+    #[tokio::test]
     async fn test_load_balance() {
         initialize_telemetry();
         let mut state = ProxyState::new(None);
@@ -1571,6 +1765,22 @@ mod tests {
             },
             ..test_helpers::test_default_workload()
         };
+        let wl_empty_ip = Workload {
+            uid: "cluster1//v1/Pod/default/wl_empty_ip".into(),
+            name: "wl_empty_ip".into(),
+            namespace: "default".into(),
+            trust_domain: "cluster.local".into(),
+            service_account: "default".into(),
+            workload_ips: vec![], // none!
+            network: "network".into(),
+            locality: Locality {
+                region: "reg".into(),
+                zone: "zone".into(),
+                subzone: "".into(),
+            },
+            ..test_helpers::test_default_workload()
+        };
+
         let _ep_almost = Workload {
             uid: "cluster1//v1/Pod/default/ep_almost".into(),
             name: "wl_almost".into(),
@@ -1617,6 +1827,11 @@ mod tests {
                 port: HashMap::from([(80u16, 80u16)]),
                 status: HealthStatus::Healthy,
             },
+            Endpoint {
+                workload_uid: "cluster1//v1/Pod/default/wl_empty_ip".into(),
+                port: HashMap::from([(80u16, 80u16)]),
+                status: HealthStatus::Healthy,
+            },
         ]);
         let strict_svc = Service {
             endpoints: endpoints.clone(),
@@ -1649,6 +1864,7 @@ mod tests {
         state.workloads.insert(Arc::new(wl_no_locality.clone()));
         state.workloads.insert(Arc::new(wl_match.clone()));
         state.workloads.insert(Arc::new(wl_almost.clone()));
+        state.workloads.insert(Arc::new(wl_empty_ip.clone()));
         state.services.insert(strict_svc.clone());
         state.services.insert(failover_svc.clone());
 
@@ -1663,6 +1879,15 @@ mod tests {
                 assert!(want.contains(&got.unwrap()), "{}", desc);
             }
         };
+        let assert_not_endpoint =
+            |src: &Workload, svc: &Service, uid: &str, tries: usize, desc: &str| {
+                for _ in 0..tries {
+                    let got = state
+                        .load_balance(src, svc, 80, ServiceResolutionMode::Standard)
+                        .map(|(ep, _)| ep.workload_uid.as_str());
+                    assert!(got != Some(uid), "{}", desc);
+                }
+            };
 
         assert_endpoint(
             &wl_no_locality,
@@ -1707,6 +1932,13 @@ mod tests {
             &failover_svc,
             vec!["cluster1//v1/Pod/default/wl_match"],
             "failover full match selects closest match",
+        );
+        assert_not_endpoint(
+            &wl_no_locality,
+            &failover_svc,
+            "cluster1//v1/Pod/default/wl_empty_ip",
+            10,
+            "failover no match can select any endpoint",
         );
     }
 }

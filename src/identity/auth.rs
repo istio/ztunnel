@@ -58,10 +58,7 @@ async fn load_token(path: &PathBuf) -> io::Result<Vec<u8>> {
     let t = tokio::fs::read(path).await?;
 
     if t.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "token file exists, but was empty",
-        ));
+        return Err(io::Error::other("token file exists, but was empty"));
     }
     Ok(t)
 }

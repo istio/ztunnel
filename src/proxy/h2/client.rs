@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::baggage::{Baggage, parse_baggage_header};
 use crate::config;
 use crate::identity::Identity;
-use crate::proxy::Error;
+use crate::proxy::{BAGGAGE_HEADER, Error};
 use bytes::{Buf, Bytes};
 use h2::SendStream;
 use h2::client::{Connection, SendRequest};
@@ -101,10 +102,10 @@ impl H2ConnectClient {
     pub async fn send_request(
         &mut self,
         req: http::Request<()>,
-    ) -> Result<crate::proxy::h2::H2Stream, Error> {
+    ) -> Result<(crate::proxy::h2::H2Stream, Option<Baggage>), Error> {
         let cur = self.stream_count.fetch_add(1, Ordering::SeqCst);
         trace!(current_streams = cur, "sending request");
-        let (send, recv) = match self.internal_send(req).await {
+        let (send, recv, baggage) = match self.internal_send(req).await {
             Ok(r) => r,
             Err(e) => {
                 // Request failed, so drop the stream now
@@ -123,14 +124,14 @@ impl H2ConnectClient {
             _dropped: dropped2,
         };
         let h2 = crate::proxy::h2::H2Stream { read, write };
-        Ok(h2)
+        Ok((h2, baggage))
     }
 
     // helper to allow us to handle errors once
     async fn internal_send(
         &mut self,
         req: Request<()>,
-    ) -> Result<(SendStream<Bytes>, h2::RecvStream), Error> {
+    ) -> Result<(SendStream<Bytes>, h2::RecvStream, Option<Baggage>), Error> {
         // "This function must return `Ready` before `send_request` is called"
         // We should always be ready though, because we make sure we don't go over the max stream limit out of band.
         futures::future::poll_fn(|cx| self.sender.poll_ready(cx)).await?;
@@ -139,7 +140,8 @@ impl H2ConnectClient {
         if response.status() != 200 {
             return Err(Error::HttpStatus(response.status()));
         }
-        Ok((stream, response.into_body()))
+        let baggage = parse_baggage_header(response.headers().get_all(BAGGAGE_HEADER)).ok();
+        Ok((stream, response.into_body(), baggage))
     }
 }
 

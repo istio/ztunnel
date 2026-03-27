@@ -131,7 +131,7 @@ struct HandlerWrapper<T: prost::Message> {
     h: Box<dyn Handler<T>>,
 }
 
-impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
+impl<T: 'static + fmt::Debug + prost::Message + Default> RawHandler for HandlerWrapper<T> {
     fn handle(
         &self,
         state: &mut State,
@@ -270,7 +270,7 @@ impl Config {
 
     pub fn with_watched_handler<F>(self, type_url: Strng, f: impl Handler<F>) -> Config
     where
-        F: 'static + prost::Message + Default,
+        F: 'static + fmt::Debug + prost::Message + Default,
     {
         let no_on_demand = f.no_on_demand();
         self.with_handler(type_url.clone(), f)
@@ -279,7 +279,7 @@ impl Config {
 
     fn with_handler<F>(mut self, type_url: Strng, f: impl Handler<F>) -> Config
     where
-        F: 'static + prost::Message + Default,
+        F: 'static + fmt::Debug + prost::Message + Default,
     {
         let h = HandlerWrapper { h: Box::new(f) };
         self.handlers.insert(type_url, Box::new(h));
@@ -667,14 +667,13 @@ impl AdsClient {
                     if !self.types_to_expect.is_empty() {
                         received_type = Some(msg.type_url.clone())
                     }
-                    if let XdsSignal::Ack = self.handle_stream_event(msg, &discovery_req_tx).await? {
-                        if let Some(received_type) = received_type {
+                    if let XdsSignal::Ack = self.handle_stream_event(msg, &discovery_req_tx).await?
+                        && let Some(received_type) = received_type {
                             self.types_to_expect.remove(&received_type);
                             if self.types_to_expect.is_empty() {
                                 mem::drop(mem::take(&mut self.block_ready));
                             }
-                        }
-                    };
+                        };
                 }
             }
         }
@@ -688,7 +687,7 @@ impl AdsClient {
         let type_url = response.type_url.clone();
         let nonce = response.nonce.clone();
         self.metrics.record(&response, ());
-        info!(
+        debug!(
             type_url = type_url, // this is a borrow, it's OK
             size = response.resources.len(),
             removes = response.removed_resources.len(),
@@ -877,7 +876,7 @@ mod tests {
 
     fn get_auth(i: usize) -> ProtoResource {
         let addr = XdsAuthorization {
-            name: format!("foo{}", i),
+            name: format!("foo{i}"),
             namespace: "default".to_string(),
             scope: crate::xds::istio::security::Scope::Global as i32,
             action: crate::xds::istio::security::Action::Deny as i32,
@@ -889,9 +888,10 @@ mod tests {
                     }],
                 }],
             }],
+            dry_run: false,
         };
         ProtoResource {
-            name: format!("foo{}", i),
+            name: format!("foo{i}"),
             aliases: vec![],
             version: "0.0.1".to_string(),
             resource: Some(Any {
@@ -909,8 +909,8 @@ mod tests {
         };
         let addr = XdsAddress {
             r#type: Some(XdsType::Workload(XdsWorkload {
-                name: format!("foo{}", i),
-                uid: format!("default/foo{}", i),
+                name: format!("foo{i}"),
+                uid: format!("default/foo{i}"),
                 namespace: "default".to_string(),
                 addresses: vec![octets.into()],
                 tunnel_protocol: 0,
@@ -925,7 +925,7 @@ mod tests {
         };
 
         ProtoResource {
-            name: format!("foo{}", i),
+            name: format!("foo{i}"),
             aliases: vec![],
             version: "0.0.1".to_string(),
             resource: Some(Any {

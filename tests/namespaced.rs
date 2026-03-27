@@ -296,7 +296,7 @@ mod namespaced {
         let want = HashMap::from([
             ("scope", "access"),
             ("src.workload", "client"),
-            ("dst.workload", "actual-ew-gtw"),
+            ("dst.workload", "echo"),
             ("dst.hbone_addr", "remote.default.svc.cluster.local:8080"),
             ("dst.addr", &dst_addr),
             ("bytes_sent", &sent),
@@ -307,10 +307,7 @@ mod namespaced {
                 "src.identity",
                 "spiffe://cluster.local/ns/default/sa/client",
             ),
-            (
-                "dst.identity",
-                "spiffe://cluster.local/ns/default/sa/actual-ew-gtw",
-            ),
+            ("dst.identity", "spiffe://cluster.local/ns/default/sa/echo"),
         ]);
         telemetry::testing::assert_contains(want);
         Ok(())
@@ -997,6 +994,7 @@ mod namespaced {
                     )],
                     ..Default::default()
                 }]]],
+                dry_run: false,
             })
             .await?;
         let _ = manager
@@ -1430,7 +1428,7 @@ mod namespaced {
         // Use the actual metrics address ztunnel is listening on (e.g., [::]:15020)
         // but combine it with the node IP for the client to target.
         let target_metrics_addr = SocketAddr::new(ztunnel_node_ip, zt.metrics_address.port());
-        let target_metrics_url = format!("http://{}/metrics", target_metrics_addr);
+        let target_metrics_url = format!("http://{target_metrics_addr}/metrics");
 
         // Deploy a client workload (simulating Prometheus)
         let client = manager
@@ -1469,8 +1467,7 @@ mod namespaced {
 
                 assert!(
                     response_str.contains("# TYPE"),
-                    "Expected Prometheus metrics (# TYPE) in response, got:\n{}",
-                    response_str
+                    "Expected Prometheus metrics (# TYPE) in response, got:\n{response_str}",
                 );
                 info!("Successfully verified metrics response body");
 
@@ -1487,8 +1484,8 @@ mod namespaced {
         verify_metrics(&zt, &metrics, &destination_labels()).await;
 
         // Verify INBOUND telemetry log for the metrics connection
-        let dst_addr_log = format!("{}:15008", ztunnel_node_ip);
-        let dst_hbone_addr_log = format!("{}", target_metrics_addr);
+        let dst_addr_log = format!("{ztunnel_node_ip}:15008");
+        let dst_hbone_addr_log = format!("{target_metrics_addr}");
 
         // We don't know exact byte counts, so omit them from the check for now
         let want = HashMap::from([

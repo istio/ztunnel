@@ -37,7 +37,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use tracing::debug;
 
 pub fn uid(i: usize) -> crate::inpod::WorkloadUid {
-    crate::inpod::WorkloadUid::new(format!("uid{}", i))
+    crate::inpod::WorkloadUid::new(format!("uid{i}"))
 }
 
 pub struct Fixture {
@@ -138,7 +138,7 @@ pub async fn read_msg(s: &mut UnixStream) -> WorkloadResponse {
     debug!("read {} bytes", read_amount);
 
     let ret = WorkloadResponse::decode(&buf[..read_amount])
-        .unwrap_or_else(|_| panic!("failed to decode. read amount: {}", read_amount));
+        .unwrap_or_else(|_| panic!("failed to decode. read amount: {read_amount}"));
 
     debug!("decoded {:?}", ret);
     ret

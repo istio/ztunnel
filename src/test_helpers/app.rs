@@ -107,7 +107,7 @@ impl TestApp {
         let get_resp = move || async move {
             let req = Request::builder()
                 .method(Method::GET)
-                .uri(format!("http://localhost:{}/{path}", port))
+                .uri(format!("http://localhost:{port}/{path}"))
                 .header("content-type", "application/json")
                 .body(Empty::<Bytes>::new())
                 .unwrap();
@@ -125,11 +125,8 @@ impl TestApp {
             }
             None => get_resp().await,
         }
-
         #[cfg(not(target_os = "linux"))]
-        {
-            get_resp().await
-        }
+        get_resp().await
     }
     pub async fn admin_request_body(&self, path: &str) -> anyhow::Result<Bytes> {
         let port = self.admin_address.port();
@@ -138,7 +135,7 @@ impl TestApp {
         let get_resp = move || async move {
             let req = Request::builder()
                 .method(Method::GET)
-                .uri(format!("http://localhost:{}/{path}", port))
+                .uri(format!("http://localhost:{port}/{path}"))
                 .header("content-type", "application/json")
                 .body(Empty::<Bytes>::new())
                 .unwrap();
@@ -152,11 +149,8 @@ impl TestApp {
             Some(ref ns) => ns.clone().run(get_resp)?.join().unwrap(),
             None => get_resp().await,
         }
-
         #[cfg(not(target_os = "linux"))]
-        {
-            get_resp().await
-        }
+        get_resp().await
     }
 
     pub async fn metrics(&self) -> anyhow::Result<ParsedMetrics> {

@@ -298,6 +298,8 @@ pub async fn run_dns(responses: HashMap<Name, Vec<IpAddr>>) -> anyhow::Result<Te
             }),
             state.clone(),
         ),
+        Some("prefered-namespace".to_string()),
+        true, // ipv6_enabled for tests
     )
     .await?;
 

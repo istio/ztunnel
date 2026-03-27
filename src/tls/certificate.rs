@@ -23,7 +23,7 @@ use rustls::client::Resumption;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use rustls::server::WebPkiClientVerifier;
-use rustls::{ClientConfig, RootCertStore, ServerConfig, server};
+use rustls::{ClientConfig, CommonState, RootCertStore, ServerConfig};
 use rustls_pemfile::Item;
 use std::io::Cursor;
 use std::str::FromStr;
@@ -36,8 +36,8 @@ use x509_parser::certificate::X509Certificate;
 
 #[derive(Clone, Debug)]
 pub struct Certificate {
-    pub(in crate::tls) expiry: Expiration,
-    der: CertificateDer<'static>,
+    pub expiry: Expiration,
+    pub der: CertificateDer<'static>,
 }
 
 #[derive(Clone, Debug)]
@@ -52,7 +52,7 @@ pub struct WorkloadCertificate {
     pub cert: Certificate,
     /// chain is the entire trust chain, excluding the leaf and root
     pub chain: Vec<Certificate>,
-    pub(in crate::tls) private_key: PrivateKeyDer<'static>,
+    pub private_key: PrivateKeyDer<'static>,
 
     /// precomputed roots. This is used for verification
     root_store: Arc<RootCertStore>,
@@ -60,7 +60,7 @@ pub struct WorkloadCertificate {
     pub roots: Vec<Certificate>,
 }
 
-pub fn identity_from_connection(conn: &server::ServerConnection) -> Option<Identity> {
+pub fn identity_from_connection(conn: &CommonState) -> Option<Identity> {
     use x509_parser::prelude::*;
     conn.peer_certificates()
         .and_then(|certs| certs.first())
@@ -110,7 +110,7 @@ pub fn identities(cert: X509Certificate) -> Result<Vec<Identity>, Error> {
 
 impl Certificate {
     // TODO: I would love to parse this once, but ran into lifetime issues.
-    fn parsed(&self) -> X509Certificate {
+    fn parsed(&self) -> X509Certificate<'_> {
         x509_parser::parse_x509_certificate(&self.der)
             .expect("certificate was already parsed successfully before")
             .1
@@ -298,20 +298,35 @@ impl WorkloadCertificate {
             .collect()
     }
 
-    pub fn server_config(&self) -> Result<ServerConfig, Error> {
+    pub fn server_config(
+        &self,
+        crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
+    ) -> Result<ServerConfig, Error> {
         let td = self.cert.identity().map(|i| match i {
             Identity::Spiffe { trust_domain, .. } => trust_domain,
         });
-        let raw_client_cert_verifier = WebPkiClientVerifier::builder_with_provider(
+
+        // build the base client cert verifier with optional CRL support
+        let mut builder = WebPkiClientVerifier::builder_with_provider(
             self.root_store.clone(),
             crate::tls::lib::provider(),
-        )
-        .build()?;
+        );
+
+        // add CRLs if available
+        if let Some(ref mgr) = crl_manager {
+            let crls = mgr.get_crl_ders();
+            if !crls.is_empty() {
+                builder = builder.with_crls(crls).allow_unknown_revocation_status(); // fail-open for unknown status
+            }
+        }
+
+        // TODO: check if our own certificate is revoked in the CRL and log warning
+        let raw_client_cert_verifier = builder.build()?;
 
         let client_cert_verifier =
             crate::tls::workload::TrustDomainVerifier::new(raw_client_cert_verifier, td);
         let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
-            .with_protocol_versions(tls::TLS_VERSIONS)
+            .with_protocol_versions(tls::tls_versions())
             .expect("server config must be valid")
             .with_client_cert_verifier(client_cert_verifier)
             .with_single_cert(
@@ -322,11 +337,13 @@ impl WorkloadCertificate {
         Ok(sc)
     }
 
-    pub fn outbound_connector(&self, identity: Vec<Identity>) -> Result<OutboundConnector, Error> {
+    // TODO: add CRL support for outbound connections (client verifying server certs)
+    // this requires a separate design due to complexity - deferred for follow-up
+    pub fn client_config(&self, identity: Vec<Identity>) -> Result<ClientConfig, rustls::Error> {
         let roots = self.root_store.clone();
         let verifier = IdentityVerifier { roots, identity };
         let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
-            .with_protocol_versions(tls::TLS_VERSIONS)
+            .with_protocol_versions(tls::tls_versions())
             .expect("client config must be valid")
             .dangerous() // Customer verifier is requires "dangerous" opt-in
             .with_custom_certificate_verifier(Arc::new(verifier))
@@ -337,6 +354,11 @@ impl WorkloadCertificate {
         cc.alpn_protocols = vec![b"h2".into()];
         cc.resumption = Resumption::disabled();
         cc.enable_sni = false;
+        Ok(cc)
+    }
+
+    pub fn outbound_connector(&self, identity: Vec<Identity>) -> Result<OutboundConnector, Error> {
+        let cc = self.client_config(identity)?;
         Ok(OutboundConnector {
             client_config: Arc::new(cc),
         })
@@ -428,7 +450,6 @@ mod test {
             SystemTime::now() + Duration::from_secs(60),
             None,
             TEST_ROOT_KEY,
-            TEST_ROOT,
         );
         let cert1 =
             WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![&joined]).unwrap();
@@ -440,13 +461,12 @@ mod test {
             SystemTime::now() + Duration::from_secs(60),
             None,
             TEST_ROOT2_KEY,
-            TEST_ROOT2,
         );
         let cert2 =
             WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![&joined]).unwrap();
 
         // Do a simple handshake between them; we should be able to accept the trusted root
-        let server = cert1.server_config().unwrap();
+        let server = cert1.server_config(None).unwrap();
         let tls = TlsAcceptor::from(Arc::new(server));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

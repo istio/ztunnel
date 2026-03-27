@@ -231,12 +231,12 @@ impl ConnectionManager {
     // uses a counter to determine if there are other tracked connections or not so it may retain the tx/rx channels when necessary
     pub fn release(&self, c: &InboundConnection) {
         let mut drains = self.drains.write().expect("mutex");
-        if let Some((k, mut v)) = drains.remove_entry(c) {
-            if v.count > 1 {
-                // something else is tracking this connection, decrement count but retain
-                v.count -= 1;
-                drains.insert(k, v);
-            }
+        if let Some((k, mut v)) = drains.remove_entry(c)
+            && v.count > 1
+        {
+            // something else is tracking this connection, decrement count but retain
+            v.count -= 1;
+            drains.insert(k, v);
         }
     }
 
@@ -631,6 +631,7 @@ mod tests {
             scope: Scope::Global as i32,
             namespace: auth_namespace.into(),
             rules: vec![],
+            dry_run: false,
         };
         let mut auth_xds_name = String::with_capacity(1 + auth_namespace.len() + auth_name.len());
         auth_xds_name.push_str(auth_namespace);

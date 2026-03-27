@@ -43,10 +43,11 @@ impl InboundPassthrough {
         pi: Arc<ProxyInputs>,
         drain: DrainWatcher,
     ) -> Result<InboundPassthrough, Error> {
-        let listener = pi
+        let mut listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.inbound_plaintext_addr)
             .map_err(|e| Error::Bind(pi.cfg.inbound_plaintext_addr, e))?;
+        listener.set_socket_options(Some(pi.cfg.socket_config));
 
         let enable_orig_src = super::maybe_set_transparent(&pi, &listener)?;
 
@@ -76,7 +77,17 @@ impl InboundPassthrough {
                 let pi = self.pi.clone();
                 match socket {
                     Ok((stream, remote)) => {
+                        let socket_labels = metrics::SocketLabels {
+                            reporter: Reporter::destination,
+                        };
+                        pi.metrics.record_socket_open(&socket_labels);
+
+                        let metrics_for_socket_close = pi.metrics.clone();
                         let serve_client = async move {
+                            let _socket_guard = metrics::SocketCloseGuard::new(
+                                metrics_for_socket_close,
+                                Reporter::destination,
+                            );
                             debug!(component="inbound passthrough", "connection started");
                                 // Since this task is spawned, make sure we are guaranteed to terminate
                             tokio::select! {
@@ -178,21 +189,24 @@ impl InboundPassthrough {
             upstream_services,
             &upstream_workload,
         );
-        let result_tracker = Box::new(metrics::ConnectionResult::new(
-            source_addr,
-            dest_addr,
-            None,
-            start,
-            metrics::ConnectionOpen {
-                reporter: Reporter::destination,
-                source: source_workload,
-                derived_source: Some(derived_source),
-                destination: Some(upstream_workload),
-                connection_security_policy: metrics::SecurityPolicy::unknown,
-                destination_service: ds,
-            },
-            pi.metrics.clone(),
-        ));
+        let result_tracker = Box::new(
+            metrics::ConnectionResultBuilder::new(
+                source_addr,
+                dest_addr,
+                None,
+                start,
+                metrics::ConnectionOpen {
+                    reporter: Reporter::destination,
+                    source: source_workload,
+                    derived_source: Some(derived_source),
+                    destination: Some(upstream_workload),
+                    connection_security_policy: metrics::SecurityPolicy::unknown,
+                    destination_service: ds,
+                },
+                pi.metrics.clone(),
+            )
+            .build(),
+        );
 
         let mut conn_guard = match pi
             .connection_manager

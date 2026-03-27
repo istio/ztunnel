@@ -103,18 +103,12 @@ fn content_type<T>(req: &Request<T>) -> &str {
     req.headers()
         .get_all(http::header::ACCEPT)
         .iter()
-        .find_map(|v| {
-            match v
-                .to_str()
-                .unwrap_or_default()
-                .to_lowercase()
-                .split(";")
-                .collect::<Vec<_>>()
-                .first()
-            {
-                Some(&"application/openmetrics-text") => Some(ContentType::OpenMetrics),
-                _ => None,
-            }
+        .flat_map(|entry| entry.to_str().ok())
+        // get_all can return multiple in one line still
+        .flat_map(|entry| entry.split(",").map(|entry| entry.to_lowercase()))
+        .find_map(|v| match v.split(";").collect::<Vec<_>>().first() {
+            Some(&"application/openmetrics-text") => Some(ContentType::OpenMetrics),
+            _ => None,
         })
         .unwrap_or_default()
         .into()
@@ -138,6 +132,16 @@ mod test {
             .unwrap();
         assert_eq!(
             super::content_type(&openmetrics_req),
+            "application/openmetrics-text;charset=utf-8;version=1.0.0"
+        );
+
+        let mixed_req = http::Request::builder()
+          .header("X-Custom-Beep", "boop")
+          .header("Accept", "application/vnd.google.protobuf;proto=io.prometheus.client.MetricFamily;encoding=delimited;q=0.6,application/openmetrics-text;version=1.0.0;escaping=allow-utf-8;q=0.5,application/openmetrics-text;version=0.0.1;q=0.4,text/plain;version=1.0.0;escaping=allow-utf-8;q=0.3,text/plain;version=0.0.4;q=0.2,*/*;q=0.1")
+          .body("I would like openmetrics")
+          .unwrap();
+        assert_eq!(
+            super::content_type(&mixed_req),
             "application/openmetrics-text;charset=utf-8;version=1.0.0"
         );
 

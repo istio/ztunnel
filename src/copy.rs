@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::proxy;
-use crate::proxy::ConnectionResult;
 use crate::proxy::Error::{BackendDisconnected, ClientDisconnected, ReceiveError, SendError};
+use crate::proxy::{self, ConnectionResult};
 use bytes::{Buf, Bytes, BytesMut};
 use pin_project_lite::pin_project;
 use std::future::Future;
@@ -416,9 +415,9 @@ mod tests {
             let metrics = std::sync::Arc::new(crate::proxy::Metrics::new(
                 crate::metrics::sub_registry(&mut registry),
             ));
-            let source_addr = "127.0.0.1:12345".parse().unwrap();
-            let dest_addr = "127.0.0.1:34567".parse().unwrap();
-            let cr = ConnectionResult::new(
+            let source_addr: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+            let dest_addr: std::net::SocketAddr = "127.0.0.1:34567".parse().unwrap();
+            let cr = crate::proxy::metrics::ConnectionResultBuilder::new(
                 source_addr,
                 dest_addr,
                 None,
@@ -432,7 +431,8 @@ mod tests {
                     destination_service: None,
                 },
                 metrics.clone(),
-            );
+            )
+            .build();
             copy_bidirectional(ztunnel_downsteam, ztunnel_upsteam, &cr).await
         });
         const ITERS: usize = 1000;
@@ -461,9 +461,9 @@ mod tests {
             let metrics = std::sync::Arc::new(crate::proxy::Metrics::new(
                 crate::metrics::sub_registry(&mut registry),
             ));
-            let source_addr = "127.0.0.1:12345".parse().unwrap();
-            let dest_addr = "127.0.0.1:34567".parse().unwrap();
-            let cr = ConnectionResult::new(
+            let source_addr: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+            let dest_addr: std::net::SocketAddr = "127.0.0.1:34567".parse().unwrap();
+            let cr = crate::proxy::metrics::ConnectionResultBuilder::new(
                 source_addr,
                 dest_addr,
                 None,
@@ -477,7 +477,8 @@ mod tests {
                     destination_service: None,
                 },
                 metrics.clone(),
-            );
+            )
+            .build();
             copy_bidirectional(WeirdIO(ztunnel_downsteam), WeirdIO(ztunnel_upsteam), &cr).await
         });
         const WRITES: usize = 2560;
