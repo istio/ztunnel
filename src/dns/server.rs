@@ -368,6 +368,8 @@ impl Store {
                     .get_by_host(&search_name_str)
                     .into_iter()
                     .flatten()
+                    // Filter by namespace visibility (exportTo enforcement).
+                    .filter(|service| service.is_visible_to(&client.namespace))
                     // Remove things without a VIP, unless they are Kubernetes headless services.
                     // This will trigger us to forward upstream.
                     // TODO: we should have a reliable way to distinguish these. In sidecars, we use
