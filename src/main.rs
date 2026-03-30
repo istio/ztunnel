@@ -14,8 +14,10 @@
 
 extern crate core;
 
+#[cfg(unix)]
+use nix::sys::resource::{Resource, getrlimit, setrlimit};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 use ztunnel::*;
 
 #[cfg(feature = "jemalloc")]
@@ -27,6 +29,31 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[allow(non_upper_case_globals)]
 #[unsafe(export_name = "malloc_conf")]
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
+
+// We use this on Unix systems to increase the number of open file descriptors
+// if possible. This is useful for high-load scenarios where the default limit
+// is too low, which can lead to droopped connections and other issues:
+// see: https://github.com/istio/ztunnel/issues/1585
+#[cfg(unix)]
+fn increase_open_files_limit() {
+    if let Ok((soft_limit, hard_limit)) = getrlimit(Resource::RLIMIT_NOFILE) {
+        if let Err(e) = setrlimit(Resource::RLIMIT_NOFILE, hard_limit, hard_limit) {
+            warn!("failed to set file descriptor limits: {e}");
+        } else {
+            info!(
+                "set file descriptor limits from {} to {}",
+                soft_limit, hard_limit
+            );
+        }
+    } else {
+        warn!("failed to get file descriptor limits");
+    }
+}
+
+#[cfg(not(unix))]
+fn increase_open_files_limit() {
+    // No-op on non-Unix platforms
+}
 
 fn main() -> anyhow::Result<()> {
     let _log_flush = telemetry::setup_logging();
@@ -74,6 +101,7 @@ fn version() -> anyhow::Result<()> {
 
 async fn proxy(cfg: Arc<config::Config>) -> anyhow::Result<()> {
     info!("version: {}", version::BuildInfo::new());
+    increase_open_files_limit();
     info!("running with config: {}", serde_yaml::to_string(&cfg)?);
     app::build(cfg).await?.wait_termination().await
 }

@@ -30,6 +30,8 @@ use crate::xds::{Handler, LocalConfig, LocalWorkload, ProxyStateUpdater, XdsReso
 use anyhow::anyhow;
 use bytes::{BufMut, Bytes};
 use hickory_resolver::config::*;
+use std::io::Write;
+use tempfile::NamedTempFile;
 
 use crate::{state, strng};
 use http_body_util::{BodyExt, Full};
@@ -169,6 +171,11 @@ pub const TEST_SERVICE_HOST: &str = "local-vip.default.svc.cluster.local";
 pub const TEST_SERVICE_DNS_HBONE_NAME: &str = "local-vip-async-dns";
 pub const TEST_SERVICE_DNS_HBONE_HOST: &str = "local-vip-async-dns.default.svc.cluster.local";
 
+// Embedded test data - available when running binary outside source tree
+pub const FAKE_JWT: &str = include_str!("test_helpers/fake-jwt");
+pub const MESH_CONFIG_YAML: &str = include_str!("test_helpers/mesh_config.yaml");
+pub const LOCALHOST_YAML: &str = include_str!("../examples/localhost.yaml");
+
 pub fn localhost_error_message() -> String {
     let addrs = &[
         TEST_WORKLOAD_SOURCE,
@@ -177,10 +184,9 @@ pub fn localhost_error_message() -> String {
         TEST_VIP,
     ];
     format!(
-        "These tests use the following loopback addresses: {:?}. \
+        "These tests use the following loopback addresses: {addrs:?}. \
     Your OS may require an explicit alias for each. If so, you'll need to manually \
     configure your system for each IP (e.g. `sudo ifconfig lo0 alias 127.0.0.2 up`).",
-        addrs
     )
 }
 
@@ -204,6 +210,7 @@ pub fn mock_default_service() -> Service {
         waypoint: None,
         load_balancer: None,
         ip_families: None,
+        canonical: true,
     }
 }
 
@@ -247,7 +254,7 @@ fn test_custom_workload(
     hostname_only: bool,
 ) -> anyhow::Result<LocalWorkload> {
     let host = match hostname_only {
-        true => format!("{}.reflect.internal.", ip_str),
+        true => format!("{ip_str}.reflect.internal."),
         false => "".to_string(),
     };
     let wips = match hostname_only {
@@ -258,7 +265,7 @@ fn test_custom_workload(
         workload_ips: wips,
         hostname: host.into(),
         protocol,
-        uid: format!("cluster1//v1/Pod/default/{}", name).into(),
+        uid: format!("cluster1//v1/Pod/default/{name}").into(),
         name: name.into(),
         namespace: "default".into(),
         service_account: "default".into(),
@@ -290,7 +297,7 @@ fn test_custom_svc(
         }],
         ports: HashMap::from([(80u16, echo_port)]),
         endpoints: EndpointSet::from_list([Endpoint {
-            workload_uid: format!("cluster1//v1/Pod/default/{}", workload_name).into(),
+            workload_uid: format!("cluster1//v1/Pod/default/{workload_name}").into(),
             port: HashMap::from([(80u16, echo_port)]),
             status: HealthStatus::Healthy,
         }]),
@@ -298,6 +305,7 @@ fn test_custom_svc(
         waypoint: None,
         load_balancer: None,
         ip_families: None,
+        canonical: true,
     })
 }
 
@@ -553,4 +561,13 @@ pub fn mpsc_ack<T>(buffer: usize) -> (MpscAckSender<T>, MpscAckReceiver<T>) {
     let (tx, rx) = tokio::sync::mpsc::channel::<T>(buffer);
     let (ack_tx, ack_rx) = tokio::sync::mpsc::channel::<()>(1);
     (MpscAckSender { tx, ack_rx }, MpscAckReceiver { rx, ack_tx })
+}
+
+/// Creates a temporary file with the given content and returns the path.
+/// The file is automatically deleted when the returned NamedTempFile is dropped
+pub fn temp_file_with_content(content: &str) -> std::io::Result<NamedTempFile> {
+    let mut file = NamedTempFile::new()?;
+    file.write_all(content.as_bytes())?;
+    file.flush()?;
+    Ok(file)
 }

@@ -86,6 +86,11 @@ impl Socks5 {
                 let mut force_shutdown = force_shutdown.clone();
                 match socket {
                     Ok((stream, _remote)) => {
+                        let socket_labels = crate::proxy::metrics::SocketLabels {
+                            reporter: crate::proxy::metrics::Reporter::source,
+                        };
+                        self.pi.metrics.record_socket_open(&socket_labels);
+
                         let oc = OutboundConnection {
                             pi: self.pi.clone(),
                             id: TraceParent::new(),
@@ -93,7 +98,12 @@ impl Socks5 {
                             hbone_port: self.pi.cfg.inbound_addr.port(),
                         };
                         let span = info_span!("socks5", id=%oc.id);
+                        let metrics_for_socket_close = self.pi.metrics.clone();
                         let serve = (async move {
+                            let _socket_guard = crate::proxy::metrics::SocketCloseGuard::new(
+                                metrics_for_socket_close,
+                                crate::proxy::metrics::Reporter::source,
+                            );
                             debug!(component="socks5", "connection started");
                             // Since this task is spawned, make sure we are guaranteed to terminate
                             tokio::select! {
@@ -140,8 +150,17 @@ async fn handle_socks_connection(mut oc: OutboundConnection, mut stream: TcpStre
                 warn!("failed to send socks success response: {err}");
                 return;
             }
-            let remote_addr =
-                socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
+            let peer = match stream.peer_addr() {
+                Ok(addr) => addr,
+                Err(e) => {
+                    debug!(
+                        component = "socks5",
+                        "failed to get peer address, dropping connection: {}", e
+                    );
+                    return;
+                }
+            };
+            let remote_addr = socket::to_canonical(peer);
             oc.proxy_to(stream, remote_addr, target).await
         }
         Err(e) => {
@@ -160,7 +179,7 @@ async fn negotiate_socks_connection(
     pi: &ProxyInputs,
     stream: &mut TcpStream,
 ) -> Result<SocketAddr, SocksError> {
-    let remote_addr = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
+    let remote_addr = socket::to_canonical(stream.peer_addr()?);
 
     // Version(5), Number of auth methods
     let mut version = [0u8; 2];
@@ -203,8 +222,7 @@ async fn negotiate_socks_connection(
 
     if version != 0x05 {
         return Err(SocksError::invalid_protocol(format!(
-            "unsupported version {}",
-            version
+            "unsupported version {version}",
         )));
     }
 

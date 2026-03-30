@@ -21,7 +21,6 @@ use hickory_resolver::system_conf::read_system_conf;
 use hickory_server::ServerFuture;
 use hickory_server::authority::LookupError;
 use hickory_server::server::Request;
-use itertools::Itertools;
 use once_cell::sync::Lazy;
 use rand::rng;
 use rand::seq::SliceRandom;
@@ -47,9 +46,10 @@ use crate::drain::{DrainMode, DrainWatcher};
 use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
 use crate::state::DemandProxyState;
-use crate::state::service::IpFamily;
+use crate::state::service::{IpFamily, Service, ServiceMatch};
 use crate::state::workload::Workload;
 use crate::state::workload::address::Address;
+use crate::strng::Strng;
 use crate::{config, dns};
 
 const DEFAULT_TCP_REQUEST_TIMEOUT: u64 = 5;
@@ -85,6 +85,8 @@ impl Server {
         drain: DrainWatcher,
         socket_factory: &(dyn SocketFactory + Send + Sync),
         local_workload_information: Arc<LocalWorkloadFetcher>,
+        prefered_service_namespace: Option<String>,
+        ipv6_enabled: bool,
     ) -> Result<Self, Error> {
         // if the address we got from config is supposed to be v6-enabled,
         // actually check if the local pod context our socketfactory operates in supports V6.
@@ -102,6 +104,8 @@ impl Server {
             forwarder,
             metrics,
             local_workload_information,
+            prefered_service_namespace,
+            ipv6_enabled,
         );
         let store = Arc::new(store);
         let handler = dns::handler::Handler::new(store.clone());
@@ -191,6 +195,8 @@ struct Store {
     svc_domain: Name,
     metrics: Arc<Metrics>,
     local_workload: Arc<LocalWorkloadFetcher>,
+    prefered_service_namespace: Option<String>,
+    ipv6_enabled: bool,
 }
 
 impl Store {
@@ -200,6 +206,8 @@ impl Store {
         forwarder: Arc<dyn Forwarder>,
         metrics: Arc<Metrics>,
         local_workload_information: Arc<LocalWorkloadFetcher>,
+        prefered_service_namespace: Option<String>,
+        ipv6_enabled: bool,
     ) -> Self {
         let domain = as_name(domain);
         let svc_domain = append_name(as_name("svc"), &domain);
@@ -211,6 +219,8 @@ impl Store {
             svc_domain,
             metrics,
             local_workload: local_workload_information,
+            prefered_service_namespace,
+            ipv6_enabled,
         }
     }
 
@@ -248,20 +258,14 @@ impl Store {
                 // Insert an alias for a stripped search domain.
                 add_alias(Alias {
                     name: stripped_name.clone(),
-                    stripped: Some(Stripped {
-                        name: stripped_name.clone(),
-                        search_domain: search_domain.clone(),
-                    }),
+                    stripped: Some(stripped_name.clone()),
                 });
 
                 // If the name can be expanded to a k8s FQDN, add that as well.
                 for kube_fqdn in self.to_kube_fqdns(&stripped_name, &namespaced_domain) {
                     add_alias(Alias {
                         name: kube_fqdn,
-                        stripped: Some(Stripped {
-                            name: stripped_name.clone(),
-                            search_domain: search_domain.clone(),
-                        }),
+                        stripped: Some(stripped_name.clone()),
                     });
                 }
             }
@@ -359,10 +363,10 @@ impl Store {
                 let search_name_str = search_name.to_string().into();
                 search_name.set_fqdn(true);
 
-                let service = state
+                let services: Vec<Arc<Service>> = state
                     .services
                     .get_by_host(&search_name_str)
-                    .iter()
+                    .into_iter()
                     .flatten()
                     // Remove things without a VIP, unless they are Kubernetes headless services.
                     // This will trigger us to forward upstream.
@@ -382,13 +386,23 @@ impl Store {
                     })
                     // Get the service matching the client namespace. If no match exists, just
                     // return the first service.
-                    .find_or_first(|service| service.namespace == client.namespace)
-                    .cloned();
+                    .collect();
+
+                let preferred_namespace: Strng = self
+                    .prefered_service_namespace
+                    .as_deref()
+                    .unwrap_or("")
+                    .into();
+                let service: Option<&Arc<Service>> = ServiceMatch::find_best_match(
+                    services.iter(),
+                    Some(&client.namespace),
+                    Some(&preferred_namespace),
+                );
 
                 // First, lookup the host as a service.
                 if let Some(service) = service {
                     return Some(ServerMatch {
-                        server: Address::Service(service),
+                        server: Address::Service(service.clone()),
                         name: search_name,
                         alias,
                     });
@@ -398,6 +412,13 @@ impl Store {
         }
 
         None
+    }
+
+    fn record_type_enabled(&self, addr: &IpAddr) -> bool {
+        match addr {
+            IpAddr::V4(_) => true,              // IPv4 always
+            IpAddr::V6(_) => self.ipv6_enabled, // IPv6 must be not be disabled in config
+        }
     }
 
     /// Gets the list of addresses of the requested record type from the server.
@@ -412,7 +433,7 @@ impl Store {
                 .workload_ips
                 .iter()
                 .filter_map(|addr| {
-                    if is_record_type(addr, record_type) {
+                    if is_record_type(addr, record_type) && self.record_type_enabled(addr) {
                         Some(*addr)
                     } else {
                         None
@@ -431,10 +452,9 @@ impl Store {
                                 debug!("failed to fetch workload for {}", ep.workload_uid);
                                 return None;
                             };
-                            wl.workload_ips
-                                .iter()
-                                .copied()
-                                .find(|addr| is_record_type(addr, record_type))
+                            wl.workload_ips.iter().copied().find(|addr| {
+                                is_record_type(addr, record_type) && self.record_type_enabled(addr)
+                            })
                         })
                         .collect()
                 } else {
@@ -446,6 +466,7 @@ impl Store {
                         .filter_map(|vip| {
                             if is_record_type(&vip.address, record_type)
                                 && client.network == vip.network
+                                && self.record_type_enabled(&vip.address)
                             {
                                 Some(vip.address)
                             } else {
@@ -616,7 +637,7 @@ impl Resolver for Store {
         // From this point on, we are the authority for the response.
         let is_authoritative = true;
 
-        if !service_family_allowed(&service_match.server, record_type) {
+        if !service_family_allowed(&service_match.server, record_type, self.ipv6_enabled) {
             access_log(
                 request,
                 Some(&client),
@@ -645,31 +666,14 @@ impl Resolver for Store {
 
         // If the service was found by stripping off one of the search domains, create a
         // CNAME record to map to the appropriate canonical name.
-        if let Some(stripped) = service_match.alias.stripped {
-            if service_match.name.is_wildcard() {
-                // The match is a wildcard...
+        if let Some(stripped) = service_match.alias.stripped
+            && !service_match.name.is_wildcard()
+        {
+            // Create a CNAME record to map from the requested name -> stripped name.
+            records.push(cname_record(requested_name.clone(), stripped.clone()));
 
-                // Create a CNAME record that maps from the wildcard with the search domain to
-                // the wildcard without it.
-                let cname_record_name = service_match
-                    .name
-                    .clone()
-                    .append_domain(&stripped.search_domain)
-                    .unwrap();
-                let canonical_name = service_match.name;
-                records.push(cname_record(cname_record_name, canonical_name));
-
-                // For wildcards, continue using the original requested hostname for IP records.
-            } else {
-                // The match is NOT a wildcard...
-
-                // Create a CNAME record to map from the requested name -> stripped name.
-                let canonical_name = stripped.name;
-                records.push(cname_record(requested_name.clone(), canonical_name.clone()));
-
-                // Also use the stripped name as the IP record name.
-                ip_record_name = canonical_name;
-            }
+            // Also use the stripped name as the IP record name.
+            ip_record_name = stripped;
         }
 
         access_log(request, Some(&client), "success", records.len());
@@ -685,7 +689,13 @@ impl Resolver for Store {
 /// anyway, so would naturally work.
 /// Headless services, however, do not have VIPs, and the Pods behind them can have dual stack IPs even with
 /// the Service being single-stack. In this case, we are NOT supposed to return both IPs.
-fn service_family_allowed(server: &Address, record_type: RecordType) -> bool {
+/// If IPv6 is globally disabled, AAAA records are not allowed.
+fn service_family_allowed(server: &Address, record_type: RecordType, ipv6_enabled: bool) -> bool {
+    // If IPv6 is globally disabled, don't allow AAAA records
+    if !ipv6_enabled && record_type == RecordType::AAAA {
+        return false;
+    }
+
     match server {
         Address::Service(service) => match service.ip_families {
             Some(IpFamily::IPv4) if record_type == RecordType::AAAA => false,
@@ -704,23 +714,13 @@ struct Alias {
 
     /// If `Some`, indicates that this alias was generated from the requested host that
     /// was stripped of
-    stripped: Option<Stripped>,
+    stripped: Option<Name>,
 }
 
 impl Display for Alias {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.name.to_utf8())
     }
-}
-
-/// Created for an alias generated by stripping a search domain from the requested host.
-#[derive(Debug)]
-struct Stripped {
-    /// The requested hostname with the `search_domain` removed.
-    name: Name,
-
-    /// The search domain that was removed from the requested host to generate `name`.
-    search_domain: Name,
 }
 
 /// Returned when a server was successfully found for the requested hostname.
@@ -957,6 +957,8 @@ mod tests {
 
     const NS1: &str = "ns1";
     const NS2: &str = "ns2";
+    const NS3: &str = "ns3";
+    const PREFERRED: &str = "preferred-ns";
     const NW1: Strng = strng::literal!("nw1");
     const NW2: Strng = strng::literal!("nw2");
 
@@ -1064,6 +1066,8 @@ mod tests {
                 forwarder,
                 metrics: test_metrics(),
                 local_workload,
+                prefered_service_namespace: None,
+                ipv6_enabled: true,
             };
 
             let namespaced_domain = n(format!("{}.svc.cluster.local", c.client_namespace));
@@ -1287,16 +1291,10 @@ mod tests {
             Case {
                 name: "success: wild card with search domain returns A record correctly",
                 host: "foo.svc.mesh.company.net.ns1.svc.cluster.local.",
-                expect_records: vec![
-                    cname(
-                        n("*.svc.mesh.company.net.ns1.svc.cluster.local."),
-                        n("*.svc.mesh.company.net."),
-                    ),
-                    a(
-                        n("foo.svc.mesh.company.net.ns1.svc.cluster.local."),
-                        ipv4("10.1.2.3"),
-                    ),
-                ],
+                expect_records: vec![a(
+                    n("foo.svc.mesh.company.net.ns1.svc.cluster.local."),
+                    ipv4("10.1.2.3"),
+                )],
                 ..Default::default()
             },
             Case {
@@ -1379,6 +1377,30 @@ mod tests {
                 expect_code: ResponseCode::NXDomain,
                 ..Default::default()
             },
+            Case {
+                name: "success: preferred namespace is chosen if local namespace is not defined",
+                host: "preferred.io.",
+                expect_records: vec![a(n("preferred.io."), ipv4("10.10.10.211"))],
+                ..Default::default()
+            },
+            Case {
+                name: "success: external service resolves to local namespace's address",
+                host: "everywhere.io.",
+                expect_records: vec![a(n("everywhere.io."), ipv4("10.10.10.112"))],
+                ..Default::default()
+            },
+            Case {
+                name: "success: canonical services are preferred when no ns-local hostname is present",
+                host: "canonical.svc",
+                expect_records: vec![a(n("canonical.svc."), ipv4("10.10.10.141"))],
+                ..Default::default()
+            },
+            Case {
+                name: "success: namespace-local service should be preferred over canonical",
+                host: "canonical.with.local",
+                expect_records: vec![a(n("canonical.with.local."), ipv4("10.10.10.150"))],
+                ..Default::default()
+            },
         ];
 
         // Create and start the proxy.
@@ -1396,6 +1418,8 @@ mod tests {
             drain,
             &factory,
             local_workload,
+            Some(PREFERRED.to_string()),
+            true, // ipv6_enabled for tests
         )
         .await
         .unwrap();
@@ -1415,8 +1439,8 @@ mod tests {
                 tasks.push(async move {
                     let name = format!("[{protocol}] {}", c.name);
                     let resp = send_request(&mut client, n(c.host), c.query_type).await;
-                    assert_eq!(c.expect_authoritative, resp.authoritative(), "{}", name);
-                    assert_eq!(c.expect_code, resp.response_code(), "{}", name);
+                    assert_eq!(c.expect_authoritative, resp.authoritative(), "{name}");
+                    assert_eq!(c.expect_code, resp.response_code(), "{name}");
 
                     if c.expect_code == ResponseCode::NoError {
                         let mut actual = resp.answers().to_vec();
@@ -1427,7 +1451,7 @@ mod tests {
                         if c.expect_authoritative {
                             sort_records(&mut actual);
                         }
-                        assert_eq!(c.expect_records, actual, "{}", name);
+                        assert_eq!(c.expect_records, actual, "{name}");
                     }
                 });
             }
@@ -1482,6 +1506,8 @@ mod tests {
             drain,
             &factory,
             local_workload,
+            None,
+            true, // ipv6_enabled for tests
         )
         .await
         .unwrap();
@@ -1496,7 +1522,7 @@ mod tests {
             for (protocol, client) in [("tcp", &mut tcp_client), ("udp", &mut udp_client)] {
                 let name = format!("[{protocol}] {}", c.name);
                 let resp = send_request(client, n(c.host), RecordType::A).await;
-                assert_eq!(c.expect_code, resp.response_code(), "{}", name);
+                assert_eq!(c.expect_code, resp.response_code(), "{name}");
                 if c.expect_code == ResponseCode::NoError {
                     assert!(!resp.answers().is_empty());
                 }
@@ -1531,6 +1557,8 @@ mod tests {
                 }),
                 state.clone(),
             ),
+            prefered_service_namespace: None,
+            ipv6_enabled: true,
         };
 
         let ip4n6_client_ip = ip("::ffff:202:202");
@@ -1538,7 +1566,7 @@ mod tests {
         match store.lookup(&req).await {
             Ok(_) => {}
             Err(e) => {
-                panic!("IPv6 encoded IPv4 should work! Error was {:?}", e)
+                panic!("IPv6 encoded IPv4 should work! Error was {e:?}");
             }
         }
     }
@@ -1564,6 +1592,8 @@ mod tests {
             drain,
             &factory,
             local_workload,
+            None,
+            true, // ipv6_enabled for tests
         )
         .await
         .unwrap();
@@ -1680,6 +1710,34 @@ mod tests {
             xds_external_service("www.google.com", &[na(NW1, "1.1.1.1")]),
             xds_service("productpage", NS1, &[na(NW1, "9.9.9.9")]),
             xds_service("example", NS2, &[na(NW1, "10.10.10.10")]),
+            // Service with the same name in another namespace
+            // This should not be used if the preferred service namespace is set
+            xds_namespaced_external_service("everywhere.io", NS2, &[na(NW1, "10.10.10.110")]),
+            xds_namespaced_external_service("preferred.io", NS2, &[na(NW1, "10.10.10.210")]),
+            // Preferred service namespace
+            xds_namespaced_external_service("everywhere.io", PREFERRED, &[na(NW1, "10.10.10.111")]),
+            xds_namespaced_external_service("preferred.io", PREFERRED, &[na(NW1, "10.10.10.211")]),
+            // Service with the same name in the same namespace
+            // Client in NS1 should use this service
+            xds_namespaced_external_service("everywhere.io", NS1, &[na(NW1, "10.10.10.112")]),
+            // Service that is canonical should be preferrred when no ns-local definition
+            xds_namespaced_external_service("canonical.svc", NS2, &[na(NW1, "10.10.10.140")]),
+            xds_namespaced_external_canonical_service(
+                "canonical.svc",
+                NS3,
+                &[na(NW1, "10.10.10.141")],
+            ),
+            // Client in NS1 should prefer local over canonical
+            xds_namespaced_external_service(
+                "canonical.with.local",
+                NS1,
+                &[na(NW1, "10.10.10.150")],
+            ),
+            xds_namespaced_external_canonical_service(
+                "canonical.with.local",
+                NS2,
+                &[na(NW1, "10.10.10.151")],
+            ),
             with_fqdn(
                 "details.ns2.svc.cluster.remote",
                 xds_service(
@@ -1786,7 +1844,7 @@ mod tests {
             .unwrap()
             .iter()
             .map(|(_, addr)| *addr)
-            .collect_vec()
+            .collect()
     }
 
     fn kube_fqdn<S1: AsRef<str>, S2: AsRef<str>>(name: S1, ns: S2) -> String {
@@ -1802,6 +1860,11 @@ mod tests {
 
     fn with_fqdn<S: AsRef<str>>(fqdn: S, mut svc: XdsService) -> XdsService {
         svc.hostname = fqdn.as_ref().to_string();
+        svc
+    }
+
+    fn with_canonical(canonical: bool, mut svc: XdsService) -> XdsService {
+        svc.canonical = canonical;
         svc
     }
 
@@ -1830,10 +1893,26 @@ mod tests {
     }
 
     fn xds_external_service<S: AsRef<str>>(hostname: S, addrs: &[NetworkAddress]) -> XdsService {
+        xds_namespaced_external_service(hostname, NS1, addrs)
+    }
+
+    fn xds_namespaced_external_service<S1: AsRef<str>, S2: AsRef<str>>(
+        hostname: S1,
+        ns: S2,
+        vips: &[NetworkAddress],
+    ) -> XdsService {
         with_fqdn(
             hostname.as_ref(),
-            xds_service(hostname.as_ref(), NS1, addrs),
+            xds_service(hostname.as_ref(), ns.as_ref(), vips),
         )
+    }
+
+    fn xds_namespaced_external_canonical_service<S1: AsRef<str>, S2: AsRef<str>>(
+        hostname: S1,
+        ns: S2,
+        vips: &[NetworkAddress],
+    ) -> XdsService {
+        with_canonical(true, xds_namespaced_external_service(hostname, ns, vips))
     }
 
     fn xds_workload(

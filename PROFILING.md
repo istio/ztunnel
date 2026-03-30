@@ -5,7 +5,7 @@
 1. Port-forward admin port (15000):
 
 ```sh
-k port-forward -n istio-system ztunnel-qkvdj 15000:15000
+kubectl port-forward -n istio-system ztunnel-qkvdj 15000:15000
 ```
 
 1. Either open `localhost:15000` in a browser for help, or just `curl` the CPU profile:
@@ -23,7 +23,7 @@ curl localhost:15000/debug/pprof/profile > profile.prof
 1. Port-forward admin port (15000):
 
 ```sh
-k port-forward -n istio-system ztunnel-qkvdj 15000:15000
+kubectl port-forward -n istio-system ztunnel-qkvdj 15000:15000
 ```
 
 1. Either open `localhost:15000` in a browser for help, or just `curl` the memory profile:
@@ -32,13 +32,13 @@ k port-forward -n istio-system ztunnel-qkvdj 15000:15000
 curl localhost:15000/debug/pprof/heap > mem.pb.gz
 ```
 
-1. If working remotely, copy container binaries to local path for symbol resolution:
+1. Copy container binaries to local path for symbol resolution:
 
 ```sh
 # ztunnel main binary
-kubectl cp kube-system/ztunnel-qkvdj:/usr/local/bin/ztunnel ../../ztunnel-libs-pprof/ztunnel
+kubectl cp istio-system/ztunnel-qkvdj:/usr/local/bin/ztunnel ../../ztunnel-libs-pprof/ztunnel
 # stdlibs (optional)
-kubectl cp kube-system/ztunnel-qkvdj:/usr/lib/$BINARY_COMPILED_ARCH/ ../../ztunnel-libs-pprof/
+kubectl cp istio-system/ztunnel-qkvdj:/usr/lib/$BINARY_COMPILED_ARCH/ ../../ztunnel-libs-pprof/
 ```
 
 1. Observe in your tooling of choice, such as golang's `pprof`:

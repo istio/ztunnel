@@ -22,15 +22,21 @@ use tokio::sync::watch;
 
 use tracing::{Instrument, debug, error, info, info_span, trace_span};
 
-use super::{ConnectionResult, Error, HboneAddress, LocalWorkloadInformation, ResponseFlags, util};
-use crate::baggage::parse_baggage_header;
+use super::{
+    ConnectionResult, ConnectionResultBuilder, Error, HboneAddress, LocalWorkloadInformation,
+    ResponseFlags, util,
+};
+use crate::baggage::{baggage_header_val, parse_baggage_header};
 use crate::identity::Identity;
 
 use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::{H2Request, RequestParts};
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
-use crate::proxy::{BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, metrics};
+use crate::proxy::{
+    BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, X_FORWARDED_NETWORK_HEADER,
+    metrics,
+};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::state::service::Service;
@@ -83,6 +89,7 @@ impl Inbound {
         let pi = self.pi.clone();
         let acceptor = InboundCertProvider {
             local_workload: self.pi.local_workload_information.clone(),
+            crl_manager: self.pi.crl_manager.clone(),
         };
 
         // Safety: we set nodelay directly in tls_server, so it is safe to convert to a normal listener.
@@ -108,7 +115,18 @@ impl Inbound {
                 let dst = to_canonical(raw_socket.local_addr().expect("local_addr available"));
                 let network = pi.cfg.network.clone();
                 let acceptor = crate::tls::InboundAcceptor::new(acceptor.clone());
+
+                let socket_labels = metrics::SocketLabels {
+                    reporter: Reporter::destination,
+                };
+                pi.metrics.record_socket_open(&socket_labels);
+                let metrics_for_socket_close = pi.metrics.clone();
+
                 let serve_client = async move {
+                    let _socket_guard = metrics::SocketCloseGuard::new(
+                        metrics_for_socket_close,
+                        Reporter::destination,
+                    );
                     let tls = match acceptor.accept(raw_socket).await {
                         Ok(tls) => tls,
                         Err(e) => {
@@ -157,7 +175,7 @@ impl Inbound {
                 };
                 // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
                 // and measured above.
-                assertions::size_between_ref(1000, 1500, &serve_client);
+                assertions::size_between_ref(1000, 1600, &serve_client);
                 tokio::task::spawn(serve_client.in_current_span());
             }
         };
@@ -202,7 +220,9 @@ impl Inbound {
                 // At this point in processing, we never built up full context to log a complete access log.
                 // Instead, just log a minimal error line.
                 metrics::log_early_deny(src, dst, Reporter::destination, e);
-                if let Err(err) = req.send_error(build_response(code)) {
+                if let Err(err) =
+                    req.send_error(build_response(code, None, pi.cfg.enable_enhanced_baggage))
+                {
                     tracing::warn!("failed to send HTTP response: {err}");
                 }
                 return;
@@ -276,7 +296,9 @@ impl Inbound {
             Ok(res) => res,
             Err(InboundFlagError(err, flag, code)) => {
                 ri.result_tracker.record_with_flag(Err(err), flag);
-                if let Err(err) = req.send_error(build_response(code)) {
+                if let Err(err) =
+                    req.send_error(build_response(code, None, pi.cfg.enable_enhanced_baggage))
+                {
                     tracing::warn!("failed to send HTTP response: {err}");
                 }
                 return;
@@ -293,7 +315,11 @@ impl Inbound {
         // See https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt for more information about the
         // proxy protocol.
         let send = req
-            .send_response(build_response(StatusCode::OK))
+            .send_response(build_response(
+                StatusCode::OK,
+                Some(ri.destination_workload.as_ref()),
+                pi.cfg.enable_enhanced_baggage,
+            ))
             .and_then(|h2_stream| async {
                 if let Some(TunnelRequest {
                     protocol: Protocol::PROXY,
@@ -374,19 +400,30 @@ impl Inbound {
         };
 
         let for_host = parse_forwarded_host(req);
-        let baggage =
-            parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
+        let baggage = if pi.cfg.enable_enhanced_baggage {
+            parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default()
+        } else {
+            Default::default()
+        };
 
         // We assume it is from gateway if it's a hostname request.
         // We may need a more explicit indicator in the future.
         // Note: previously this attempted to check that the src identity was equal to the Gateway;
         // this check is broken as the gateway only forwards an HBONE request, it doesn't initiate it itself.
-        let from_gateway = matches!(hbone_addr, HboneAddress::SvcHostname(_, _));
+        let from_gateway = req
+            .headers()
+            .get(X_FORWARDED_NETWORK_HEADER)
+            .and_then(|h| h.to_str().ok())
+            .map(|s| !s.eq_ignore_ascii_case(&pi.cfg.network)) // If the network is different, it's from a gateway
+            .unwrap_or(false);
+
         if from_gateway {
             debug!("request from gateway");
         }
         let source = match from_gateway {
-            true => None, // we cannot lookup source workload since we don't know the network, see https://github.com/istio/ztunnel/issues/515
+            // we cannot lookup source workload since we don't know the network, see https://github.com/istio/ztunnel/issues/515.
+            // Instead, we will use baggage
+            true => None,
             false => {
                 let src_network_addr = NetworkAddress {
                     // we can assume source network is our network because we did not traverse a gateway
@@ -398,15 +435,22 @@ impl Inbound {
             }
         };
 
-        let derived_source = metrics::DerivedWorkload {
-            identity: rbac_ctx.conn.src_identity.clone(),
-            cluster_id: baggage.cluster_id,
-            region: baggage.region,
-            zone: baggage.zone,
-            namespace: baggage.namespace,
-            app: baggage.service_name,
-            workload_name: baggage.workload_name,
-            revision: baggage.revision,
+        let derived_source = if pi.cfg.enable_enhanced_baggage {
+            metrics::DerivedWorkload {
+                identity: rbac_ctx.conn.src_identity.clone(),
+                cluster_id: baggage.cluster_id,
+                region: baggage.region,
+                zone: baggage.zone,
+                namespace: baggage.namespace,
+                app: baggage.service_name,
+                workload_name: baggage.workload_name,
+                revision: baggage.revision,
+            }
+        } else {
+            metrics::DerivedWorkload {
+                identity: rbac_ctx.conn.src_identity.clone(),
+                ..Default::default()
+            }
         };
         let ds = proxy::guess_inbound_service(
             &rbac_ctx.conn,
@@ -414,7 +458,7 @@ impl Inbound {
             upstream_service,
             &destination_workload,
         );
-        let result_tracker = Box::new(metrics::ConnectionResult::new(
+        let connection_result_builder = ConnectionResultBuilder::new(
             rbac_ctx.conn.src,
             // For consistency with outbound logs, report the original destination (with 15008 port)
             // as dst.addr, and the target address as dst.hbone_addr
@@ -425,18 +469,21 @@ impl Inbound {
                 reporter: Reporter::destination,
                 source,
                 derived_source: Some(derived_source),
-                destination: Some(destination_workload),
+                destination: Some(destination_workload.clone()),
                 connection_security_policy: metrics::SecurityPolicy::mutual_tls,
                 destination_service: ds,
             },
             pi.metrics.clone(),
-        ));
+        );
+
+        let result_tracker = Box::new(connection_result_builder.build());
         Ok(InboundRequest {
             for_host,
             rbac_ctx,
             result_tracker,
             upstream_addr,
             tunnel_request,
+            destination_workload,
         })
     }
 
@@ -447,19 +494,10 @@ impl Inbound {
         local_workload: &Workload,
         hbone_host: &Strng,
     ) -> Result<Arc<Service>, Error> {
-        // Validate a service exists for the hostname
-        let services = state.read().find_service_by_hostname(hbone_host)?;
-
-        services
-            .iter()
-            .max_by_key(|s| {
-                let is_local_namespace = s.namespace == local_workload.namespace;
-                match is_local_namespace {
-                    true => 1,
-                    false => 0,
-                }
-            })
-            .cloned()
+        state
+            .read()
+            .services
+            .get_best_by_host(hbone_host, Some(&local_workload.namespace))
             .ok_or_else(|| Error::NoHostname(hbone_host.to_string()))
     }
 
@@ -662,6 +700,7 @@ struct InboundRequest {
     result_tracker: Box<ConnectionResult>,
     upstream_addr: SocketAddr,
     tunnel_request: Option<TunnelRequest>,
+    destination_workload: Arc<Workload>,
 }
 
 /// InboundError represents an error with an associated status code.
@@ -683,6 +722,7 @@ impl InboundFlagError {
 #[derive(Clone)]
 struct InboundCertProvider {
     local_workload: Arc<LocalWorkloadInformation>,
+    crl_manager: Option<Arc<tls::crl::CrlManager>>,
 }
 
 #[async_trait::async_trait]
@@ -693,7 +733,7 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
             "fetching cert"
         );
         let cert = self.local_workload.fetch_certificate().await?;
-        Ok(Arc::new(cert.server_config()?))
+        Ok(Arc::new(cert.server_config(self.crl_manager.clone())?))
     }
 }
 
@@ -704,9 +744,24 @@ pub fn parse_forwarded_host<T: RequestParts>(req: &T) -> Option<String> {
         .and_then(proxy::parse_forwarded_host)
 }
 
-fn build_response(status: StatusCode) -> Response<()> {
-    Response::builder()
-        .status(status)
+// Second argument is local workload and cluster name
+fn build_response(
+    status: StatusCode,
+    local_wl: Option<&Workload>,
+    enable_response_baggage: bool,
+) -> Response<()> {
+    let mut builder = Response::builder().status(status);
+
+    if let Some(local_wl) = local_wl
+        && enable_response_baggage
+    {
+        builder = builder.header(
+            BAGGAGE_HEADER,
+            baggage_header_val(&local_wl.baggage(), &local_wl.workload_type),
+        )
+    }
+
+    builder
         .body(())
         .expect("builder with known status code should not fail")
 }
@@ -914,6 +969,7 @@ mod tests {
             None,
             local_workload,
             false,
+            None,
         ));
         let inbound_request = Inbound::build_inbound_request(&pi, conn, &request_parts).await;
         match want {
@@ -962,6 +1018,7 @@ mod tests {
             waypoint: waypoint.service_attached(),
             load_balancer: None,
             ip_families: None,
+            canonical: true,
         });
 
         let workloads = vec![
@@ -1047,5 +1104,88 @@ mod tests {
                 hbone_mtls_port: 15008,
             })
         }
+    }
+
+    #[test]
+    fn test_build_response_baggage_feature_gate() {
+        use super::build_response;
+        use crate::proxy::BAGGAGE_HEADER;
+        use crate::test_helpers;
+        use http::StatusCode;
+
+        // Create a test workload
+        let workload = test_helpers::test_default_workload();
+
+        // Test with baggage enabled
+        let mut config_enabled = test_helpers::test_config();
+        config_enabled.enable_enhanced_baggage = true;
+
+        let response_enabled = build_response(
+            StatusCode::OK,
+            Some(&workload),
+            config_enabled.enable_enhanced_baggage,
+        );
+        assert!(response_enabled.headers().contains_key(BAGGAGE_HEADER));
+
+        let baggage_header = response_enabled.headers().get(BAGGAGE_HEADER).unwrap();
+        let baggage_value = baggage_header.to_str().unwrap();
+        // Check that baggage header contains cluster_id from the test workload
+        assert!(baggage_value.contains("k8s.cluster.name=Kubernetes"));
+
+        // Test with baggage disabled
+        let mut config_disabled = test_helpers::test_config();
+        config_disabled.enable_enhanced_baggage = false;
+
+        let response_disabled = build_response(
+            StatusCode::OK,
+            Some(&workload),
+            config_disabled.enable_enhanced_baggage,
+        );
+        assert!(!response_disabled.headers().contains_key(BAGGAGE_HEADER));
+
+        // Test with None workload (should not have baggage regardless of config)
+        let response_no_workload =
+            build_response(StatusCode::OK, None, config_enabled.enable_enhanced_baggage);
+        assert!(!response_no_workload.headers().contains_key(BAGGAGE_HEADER));
+    }
+
+    #[test]
+    fn test_incoming_baggage_parsing_feature_gate() {
+        use crate::baggage::{Baggage, parse_baggage_header};
+        use crate::proxy::BAGGAGE_HEADER;
+        use crate::test_helpers;
+        use http::{HeaderMap, HeaderValue};
+
+        // Create mock baggage header
+        let mut headers = HeaderMap::new();
+        headers.insert(BAGGAGE_HEADER, HeaderValue::from_str("k8s.cluster.name=test-cluster,k8s.namespace.name=test-ns,k8s.deployment.name=test-app").unwrap());
+
+        // Test with baggage enabled
+        let config_enabled = test_helpers::test_config();
+        assert!(config_enabled.enable_enhanced_baggage); // Default should be true
+
+        let baggage_enabled = if config_enabled.enable_enhanced_baggage {
+            parse_baggage_header(headers.get_all(BAGGAGE_HEADER)).unwrap_or_default()
+        } else {
+            Baggage::default()
+        };
+
+        assert_eq!(baggage_enabled.cluster_id, Some("test-cluster".into()));
+        assert_eq!(baggage_enabled.namespace, Some("test-ns".into()));
+        assert_eq!(baggage_enabled.workload_name, Some("test-app".into()));
+
+        // Test with baggage disabled
+        let mut config_disabled = test_helpers::test_config();
+        config_disabled.enable_enhanced_baggage = false;
+
+        let baggage_disabled = if config_disabled.enable_enhanced_baggage {
+            parse_baggage_header(headers.get_all(BAGGAGE_HEADER)).unwrap_or_default()
+        } else {
+            Baggage::default()
+        };
+
+        assert_eq!(baggage_disabled.cluster_id, None);
+        assert_eq!(baggage_disabled.namespace, None);
+        assert_eq!(baggage_disabled.workload_name, None);
     }
 }

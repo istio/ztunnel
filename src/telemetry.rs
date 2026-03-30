@@ -24,7 +24,7 @@ use serde::Serializer;
 use serde::ser::SerializeMap;
 
 use thiserror::Error;
-use tracing::{Event, Subscriber, error, field, info, warn};
+use tracing::{Event, Subscriber, field, info, warn};
 use tracing_appender::non_blocking::NonBlocking;
 use tracing_core::Field;
 use tracing_core::field::Visit;
@@ -88,8 +88,8 @@ fn default_filter() -> filter::Targets {
     // Read from env var, but prefix with setting DNS logs to warn as they are noisy; they can be explicitly overriden
     let var: String = env::var("RUST_LOG")
         .map_err(|_| ())
-        .map(|v| "hickory_server::server::server_future=off,".to_string() + v.as_str())
-        .unwrap_or("hickory_server::server::server_future=off,info".to_string());
+        .map(|v| "hickory_server::server=off,".to_string() + v.as_str())
+        .unwrap_or("hickory_server::server=off,info".to_string());
     filter::Targets::from_str(&var).expect("static filter should build")
 }
 
@@ -170,7 +170,7 @@ impl Visitor<'_> {
         } else {
             " "
         };
-        write!(self.writer, "{}{:?}", padding, value)
+        write!(self.writer, "{padding}{value:?}")
     }
 }
 
@@ -188,9 +188,9 @@ impl field::Visit for Visitor<'_> {
             // Skip fields that are actually log metadata that have already been handled
             name if name.starts_with("log.") => Ok(()),
             // For the message, write out the message and a tab to separate the future fields
-            "message" => write!(self.writer, "{:?}\t", val),
+            "message" => write!(self.writer, "{val:?}\t"),
             // For the rest, k=v.
-            _ => self.write_padded(&format_args!("{}={:?}", field.name(), val)),
+            _ => self.write_padded(&format_args!("{}={val:?}", field.name())),
         }
     }
 }
@@ -234,17 +234,17 @@ where
         let target = meta.target();
         // No need to prefix everything
         let target = target.strip_prefix("ztunnel::").unwrap_or(target);
-        write!(writer, "{}", target)?;
+        write!(writer, "{target}")?;
 
         // Write out span fields. Istio logging outside of Rust doesn't really have this concept
         if let Some(scope) = ctx.event_scope() {
             for span in scope.from_root() {
                 write!(writer, ":{}", span.metadata().name())?;
                 let ext = span.extensions();
-                if let Some(fields) = &ext.get::<FormattedFields<N>>() {
-                    if !fields.is_empty() {
-                        write!(writer, "{{{}}}", fields)?;
-                    }
+                if let Some(fields) = &ext.get::<FormattedFields<N>>()
+                    && !fields.is_empty()
+                {
+                    write!(writer, "{{{fields}}}")?;
                 }
             }
         };
@@ -285,7 +285,7 @@ impl<S: SerializeMap> Visit for JsonVisitory<S> {
         if self.state.is_ok() {
             self.state = self
                 .serializer
-                .serialize_entry(field.name(), &format_args!("{:?}", value))
+                .serialize_entry(field.name(), &format_args!("{value:?}"))
         }
     }
 
@@ -326,9 +326,7 @@ impl io::Write for WriteAdaptor<'_> {
         let s =
             std::str::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        self.fmt_write
-            .write_str(s)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        self.fmt_write.write_str(s).map_err(io::Error::other)?;
 
         Ok(s.len())
     }
@@ -507,7 +505,7 @@ pub mod testing {
             .map(|h| {
                 h.iter()
                     .sorted_by_key(|(k, _)| *k)
-                    .map(|(k, err)| format!("{}:{}", k, err))
+                    .map(|(k, err)| format!("{k}:{err}"))
                     .join("\n")
             })
             .join("\n\n");

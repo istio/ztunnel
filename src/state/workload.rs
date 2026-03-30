@@ -14,6 +14,7 @@
 
 use crate::identity::Identity;
 
+use crate::baggage::Baggage;
 use crate::state::WorkloadInfo;
 use crate::strng::Strng;
 use crate::xds::istio::workload::{Port, PortList};
@@ -36,7 +37,7 @@ use std::sync::Arc;
 use std::{fmt, net};
 use thiserror::Error;
 use tokio::sync::watch::{Receiver, Sender};
-use tracing::{error, trace};
+use tracing::trace;
 use xds::istio::workload::ApplicationTunnel as XdsApplicationTunnel;
 use xds::istio::workload::GatewayAddress as XdsGatewayAddress;
 use xds::istio::workload::Workload as XdsWorkload;
@@ -299,6 +300,19 @@ impl Workload {
             trust_domain: self.trust_domain.clone(),
             namespace: self.namespace.clone(),
             service_account: self.service_account.clone(),
+        }
+    }
+
+    pub fn baggage(&self) -> Baggage {
+        Baggage {
+            cluster_id: (!self.cluster_id.is_empty()).then_some(self.cluster_id.clone()),
+            namespace: (!self.namespace.is_empty()).then_some(self.namespace.clone()),
+            workload_name: (!self.workload_name.is_empty()).then_some(self.workload_name.clone()),
+            service_name: (!self.canonical_name.is_empty()).then_some(self.canonical_name.clone()),
+            revision: (!self.canonical_revision.is_empty())
+                .then_some(self.canonical_revision.clone()),
+            region: (!self.locality.region.is_empty()).then_some(self.locality.region.clone()),
+            zone: (!self.locality.zone.is_empty()).then_some(self.locality.zone.clone()),
         }
     }
 }
@@ -825,10 +839,9 @@ impl WorkloadStore {
                     for wip in prev.workload_ips.iter() {
                         if let Entry::Occupied(mut o) =
                             self.by_addr.entry(network_addr(prev.network.clone(), *wip))
+                            && o.get_mut().remove_uid(prev.uid.clone())
                         {
-                            if o.get_mut().remove_uid(prev.uid.clone()) {
-                                o.remove();
-                            }
+                            o.remove();
                         }
                     }
                 }
@@ -906,8 +919,9 @@ pub enum WorkloadError {
 mod tests {
     use super::*;
     use crate::config::ConfigSource;
-    use crate::state::{DemandProxyState, ProxyState, ServiceResolutionMode};
+    use crate::state::{DemandProxyState, ProxyState, ServiceResolutionMode, UpstreamDestination};
     use crate::test_helpers::helpers::initialize_telemetry;
+    use crate::test_helpers::{LOCALHOST_YAML, temp_file_with_content};
     use crate::xds::istio::workload::PortList as XdsPortList;
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::WorkloadStatus as XdsStatus;
@@ -1028,8 +1042,8 @@ mod tests {
             },
         )]);
 
-        let uid1 = format!("cluster1//v1/Pod/default/my-pod/{:?}", ip1);
-        let uid2 = format!("cluster1//v1/Pod/default/my-pod/{:?}", ip2);
+        let uid1 = format!("cluster1//v1/Pod/default/my-pod/{ip1:?}");
+        let uid2 = format!("cluster1//v1/Pod/default/my-pod/{ip2:?}");
 
         updater
             .insert_workload(
@@ -1124,6 +1138,7 @@ mod tests {
                     load_balancing: None,
                     ip_families: 0,
                     extensions: Default::default(),
+                    canonical: true,
                 },
             )
             .unwrap();
@@ -1158,6 +1173,7 @@ mod tests {
                     load_balancing: None,
                     ip_families: 0,
                     extensions: Default::default(),
+                    canonical: true,
                 },
             )
             .unwrap();
@@ -1215,6 +1231,7 @@ mod tests {
                     load_balancing: None,
                     ip_families: 0,
                     extensions: Default::default(),
+                    canonical: true,
                 },
             )
             .unwrap();
@@ -1526,6 +1543,7 @@ mod tests {
                     load_balancing: None,
                     ip_families: 0,
                     extensions: Default::default(),
+                    canonical: true,
                 },
             )
             .unwrap();
@@ -1553,6 +1571,7 @@ mod tests {
                     }),
                     ip_families: 0,
                     extensions: Default::default(),
+                    canonical: true,
                 },
             )
             .unwrap();
@@ -1604,6 +1623,7 @@ mod tests {
             }),
             ip_families: 0,
             extensions: Default::default(),
+            canonical: true,
         };
         updater
             .insert_service(
@@ -1625,6 +1645,7 @@ mod tests {
                     load_balancing: None,
                     ip_families: 0,
                     extensions: Default::default(),
+                    canonical: true,
                 },
             )
             .unwrap();
@@ -1734,7 +1755,7 @@ mod tests {
 
         let xds_ip1 = Bytes::copy_from_slice(&[127, 0, 0, 1]);
         let ip1 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-        let uid1 = format!("cluster1//v1/Pod/default/my-pod/{:?}", ip1);
+        let uid1 = format!("cluster1//v1/Pod/default/my-pod/{ip1:?}");
 
         let services = HashMap::from([(
             "ns/svc1.ns.svc.cluster.local".to_string(),
@@ -1828,12 +1849,14 @@ mod tests {
         .try_into()
         .unwrap();
         for _ in 0..1000 {
-            if let Some((workload, _, _)) = state.state.read().unwrap().find_upstream(
-                strng::EMPTY,
-                &wl,
-                "127.0.1.1:80".parse().unwrap(),
-                ServiceResolutionMode::Standard,
-            ) {
+            if let Some(UpstreamDestination::UpstreamParts(workload, _, _)) =
+                state.state.read().unwrap().find_upstream(
+                    strng::EMPTY,
+                    &wl,
+                    "127.0.1.1:80".parse().unwrap(),
+                    ServiceResolutionMode::Standard,
+                )
+            {
                 let n = &workload.name; // borrow name instead of cloning
                 found.insert(n.to_string()); // insert an owned copy of the borrowed n
                 wants.remove(&n.to_string()); // remove using the borrow
@@ -1849,11 +1872,8 @@ mod tests {
 
     #[tokio::test]
     async fn local_client() {
-        let cfg = ConfigSource::File(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("examples")
-                .join("localhost.yaml"),
-        );
+        let config_file = temp_file_with_content(LOCALHOST_YAML).unwrap();
+        let cfg = ConfigSource::File(config_file.path().to_path_buf());
         let (state, demand, _) = setup_test();
         let local_client = LocalClient {
             cfg,
@@ -1871,17 +1891,16 @@ mod tests {
         // Make sure we get a valid workload
         assert!(wl.is_some());
         assert_eq!(wl.as_ref().unwrap().service_account, "default");
-        let (_, port, svc) = demand
-            .state
-            .read()
-            .unwrap()
-            .find_upstream(
-                strng::EMPTY,
-                wl.as_ref().unwrap(),
-                "127.10.0.1:80".parse().unwrap(),
-                ServiceResolutionMode::Standard,
-            )
-            .expect("should get");
+
+        let (port, svc) = match demand.state.read().unwrap().find_upstream(
+            strng::EMPTY,
+            wl.as_ref().unwrap(),
+            "127.10.0.1:80".parse().unwrap(),
+            ServiceResolutionMode::Standard,
+        ) {
+            Some(UpstreamDestination::UpstreamParts(_, port, svc)) => (port, svc),
+            _ => panic!("should get"),
+        };
         // Make sure we get a valid VIP
         assert_eq!(port, 8080);
         assert_eq!(
@@ -1890,17 +1909,15 @@ mod tests {
         );
 
         // test that we can have a service in another network than workloads it selects
-        let (_, port, _) = demand
-            .state
-            .read()
-            .unwrap()
-            .find_upstream(
-                "remote".into(),
-                wl.as_ref().unwrap(),
-                "127.10.0.2:80".parse().unwrap(),
-                ServiceResolutionMode::Standard,
-            )
-            .expect("should get");
+        let port = match demand.state.read().unwrap().find_upstream(
+            "remote".into(),
+            wl.as_ref().unwrap(),
+            "127.10.0.2:80".parse().unwrap(),
+            ServiceResolutionMode::Standard,
+        ) {
+            Some(UpstreamDestination::UpstreamParts(_, port, _)) => port,
+            _ => panic!("should get"),
+        };
         // Make sure we get a valid VIP
         assert_eq!(port, 8080);
     }

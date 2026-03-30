@@ -19,15 +19,11 @@ use tokio::io;
 use tokio::net::TcpSocket;
 use tokio::net::{TcpListener, TcpStream};
 use std::io::Error;
-use socket2::SockRef;
-
+use socket2::{SockRef, TcpKeepalive};
+use crate::config::SocketConfig;
 
 #[cfg(target_os = "linux")]
-use {
-    socket2::Domain,
-    std::io::ErrorKind,
-    tracing::warn,
-};
+use {socket2::Domain, std::io::ErrorKind, tracing::warn};
 
 #[cfg(target_os = "linux")]
 pub fn set_freebind_and_transparent(socket: &TcpSocket) -> io::Result<()> {
@@ -35,11 +31,11 @@ pub fn set_freebind_and_transparent(socket: &TcpSocket) -> io::Result<()> {
     match socket.domain()? {
         Domain::IPV4 => {
             socket.set_ip_transparent_v4(true)?;
-            socket.set_freebind(true)?;
+            socket.set_freebind_v4(true)?;
         }
         Domain::IPV6 => {
             linux::set_ipv6_transparent(&socket)?;
-            socket.set_freebind_ipv6(true)?
+            socket.set_freebind_v6(true)?
         }
         _ => return Err(Error::new(ErrorKind::Unsupported, "unsupported domain")),
     };
@@ -71,8 +67,8 @@ fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
                 if !sock.ip_transparent_v4().unwrap_or(false) && !linux::ipv6_transparent(&sock).unwrap_or(false) {
                 // In TPROXY mode, this is normal, so don't bother logging
                 warn!(
-                    peer=?stream.peer_addr().unwrap(),
-                    local=?stream.local_addr().unwrap(),
+                    peer=%stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "N.A.".to_string()),
+                    local=%stream.local_addr().map(|a| a.to_string()).unwrap_or_else(|_| "N.A.".to_string()),
                     "failed to read SO_ORIGINAL_DST: {e4:?}, {e6:?}"
                 );
                 }
@@ -170,11 +166,11 @@ mod linux {
     }
 
     pub fn original_dst(sock: &SockRef) -> io::Result<SockAddr> {
-        sock.original_dst()
+        sock.original_dst_v4()
     }
 
     pub fn original_dst_ipv6(sock: &SockRef) -> io::Result<SockAddr> {
-        sock.original_dst_ipv6()
+        sock.original_dst_v6()
     }
 }
 #[cfg(target_os = "windows")]
@@ -184,29 +180,55 @@ mod windows {
     use tokio::io;
 
     pub fn original_dst(sock: &SockRef) -> io::Result<SockAddr> {
-        sock.original_dst()
+        sock.original_dst_v4()
     }
 
     pub fn original_dst_ipv6(sock: &SockRef) -> io::Result<SockAddr> {
-        sock.original_dst_ipv6()
+        sock.original_dst_v6()
     }
 }
 /// Listener is a wrapper For TCPListener with sane defaults. Notably, setting NODELAY
-pub struct Listener(TcpListener);
+/// You can also pass it additional socket options to set on accepted connections.
+pub struct Listener {
+    listener: TcpListener,
+    cfg: Option<SocketConfig>,
+}
 
 impl Listener {
     pub fn new(l: TcpListener) -> Self {
-        Self(l)
+        Listener {
+            listener: l,
+            cfg: None,
+        }
     }
     pub fn local_addr(&self) -> SocketAddr {
-        self.0.local_addr().expect("local_addr is available")
+        self.listener.local_addr().expect("local_addr is available")
     }
     pub fn inner(self) -> TcpListener {
-        self.0
+        self.listener
+    }
+    pub fn set_socket_options(&mut self, cfg: Option<SocketConfig>) {
+        self.cfg = cfg;
     }
     pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
-        let (stream, remote) = self.0.accept().await?;
+        let (stream, remote) = self.listener.accept().await?;
         stream.set_nodelay(true)?;
+        if let Some(cfg) = self.cfg {
+            if cfg.keepalive_enabled {
+                let ka = TcpKeepalive::new()
+                    .with_time(cfg.keepalive_time)
+                    .with_retries(cfg.keepalive_retries)
+                    .with_interval(cfg.keepalive_interval);
+                let res = SockRef::from(&stream).set_tcp_keepalive(&ka);
+                tracing::trace!("set keepalive: {:?}", res);
+            }
+            #[cfg(target_os = "linux")]
+            if cfg.user_timeout_enabled {
+                let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
+                let res = SockRef::from(&stream).set_tcp_user_timeout(Some(ut));
+                tracing::trace!("set user timeout: {:?}", res);
+            }
+        }
         Ok((stream, remote))
     }
 }
@@ -216,7 +238,7 @@ impl Listener {
 #[cfg(target_os = "linux")]
 impl Listener {
     pub fn set_transparent(&self) -> io::Result<()> {
-        let socket = SockRef::from(&self.0);
+        let socket = SockRef::from(&self.listener);
         match socket.domain()? {
             Domain::IPV4 => {
                 socket.set_ip_transparent_v4(true)?;
@@ -238,5 +260,43 @@ impl Listener {
             io::ErrorKind::Other,
             "IP_TRANSPARENT not supported on this operating system",
         ))
+    }
+}
+
+#[cfg(test)]
+pub mod socket_tests {
+    use tokio::net::TcpStream;
+
+    use crate::{config::SocketConfig, socket::Listener};
+
+    #[tokio::test]
+    async fn test_keep_alive_options() {
+        let cfg = SocketConfig {
+            keepalive_enabled: true,
+            keepalive_time: std::time::Duration::from_secs(10),
+            keepalive_retries: 5,
+            keepalive_interval: std::time::Duration::from_secs(2),
+            user_timeout_enabled: true,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+        TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+
+        let mut socklistener = Listener::new(listener);
+        socklistener.set_socket_options(Some(cfg));
+
+        let (stream, _) = socklistener.accept().await.unwrap();
+        // Verify keepalive options
+        let sock = socket2::SockRef::from(&stream);
+        assert_eq!(sock.tcp_keepalive_time().unwrap(), cfg.keepalive_time);
+        assert_eq!(sock.tcp_keepalive_retries().unwrap(), cfg.keepalive_retries);
+        assert_eq!(
+            sock.tcp_keepalive_interval().unwrap(),
+            cfg.keepalive_interval
+        );
+        let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
+        assert_eq!(sock.tcp_user_timeout().unwrap(), Some(ut));
     }
 }

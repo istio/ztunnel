@@ -401,7 +401,7 @@ pub(crate) mod tests {
                 assert!(e.contains("EOF"));
             }
             Ok(()) => {}
-            Err(e) => panic!("expected error due to EOF {:?}", e),
+            Err(e) => panic!("expected error due to EOF {e:?}"),
         }
     }
 

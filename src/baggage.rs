@@ -18,7 +18,7 @@ use hyper::{
     http::HeaderValue,
 };
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Baggage {
     pub cluster_id: Option<Strng>,
     pub namespace: Option<Strng>,
@@ -27,6 +27,43 @@ pub struct Baggage {
     pub revision: Option<Strng>,
     pub region: Option<Strng>,
     pub zone: Option<Strng>,
+}
+
+pub fn baggage_header_val(baggage: &Baggage, workload_type: &str) -> String {
+    [
+        baggage
+            .cluster_id
+            .as_ref()
+            .map(|cluster| format!("k8s.cluster.name={cluster}")),
+        baggage
+            .namespace
+            .as_ref()
+            .map(|namespace| format!("k8s.namespace.name={namespace}")),
+        baggage
+            .workload_name
+            .as_ref()
+            .map(|workload| format!("k8s.{workload_type}.name={workload}")),
+        baggage
+            .service_name
+            .as_ref()
+            .map(|service| format!("service.name={service}")),
+        baggage
+            .revision
+            .as_ref()
+            .map(|revision| format!("service.version={revision}")),
+        baggage
+            .region
+            .as_ref()
+            .map(|region| format!("cloud.region={region}")),
+        baggage
+            .zone
+            .as_ref()
+            .map(|zone| format!("cloud.availability_zone={zone}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(",")
 }
 
 pub fn parse_baggage_header(headers: GetAll<HeaderValue>) -> Result<Baggage, ToStrError> {
@@ -67,8 +104,9 @@ pub mod tests {
     use hyper::{HeaderMap, http::HeaderValue};
 
     use crate::proxy::BAGGAGE_HEADER;
+    use crate::strng::Strng;
 
-    use super::parse_baggage_header;
+    use super::{Baggage, baggage_header_val, parse_baggage_header};
 
     #[test]
     fn baggage_parser() -> anyhow::Result<()> {
@@ -90,8 +128,8 @@ pub mod tests {
         let mut hm = HeaderMap::new();
         let baggage_str = "k8s.cluster.name=,k8s.namespace.name=,k8s.deployment.name=,service.name=,service.version=";
         let header_value = HeaderValue::from_str(baggage_str)?;
-        let baggage = parse_baggage_header(hm.get_all(BAGGAGE_HEADER))?;
         hm.append(BAGGAGE_HEADER, header_value);
+        let baggage = parse_baggage_header(hm.get_all(BAGGAGE_HEADER))?;
         assert_eq!(baggage.cluster_id, None);
         assert_eq!(baggage.namespace, None);
         assert_eq!(baggage.workload_name, None);
@@ -134,6 +172,39 @@ pub mod tests {
         assert_eq!(baggage.workload_name, None);
         assert_eq!(baggage.service_name, None);
         assert_eq!(baggage.revision, None);
+        Ok(())
+    }
+
+    #[test]
+    fn baggage_header_val_can_be_parsed() -> anyhow::Result<()> {
+        {
+            let baggage = Baggage {
+                ..Default::default()
+            };
+            let mut hm = HeaderMap::new();
+            hm.append(
+                BAGGAGE_HEADER,
+                HeaderValue::from_str(&baggage_header_val(&baggage, "deployment"))?,
+            );
+            let parsed = parse_baggage_header(hm.get_all(BAGGAGE_HEADER))?;
+            assert_eq!(baggage, parsed);
+        }
+        {
+            let baggage = Baggage {
+                cluster_id: Some(Strng::from("cluster")),
+                namespace: Some(Strng::from("default")),
+                workload_name: Some(Strng::from("workload")),
+                service_name: Some(Strng::from("service")),
+                ..Default::default()
+            };
+            let mut hm = HeaderMap::new();
+            hm.append(
+                BAGGAGE_HEADER,
+                HeaderValue::from_str(&baggage_header_val(&baggage, "deployment"))?,
+            );
+            let parsed = parse_baggage_header(hm.get_all(BAGGAGE_HEADER))?;
+            assert_eq!(baggage, parsed);
+        }
         Ok(())
     }
 }
