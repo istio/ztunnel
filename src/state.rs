@@ -254,7 +254,7 @@ impl ProxyState {
         match self.workloads.find_address(network_addr) {
             None => {
                 // 2. handle service
-                if let Some(svc) = self.services.get_by_vip(network_addr) {
+                if let Some(svc) = self.services.get_by_vip_unscoped(network_addr) {
                     return Some(Address::Service(svc));
                 }
                 None
@@ -302,7 +302,7 @@ impl ProxyState {
     ) -> Option<UpstreamDestination> {
         if let Some(svc) = self
             .services
-            .get_by_vip(&network_addr(network.clone(), addr.ip()))
+            .get_by_vip(&network_addr(network.clone(), addr.ip()), &source_workload.namespace)
         {
             if let Some(lb) = &svc.load_balancer
                 && lb.mode == LoadBalancerMode::Passthrough

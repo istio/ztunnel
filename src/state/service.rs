@@ -58,6 +58,33 @@ pub struct Service {
 
     #[serde(default)]
     pub canonical: bool,
+
+    /// Namespaces to which this service is visible.
+    /// Empty means visible to all (equivalent to ["*"]).
+    /// "." means only the namespace where the service is defined.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub export_to: Vec<Strng>,
+}
+
+impl Service {
+    /// Returns true if this service is visible to the given client namespace.
+    pub fn is_visible_to(&self, client_ns: &Strng) -> bool {
+        if self.export_to.is_empty() {
+            return true;
+        }
+        for vis in &self.export_to {
+            if vis.as_str() == "*" {
+                return true;
+            }
+            if vis.as_str() == "." {
+                return client_ns == &self.namespace;
+            }
+            if vis == client_ns {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// EndpointSet is an abstraction over a set of endpoints.
@@ -332,6 +359,7 @@ impl TryFrom<&XdsService> for Service {
             load_balancer: lb,
             ip_families,
             canonical: s.canonical,
+            export_to: s.export_to.iter().map(strng::new).collect(),
         };
         Ok(svc)
     }
@@ -355,8 +383,18 @@ pub struct ServiceStore {
 }
 
 impl ServiceStore {
-    /// Returns the [Service] matching the given VIP.
-    pub fn get_by_vip(&self, vip: &NetworkAddress) -> Option<Arc<Service>> {
+    /// Returns the [Service] matching the given VIP, filtered by namespace visibility.
+    pub fn get_by_vip(&self, vip: &NetworkAddress, client_ns: &Strng) -> Option<Arc<Service>> {
+        self.by_vip
+            .get(vip)
+            .filter(|s| s.is_visible_to(client_ns))
+            .cloned()
+    }
+
+    /// Returns the [Service] matching the given VIP without namespace filtering.
+    /// Used for inbound traffic and general address resolution where the source
+    /// namespace is not relevant.
+    pub fn get_by_vip_unscoped(&self, vip: &NetworkAddress) -> Option<Arc<Service>> {
         self.by_vip.get(vip).cloned()
     }
 
