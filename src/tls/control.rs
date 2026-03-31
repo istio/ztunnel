@@ -289,6 +289,9 @@ struct RootCertManagerInner {
     root_cert: RootCert,
 
     /// OS watcher
+    // WARNING: must use FileIdMap, NOT NoCache. Kubernetes secret/configmap volume updates
+    // use atomic symlink swaps — FileIdMap tracks inode identity across renames so these
+    // are detected correctly. NoCache silently misses them, breaking CRL hot-reload entirely.
     _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
 }
 
