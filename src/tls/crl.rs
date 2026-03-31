@@ -14,7 +14,7 @@
 
 use notify::RecommendedWatcher;
 use notify_debouncer_full::{
-    DebounceEventResult, Debouncer, NoCache, new_debouncer, notify::RecursiveMode,
+    DebounceEventResult, Debouncer, FileIdMap, new_debouncer_opt, notify::RecursiveMode,
 };
 use rustls::pki_types::CertificateRevocationListDer;
 use rustls_pemfile::Item;
@@ -54,7 +54,7 @@ impl std::fmt::Debug for CrlManager {
 struct CrlManagerInner {
     crl_ders: Option<Vec<Vec<u8>>>, // None = not loaded, Some = loaded (may be empty)
     crl_path: PathBuf,
-    _debouncer: Option<Debouncer<RecommendedWatcher, NoCache>>,
+    _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
 }
 
 impl CrlManager {
@@ -213,7 +213,7 @@ impl CrlManager {
 
         // create debouncer with 2-second timeout
         // this collapses multiple events (CREATE/CHMOD/RENAME/REMOVE) into a single reload
-        let mut debouncer = new_debouncer(
+        let mut debouncer = new_debouncer_opt(
             Duration::from_secs(2),
             None,
             move |result: DebounceEventResult| {
@@ -241,6 +241,8 @@ impl CrlManager {
                     }
                 }
             },
+            FileIdMap::new(),
+            notify::Config::default(),
         )
         .map_err(|e| CrlError::ParseError(format!("failed to create debouncer: {}", e)))?;
 
