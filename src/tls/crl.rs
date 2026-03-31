@@ -54,6 +54,9 @@ impl std::fmt::Debug for CrlManager {
 struct CrlManagerInner {
     crl_ders: Option<Vec<Vec<u8>>>, // None = not loaded, Some = loaded (may be empty)
     crl_path: PathBuf,
+    // WARNING: must use FileIdMap, NOT NoCache. Kubernetes secret/configmap volume updates
+    // use atomic symlink swaps — FileIdMap tracks inode identity across renames so these
+    // are detected correctly. NoCache silently misses them, breaking CRL hot-reload entirely.
     _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
 }
 
