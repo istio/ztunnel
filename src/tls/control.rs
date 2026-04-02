@@ -21,8 +21,8 @@ use hyper::body::Incoming;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use itertools::Itertools;
-use notify::{RecommendedWatcher, Watcher};
-use notify_debouncer_full::{DebounceEventResult, Debouncer, FileIdMap, new_debouncer};
+use notify::{Config, RecommendedWatcher};
+use notify_debouncer_full::{DebounceEventResult, Debouncer, FileIdMap, new_debouncer_opt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
@@ -359,7 +359,7 @@ impl RootCertManager {
 
         let manager = Arc::clone(self);
 
-        let mut debouncer = new_debouncer(
+        let mut debouncer = new_debouncer_opt(
             Duration::from_secs(2),
             None,
             move |result: DebounceEventResult| match result {
@@ -378,11 +378,12 @@ impl RootCertManager {
                     }
                 }
             },
+            FileIdMap::new(),
+            Config::default(),
         )
         .map_err(|e| Error::InvalidRootCert(format!("failed to create root cert watcher: {e}")))?;
 
         debouncer
-            .watcher()
             .watch(watch_dir, notify::RecursiveMode::NonRecursive)
             .map_err(|e| {
                 Error::InvalidRootCert(format!(
