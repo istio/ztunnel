@@ -326,7 +326,7 @@ impl WorkloadCertificate {
         let client_cert_verifier =
             crate::tls::workload::TrustDomainVerifier::new(raw_client_cert_verifier, td);
         let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
-            .with_protocol_versions(tls::TLS_VERSIONS)
+            .with_protocol_versions(tls::tls_versions())
             .expect("server config must be valid")
             .with_client_cert_verifier(client_cert_verifier)
             .with_single_cert(
@@ -343,7 +343,7 @@ impl WorkloadCertificate {
         let roots = self.root_store.clone();
         let verifier = IdentityVerifier { roots, identity };
         let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
-            .with_protocol_versions(tls::TLS_VERSIONS)
+            .with_protocol_versions(tls::tls_versions())
             .expect("client config must be valid")
             .dangerous() // Customer verifier is requires "dangerous" opt-in
             .with_custom_certificate_verifier(Arc::new(verifier))
