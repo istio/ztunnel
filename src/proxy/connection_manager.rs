@@ -632,6 +632,7 @@ mod tests {
             namespace: auth_namespace.into(),
             rules: vec![],
             dry_run: false,
+            extensions: vec![],
         };
         let mut auth_xds_name = String::with_capacity(1 + auth_namespace.len() + auth_name.len());
         auth_xds_name.push_str(auth_namespace);

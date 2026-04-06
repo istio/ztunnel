@@ -746,10 +746,12 @@ mod tests {
                                 "spiffe://cluster.local/ns/ns/sa/not-sa".to_string(),
                             )),
                         }],
+                        extensions: vec![],
                     }],
                 }],
             }],
             dry_run: false,
+            extensions: vec![],
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
