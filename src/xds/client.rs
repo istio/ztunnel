@@ -888,6 +888,7 @@ mod tests {
                 }],
             }],
             dry_run: false,
+            extensions: vec![],
         };
         ProtoResource {
             name: format!("foo{i}"),
