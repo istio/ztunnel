@@ -1202,7 +1202,7 @@ mod tests {
                 .get_by_vip(&NetworkAddress {
                     network: strng::EMPTY,
                     address: IpAddr::V4(vip1),
-                })
+                }, &strng::new("ns"))
                 .unwrap()),
         );
 
@@ -1276,7 +1276,7 @@ mod tests {
                 .get_by_vip(&NetworkAddress {
                     network: strng::EMPTY,
                     address: IpAddr::V4(vip1),
-                })
+                }, &strng::new("ns"))
                 .unwrap()),
         );
 
@@ -1303,7 +1303,7 @@ mod tests {
                 .get_by_vip(&NetworkAddress {
                     network: strng::EMPTY,
                     address: IpAddr::V4(vip1),
-                })
+                }, &strng::new("ns"))
                 .unwrap()),
         );
 
