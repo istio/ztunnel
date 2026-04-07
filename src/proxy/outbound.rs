@@ -544,10 +544,13 @@ impl OutboundConnection {
         // If this is to-service traffic check for a service waypoint
         // Capture result of whether this is svc addressed
         let service = if let Some(Address::Service(target_service)) = state
-            .fetch_address(&NetworkAddress {
-                network: self.pi.cfg.network.clone(),
-                address: target.ip(),
-            })
+            .fetch_address(
+                &NetworkAddress {
+                    network: self.pi.cfg.network.clone(),
+                    address: target.ip(),
+                },
+                Some(&source_workload.namespace),
+            )
             .await
         {
             // if we have a waypoint for this svc, use it; otherwise route traffic normally

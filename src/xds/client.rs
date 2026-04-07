@@ -969,7 +969,7 @@ mod tests {
                     .find_address(&NetworkAddress {
                         network: strng::EMPTY,
                         address: std::net::Ipv4Addr::new(1, 2, 3, 4).into(),
-                    })
+                    }, None)
                     .expect("address not in cache");
                     let conn = crate::rbac::Connection{
                         dst: std::net::SocketAddr::new(std::net::Ipv4Addr::new(1, 2, 3, 4).into(), 80),
@@ -1141,7 +1141,7 @@ mod tests {
                     .find_address(&NetworkAddress {
                         network: strng::EMPTY,
                         address: std::net::Ipv4Addr::new(1, 0, 0, 1).into(),
-                    })
+                    }, None)
                     .expect("demander return but resource not in cache");
                 return;
             }

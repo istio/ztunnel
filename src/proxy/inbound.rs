@@ -538,7 +538,7 @@ impl Inbound {
 
             // TODO Allow HBONE address to be a hostname. We have to respect rules about
             // hostname scoping. Can we use the client's namespace here to do that?
-            let hbone_target = state.find_address(hbone_dst)?;
+            let hbone_target = state.find_address(hbone_dst, None)?;
 
             // HBONE target can point to some service or workload. In either case, get the waypoint
             let Some(target_waypoint) = (match hbone_target {
@@ -550,7 +550,7 @@ impl Inbound {
             };
 
             // Resolve the reference from our HBONE target
-            let Some(target_waypoint) = state.find_destination(&target_waypoint.destination) else {
+            let Some(target_waypoint) = state.find_destination(&target_waypoint.destination, None) else {
                 return Some(false);
             };
 
