@@ -700,7 +700,7 @@ mod tests {
             name: name.into(),
             namespace: ns.into(),
             hostname: format!("{name}.{ns}.svc.cluster.local").into(),
-            vips: vips.into_iter().map(|ip| nw(ip)).collect(),
+            vips: vips.into_iter().map(nw).collect(),
             ports: HashMap::new(),
             endpoints: EndpointSet::from_list([]),
             subject_alt_names: vec![],
