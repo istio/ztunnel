@@ -747,7 +747,7 @@ impl<'a> ServiceMatch<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::workload::{network_cidr, NetworkCidr};
+    use crate::state::workload::{NetworkCidr, network_cidr};
     use ipnet::IpNet;
     use std::net::Ipv4Addr;
 
@@ -880,8 +880,18 @@ mod tests {
     #[test]
     fn longest_prefix_match() {
         let mut store = ServiceStore::default();
-        store.insert(make_service("wide", "ns", vec![], vec![cidr("10.0.0.0/16")]));
-        store.insert(make_service("narrow", "ns", vec![], vec![cidr("10.0.0.0/24")]));
+        store.insert(make_service(
+            "wide",
+            "ns",
+            vec![],
+            vec![cidr("10.0.0.0/16")],
+        ));
+        store.insert(make_service(
+            "narrow",
+            "ns",
+            vec![],
+            vec![cidr("10.0.0.0/24")],
+        ));
 
         let svc = store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).unwrap();
         assert_eq!(svc.name, "narrow");
@@ -899,7 +909,12 @@ mod tests {
             vec![],
             vec![cidr("10.0.0.0/24")],
         ));
-        store.insert(make_service("exact-svc", "ns", vec![ip(10, 0, 0, 5)], vec![]));
+        store.insert(make_service(
+            "exact-svc",
+            "ns",
+            vec![ip(10, 0, 0, 5)],
+            vec![],
+        ));
 
         let svc = store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).unwrap();
         assert_eq!(svc.name, "exact-svc");
@@ -962,8 +977,18 @@ mod tests {
     #[test]
     fn overlapping_cidr_different_namespaces() {
         let mut store = ServiceStore::default();
-        store.insert(make_service("svc", "ns-a", vec![], vec![cidr("10.0.0.0/24")]));
-        store.insert(make_service("svc", "ns-b", vec![], vec![cidr("10.0.0.0/24")]));
+        store.insert(make_service(
+            "svc",
+            "ns-a",
+            vec![],
+            vec![cidr("10.0.0.0/24")],
+        ));
+        store.insert(make_service(
+            "svc",
+            "ns-b",
+            vec![],
+            vec![cidr("10.0.0.0/24")],
+        ));
 
         assert_eq!(store.by_cidr_vip.len(), 2);
 

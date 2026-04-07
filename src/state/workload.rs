@@ -15,12 +15,12 @@
 use crate::identity::Identity;
 
 use crate::baggage::Baggage;
-use ipnet::IpNet;
 use crate::state::WorkloadInfo;
 use crate::strng::Strng;
 use crate::xds::istio::workload::{Port, PortList};
 use crate::{strng, xds};
 use bytes::Bytes;
+use ipnet::IpNet;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
