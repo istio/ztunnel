@@ -196,6 +196,7 @@ pub fn mock_default_service() -> Service {
         namespace: "default".into(),
         hostname: "defaulthost".into(),
         vips,
+        cidr_vips: vec![],
         ports,
         endpoints,
         subject_alt_names: vec![],
@@ -287,6 +288,7 @@ fn test_custom_svc(
             network: strng::EMPTY,
             address: vip.parse()?,
         }],
+        cidr_vips: vec![],
         ports: HashMap::from([(80u16, echo_port)]),
         endpoints: EndpointSet::from_list([Endpoint {
             workload_uid: format!("cluster1//v1/Pod/default/{workload_name}").into(),
