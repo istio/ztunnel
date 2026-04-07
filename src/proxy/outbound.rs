@@ -952,6 +952,7 @@ mod tests {
                     addresses: vec![XdsNetworkAddress {
                         network: "".to_string(),
                         address: vec![127, 0, 0, 3],
+                        length: None,
                     }],
                     ports: vec![Port {
                         service_port: 80,
@@ -993,6 +994,7 @@ mod tests {
                     addresses: vec![XdsNetworkAddress {
                         network: "".to_string(),
                         address: vec![127, 0, 0, 3],
+                        length: None,
                     }],
                     ports: vec![Port {
                         service_port: 80,
@@ -1010,6 +1012,7 @@ mod tests {
                                 XdsNetworkAddress {
                                     network: "remote".to_string(),
                                     address: vec![10, 22, 1, 1],
+                                    length: None,
                                 },
                             ),
                         ),
@@ -1051,6 +1054,7 @@ mod tests {
                     addresses: vec![XdsNetworkAddress {
                         network: "".to_string(),
                         address: vec![127, 0, 0, 3],
+                        length: None,
                     }],
                     ports: vec![Port {
                         service_port: 80,
@@ -1063,6 +1067,7 @@ mod tests {
                     addresses: vec![XdsNetworkAddress {
                         network: "".to_string(),
                         address: vec![127, 0, 0, 4],
+                        length: None,
                     }],
                     ports: vec![Port {
                         service_port: 15009,
@@ -1130,6 +1135,7 @@ mod tests {
                     addresses: vec![XdsNetworkAddress {
                         network: "".to_string(),
                         address: vec![127, 0, 0, 3],
+                        length: None,
                     }],
                     ports: vec![Port {
                         service_port: 80,
@@ -1153,6 +1159,7 @@ mod tests {
                     addresses: vec![XdsNetworkAddress {
                         network: "".to_string(),
                         address: vec![127, 0, 0, 4],
+                        length: None,
                     }],
                     ports: vec![Port {
                         service_port: 15008,
@@ -1170,6 +1177,7 @@ mod tests {
                                 XdsNetworkAddress {
                                     network: "remote".to_string(),
                                     address: vec![10, 22, 1, 1],
+                                    length: None,
                                 },
                             ),
                         ),
@@ -1212,6 +1220,7 @@ mod tests {
             addresses: vec![XdsNetworkAddress {
                 network: "".to_string(),
                 address: vec![127, 0, 0, 3],
+                length: None,
             }],
             ports: vec![Port {
                 service_port: 80,
@@ -1243,6 +1252,7 @@ mod tests {
                     XdsNetworkAddress {
                         network: "remote".to_string(),
                         address: vec![10, 22, 1, 1],
+                        length: None,
                     },
                 )),
                 hbone_mtls_port: 15009,
@@ -1433,6 +1443,7 @@ mod tests {
                         XdsNetworkAddress {
                             network: "".to_string(),
                             address: [127, 0, 0, 10].to_vec(),
+                            length: None,
                         },
                     )),
                     hbone_mtls_port: 15008,
@@ -1462,6 +1473,7 @@ mod tests {
                         XdsNetworkAddress {
                             network: "".to_string(),
                             address: [127, 0, 0, 10].to_vec(),
+                            length: None,
                         },
                     )),
                     hbone_mtls_port: 15008,
@@ -1496,6 +1508,7 @@ mod tests {
                         XdsNetworkAddress {
                             network: "".to_string(),
                             address: [127, 0, 0, 11].to_vec(),
+                            length: None,
                         },
                     )),
                     hbone_mtls_port: 15008,
@@ -1521,6 +1534,7 @@ mod tests {
                 addresses: vec![XdsNetworkAddress {
                     network: "".to_string(),
                     address: vec![127, 0, 0, 3],
+                    length: None,
                 }],
                 ports: vec![Port {
                     service_port: 80,
@@ -1531,6 +1545,7 @@ mod tests {
                         XdsNetworkAddress {
                             network: "".to_string(),
                             address: [127, 0, 0, 10].to_vec(),
+                            length: None,
                         },
                     )),
                     hbone_mtls_port: 15008,
@@ -1556,6 +1571,7 @@ mod tests {
                 addresses: vec![XdsNetworkAddress {
                     network: "".to_string(),
                     address: vec![127, 0, 0, 3],
+                    length: None,
                 }],
                 ports: vec![Port {
                     service_port: 80,
@@ -1580,6 +1596,7 @@ mod tests {
                     addresses: vec![XdsNetworkAddress {
                         network: "".to_string(),
                         address: vec![127, 0, 0, 3],
+                        length: None,
                     }],
                     ports: vec![
                         Port {
@@ -1641,6 +1658,7 @@ mod tests {
                 addresses: vec![XdsNetworkAddress {
                     network: "".to_string(),
                     address: vec![127, 0, 0, 3],
+                    length: None,
                 }],
                 ports: vec![Port {
                     service_port: 80,
@@ -1774,10 +1792,12 @@ mod tests {
                     XdsNetworkAddress {
                         network: "".to_string(),
                         address: vec![127, 0, 0, 3],
+                        length: None,
                     },
                     XdsNetworkAddress {
                         network: "".to_string(),
                         address: "::3".parse::<Ipv6Addr>().unwrap().octets().into(),
+                        length: None,
                     },
                 ],
                 ports: vec![Port {
@@ -1855,10 +1875,12 @@ mod tests {
                     XdsNetworkAddress {
                         network: "".to_string(),
                         address: vec![1, 2, 3, 4],
+                        length: None,
                     },
                     XdsNetworkAddress {
                         network: "".to_string(),
                         address: vec![1, 5, 6, 7],
+                        length: None,
                     },
                 ],
                 ports: vec![Port {
@@ -1888,6 +1910,7 @@ mod tests {
                         XdsNetworkAddress {
                             network: "".to_string(),
                             address: [127, 0, 0, 10].to_vec(),
+                            length: None,
                         },
                     )),
                     hbone_mtls_port: 15008,
@@ -1900,10 +1923,12 @@ mod tests {
                     XdsNetworkAddress {
                         network: "".to_string(),
                         address: vec![1, 2, 3, 4],
+                        length: None,
                     },
                     XdsNetworkAddress {
                         network: "".to_string(),
                         address: vec![1, 5, 6, 7],
+                        length: None,
                     },
                 ],
                 ports: vec![Port {
