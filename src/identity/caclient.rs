@@ -46,6 +46,7 @@ pub struct CaClient {
 }
 
 impl CaClient {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         address: String,
         alt_hostname: Option<String>,
