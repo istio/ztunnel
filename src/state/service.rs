@@ -365,7 +365,11 @@ impl ServiceStore {
     /// Returns the "best" [Service] matching the given VIP.
     /// If a namespace is provided, a Service from that namespace is preferred.
     /// Next, a Service marked `canonical` is preferred.
-    pub fn get_best_by_vip(&self, vip: &NetworkAddress, ns: Option<&Strng>) -> Option<Arc<Service>> {
+    pub fn get_best_by_vip(
+        &self,
+        vip: &NetworkAddress,
+        ns: Option<&Strng>,
+    ) -> Option<Arc<Service>> {
         let services = self.get_by_vip(vip)?;
         Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone())
     }
@@ -743,21 +747,33 @@ mod tests {
 
         // Namespace preference on shared VIP returns the correct service.
         assert_eq!(
-            store.get_best_by_vip(&nw(shared), Some(&ns_a)).unwrap().namespace,
+            store
+                .get_best_by_vip(&nw(shared), Some(&ns_a))
+                .unwrap()
+                .namespace,
             ns_a,
         );
         assert_eq!(
-            store.get_best_by_vip(&nw(shared), Some(&ns_b)).unwrap().namespace,
+            store
+                .get_best_by_vip(&nw(shared), Some(&ns_b))
+                .unwrap()
+                .namespace,
             ns_b,
         );
 
         // Exclusive VIPs always return their owner regardless of namespace hint.
         assert_eq!(
-            store.get_best_by_vip(&nw(only_a), Some(&ns_b)).unwrap().namespace,
+            store
+                .get_best_by_vip(&nw(only_a), Some(&ns_b))
+                .unwrap()
+                .namespace,
             ns_a,
         );
         assert_eq!(
-            store.get_best_by_vip(&nw(only_b), Some(&ns_a)).unwrap().namespace,
+            store
+                .get_best_by_vip(&nw(only_b), Some(&ns_a))
+                .unwrap()
+                .namespace,
             ns_b,
         );
 

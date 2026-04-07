@@ -550,7 +550,8 @@ impl Inbound {
             };
 
             // Resolve the reference from our HBONE target
-            let Some(target_waypoint) = state.find_destination(&target_waypoint.destination, None) else {
+            let Some(target_waypoint) = state.find_destination(&target_waypoint.destination, None)
+            else {
                 return Some(false);
             };
 
