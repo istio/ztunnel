@@ -64,7 +64,7 @@ hickory-resolver = "0.25"
 hickory-server = { version = "0.25", features = [ "resolver" ]}
 http-body = { version = "1" }
 http-body-util = "0.1"
-hyper = { version = "1.6", features = ["full"] }
+hyper = { version = "1.9", features = ["full"] }
 hyper-rustls = { version = "0.27.0", default-features = false, features = ["logging", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["full"] }
 ipnet = { version = "2.12", features = ["serde"] }
@@ -94,7 +94,7 @@ socket2 = { version = "0.6", features = ["all"] }
 textnonce = { version = "1.0" }
 thiserror = "2.0"
 tls-listener = { version = "0.11" }
-tokio = { version = "1.50", features = ["full", "test-util"] }
+tokio = { version = "1.51", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26", default-features = false }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.14", default-features = false, features = ["codegen"] }
@@ -162,7 +162,7 @@ oid-registry = "0.8"
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 x509-parser = { version = "0.18", default-features = false, features = ["verify"] }
 time = "0.3"
-ctor = "0.6"
+ctor = "0.8"
 
 [lints.clippy]
 # This rule makes code more confusing
