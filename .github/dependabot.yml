@@ -20,6 +20,9 @@ updates:
     schedule:
       interval: "weekly"
     rebase-strategy: "disabled"
+    ignore:
+      - dependency-name: "criterion"
+        versions: [">= 0.6"]
     target-branch: "release-1.29"
     groups:
       all-dependencies:
@@ -31,6 +34,9 @@ updates:
     schedule:
       interval: "weekly"
     rebase-strategy: "disabled"
+    ignore:
+      - dependency-name: "criterion"
+        versions: [">= 0.6"]
     target-branch: "release-1.28"
     groups:
       all-dependencies:
@@ -42,6 +48,9 @@ updates:
     schedule:
       interval: "weekly"
     rebase-strategy: "disabled"
+    ignore:
+      - dependency-name: "criterion"
+        versions: [">= 0.6"]
     target-branch: "release-1.27"
     groups:
       all-dependencies:
