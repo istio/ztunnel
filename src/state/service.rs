@@ -345,7 +345,8 @@ pub struct ServiceStore {
     pub(super) staged_services: HashMap<NamespacedHostname, HashMap<Strng, Endpoint>>,
 
     /// Allows for lookup of services by network address, the service's xds secondary key.
-    pub(super) by_vip: HashMap<NetworkAddress, Arc<Service>>,
+    /// Multiple services in different namespaces may share the same VIP.
+    pub(super) by_vip: HashMap<NetworkAddress, Vec<Arc<Service>>>,
 
     /// Allows for lookup of services by hostname, and then by namespace. XDS uses a combination
     /// of hostname and namespace as the primary key. In most cases, there will be a single
@@ -355,9 +356,22 @@ pub struct ServiceStore {
 }
 
 impl ServiceStore {
-    /// Returns the [Service] matching the given VIP.
-    pub fn get_by_vip(&self, vip: &NetworkAddress) -> Option<Arc<Service>> {
-        self.by_vip.get(vip).cloned()
+    /// Returns the list of [Service]s matching the given VIP. Multiple services in
+    /// different namespaces may share the same VIP.
+    pub fn get_by_vip(&self, vip: &NetworkAddress) -> Option<Vec<Arc<Service>>> {
+        self.by_vip.get(vip).map(|v| v.to_vec())
+    }
+
+    /// Returns the "best" [Service] matching the given VIP.
+    /// If a namespace is provided, a Service from that namespace is preferred.
+    /// Next, a Service marked `canonical` is preferred.
+    pub fn get_best_by_vip(
+        &self,
+        vip: &NetworkAddress,
+        ns: Option<&Strng>,
+    ) -> Option<Arc<Service>> {
+        let services = self.get_by_vip(vip)?;
+        Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone())
     }
 
     /// Returns the list of [Service]s matching the given hostname. Istio `ServiceEntry`
@@ -509,7 +523,21 @@ impl ServiceStore {
 
         // Map the vips to the service.
         for vip in &service.vips {
-            self.by_vip.insert(vip.clone(), service.clone());
+            match self.by_vip.get_mut(vip) {
+                None => {
+                    self.by_vip.insert(vip.clone(), vec![service.clone()]);
+                }
+                Some(services) => {
+                    if let Some((cur, _)) = services
+                        .iter()
+                        .find_position(|s| s.namespace == service.namespace)
+                    {
+                        services[cur] = service.clone();
+                    } else {
+                        services.push(service.clone());
+                    }
+                }
+            }
         }
 
         // Map the hostname to the service.
@@ -560,7 +588,12 @@ impl ServiceStore {
 
                 // Remove the entries for the previous service VIPs.
                 prev.vips.iter().for_each(|addr| {
-                    self.by_vip.remove(addr);
+                    if let Some(vip_services) = self.by_vip.get_mut(addr) {
+                        vip_services.retain(|s| s.namespace != prev.namespace);
+                        if vip_services.is_empty() {
+                            self.by_vip.remove(addr);
+                        }
+                    }
                 });
 
                 // Remove the staged service.
@@ -651,5 +684,125 @@ impl<'a> ServiceMatch<'a> {
             })
             .into_inner()
             .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn nw(ip: IpAddr) -> NetworkAddress {
+        NetworkAddress {
+            address: ip,
+            network: crate::strng::EMPTY,
+        }
+    }
+
+    fn make_service(name: &str, ns: &str, vips: Vec<IpAddr>) -> Service {
+        Service {
+            name: name.into(),
+            namespace: ns.into(),
+            hostname: format!("{name}.{ns}.svc.cluster.local").into(),
+            vips: vips.into_iter().map(nw).collect(),
+            ports: HashMap::new(),
+            endpoints: EndpointSet::from_list([]),
+            subject_alt_names: vec![],
+            waypoint: None,
+            load_balancer: None,
+            ip_families: None,
+            canonical: false,
+        }
+    }
+
+    #[test]
+    fn shared_vip_different_namespaces() {
+        let mut store = ServiceStore::default();
+        // shared: both services claim this VIP
+        let shared = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        // exclusive to each service
+        let only_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let only_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+
+        let ns_a: Strng = "ns-a".into();
+        let ns_b: Strng = "ns-b".into();
+
+        let svc_a = make_service("svc", "ns-a", vec![shared, only_a]);
+        let svc_b = make_service("svc", "ns-b", vec![shared, only_b]);
+
+        store.insert(svc_a);
+        store.insert(svc_b);
+
+        // 3 unique VIP addresses, 2 services.
+        assert_eq!(store.num_vips(), 3);
+        assert_eq!(store.num_services(), 2);
+
+        // Shared VIP has both services.
+        let all = store.get_by_vip(&nw(shared)).unwrap();
+        assert_eq!(all.len(), 2);
+
+        // Exclusive VIPs have one service each.
+        assert_eq!(store.get_by_vip(&nw(only_a)).unwrap().len(), 1);
+        assert_eq!(store.get_by_vip(&nw(only_b)).unwrap().len(), 1);
+
+        // Namespace preference on shared VIP returns the correct service.
+        assert_eq!(
+            store
+                .get_best_by_vip(&nw(shared), Some(&ns_a))
+                .unwrap()
+                .namespace,
+            ns_a,
+        );
+        assert_eq!(
+            store
+                .get_best_by_vip(&nw(shared), Some(&ns_b))
+                .unwrap()
+                .namespace,
+            ns_b,
+        );
+
+        // Exclusive VIPs always return their owner regardless of namespace hint.
+        assert_eq!(
+            store
+                .get_best_by_vip(&nw(only_a), Some(&ns_b))
+                .unwrap()
+                .namespace,
+            ns_a,
+        );
+        assert_eq!(
+            store
+                .get_best_by_vip(&nw(only_b), Some(&ns_a))
+                .unwrap()
+                .namespace,
+            ns_b,
+        );
+
+        // None returns some service.
+        assert!(store.get_best_by_vip(&nw(shared), None).is_some());
+
+        // Remove svc_a: shared VIP keeps svc_b, only_a is gone, only_b remains.
+        store.remove(&NamespacedHostname {
+            namespace: "ns-a".into(),
+            hostname: "svc.ns-a.svc.cluster.local".into(),
+        });
+        assert_eq!(store.num_vips(), 2); // shared + only_b
+        assert_eq!(store.num_services(), 1);
+
+        let all = store.get_by_vip(&nw(shared)).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].namespace, ns_b);
+
+        assert!(store.get_by_vip(&nw(only_a)).is_none());
+        assert!(store.get_by_vip(&nw(only_b)).is_some());
+
+        // Remove svc_b: everything is gone.
+        store.remove(&NamespacedHostname {
+            namespace: "ns-b".into(),
+            hostname: "svc.ns-b.svc.cluster.local".into(),
+        });
+        assert_eq!(store.num_vips(), 0);
+        assert_eq!(store.num_services(), 0);
+        assert!(store.get_by_vip(&nw(shared)).is_none());
+        assert!(store.get_by_vip(&nw(only_b)).is_none());
     }
 }

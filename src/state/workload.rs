@@ -1199,10 +1199,13 @@ mod tests {
                 .read()
                 .unwrap()
                 .services
-                .get_by_vip(&NetworkAddress {
-                    network: strng::EMPTY,
-                    address: IpAddr::V4(vip1),
-                })
+                .get_best_by_vip(
+                    &NetworkAddress {
+                        network: strng::EMPTY,
+                        address: IpAddr::V4(vip1),
+                    },
+                    Some(&"ns".into())
+                )
                 .unwrap()),
         );
 
@@ -1273,10 +1276,13 @@ mod tests {
                 .read()
                 .unwrap()
                 .services
-                .get_by_vip(&NetworkAddress {
-                    network: strng::EMPTY,
-                    address: IpAddr::V4(vip1),
-                })
+                .get_best_by_vip(
+                    &NetworkAddress {
+                        network: strng::EMPTY,
+                        address: IpAddr::V4(vip1),
+                    },
+                    Some(&"ns".into())
+                )
                 .unwrap()),
         );
 
@@ -1300,10 +1306,13 @@ mod tests {
                 .read()
                 .unwrap()
                 .services
-                .get_by_vip(&NetworkAddress {
-                    network: strng::EMPTY,
-                    address: IpAddr::V4(vip1),
-                })
+                .get_best_by_vip(
+                    &NetworkAddress {
+                        network: strng::EMPTY,
+                        address: IpAddr::V4(vip1),
+                    },
+                    Some(&"ns".into())
+                )
                 .unwrap()),
         );
 

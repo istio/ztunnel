@@ -761,7 +761,10 @@ where
         return false;
     };
 
-    match state.fetch_destination(&gateway_address.destination).await {
+    match state
+        .fetch_destination(&gateway_address.destination, None)
+        .await
+    {
         Some(Address::Workload(wl)) => return predicate(wl.as_ref()),
         Some(Address::Service(svc)) => {
             for ep in svc.endpoints.iter() {

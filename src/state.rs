@@ -241,20 +241,26 @@ impl ProxyState {
     }
 
     /// Find either a workload or service by the destination.
-    pub fn find_destination(&self, dest: &Destination) -> Option<Address> {
+    /// If `ns` is provided, prefer a service in that namespace when multiple share the same VIP.
+    pub fn find_destination(&self, dest: &Destination, ns: Option<&Strng>) -> Option<Address> {
         match dest {
-            Destination::Address(addr) => self.find_address(addr),
+            Destination::Address(addr) => self.find_address(addr, ns),
             Destination::Hostname(hostname) => self.find_hostname(hostname),
         }
     }
 
     /// Find either a workload or a service by address.
-    pub fn find_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
+    /// If `ns` is provided, prefer a service in that namespace when multiple share the same VIP.
+    pub fn find_address(
+        &self,
+        network_addr: &NetworkAddress,
+        ns: Option<&Strng>,
+    ) -> Option<Address> {
         // 1. handle workload ip, if workload not found fallback to service.
         match self.workloads.find_address(network_addr) {
             None => {
                 // 2. handle service
-                if let Some(svc) = self.services.get_by_vip(network_addr) {
+                if let Some(svc) = self.services.get_best_by_vip(network_addr, ns) {
                     return Some(Address::Service(svc));
                 }
                 None
@@ -300,10 +306,10 @@ impl ProxyState {
         addr: SocketAddr,
         resolution_mode: ServiceResolutionMode,
     ) -> Option<UpstreamDestination> {
-        if let Some(svc) = self
-            .services
-            .get_by_vip(&network_addr(network.clone(), addr.ip()))
-        {
+        if let Some(svc) = self.services.get_best_by_vip(
+            &network_addr(network.clone(), addr.ip()),
+            Some(&source_workload.namespace),
+        ) {
             if let Some(lb) = &svc.load_balancer
                 && lb.mode == LoadBalancerMode::Passthrough
             {
@@ -818,8 +824,11 @@ impl DemandProxyState {
         addr: SocketAddr,
         resolution_mode: ServiceResolutionMode,
     ) -> Result<Option<Upstream>, Error> {
-        self.fetch_address(&network_addr(network.clone(), addr.ip()))
-            .await;
+        self.fetch_address(
+            &network_addr(network.clone(), addr.ip()),
+            Some(&source_workload.namespace),
+        )
+        .await;
         let upstream = {
             self.read()
                 .find_upstream(network, source_workload, addr, resolution_mode)
@@ -1015,19 +1024,29 @@ impl DemandProxyState {
 
     /// Looks for either a workload or service by the destination. If not found locally,
     /// attempts to fetch on-demand.
-    pub async fn fetch_destination(&self, dest: &Destination) -> Option<Address> {
+    /// If `ns` is provided, prefer a service in that namespace when multiple share the same VIP.
+    pub async fn fetch_destination(
+        &self,
+        dest: &Destination,
+        ns: Option<&Strng>,
+    ) -> Option<Address> {
         match dest {
-            Destination::Address(addr) => self.fetch_address(addr).await,
+            Destination::Address(addr) => self.fetch_address(addr, ns).await,
             Destination::Hostname(hostname) => self.fetch_hostname(hostname).await,
         }
     }
 
     /// Looks for the given address to find either a workload or service by IP. If not found
     /// locally, attempts to fetch on-demand.
-    pub async fn fetch_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
+    /// If `ns` is provided, prefer a service in that namespace when multiple share the same VIP.
+    pub async fn fetch_address(
+        &self,
+        network_addr: &NetworkAddress,
+        ns: Option<&Strng>,
+    ) -> Option<Address> {
         // Wait for it on-demand, *if* needed
         debug!(%network_addr.address, "fetch address");
-        if let Some(address) = self.read().find_address(network_addr) {
+        if let Some(address) = self.read().find_address(network_addr, ns) {
             return Some(address);
         }
         if !self.supports_on_demand() {
@@ -1035,7 +1054,7 @@ impl DemandProxyState {
         }
         // if both cache not found, start on demand fetch
         self.fetch_on_demand(network_addr.to_string().into()).await;
-        self.read().find_address(network_addr)
+        self.read().find_address(network_addr, ns)
     }
 
     /// Looks for the given hostname to find either a workload or service by IP. If not found
@@ -1297,7 +1316,7 @@ mod tests {
         });
         test_helpers::assert_eventually(
             Duration::from_secs(5),
-            || mock_proxy_state.fetch_destination(&dst),
+            || mock_proxy_state.fetch_destination(&dst, None),
             Some(Address::Workload(Arc::new(
                 test_helpers::test_default_workload(),
             ))),
@@ -1311,7 +1330,7 @@ mod tests {
         });
         test_helpers::assert_eventually(
             Duration::from_secs(5),
-            || mock_proxy_state.fetch_destination(&dst),
+            || mock_proxy_state.fetch_destination(&dst, None),
             Some(Address::Service(Arc::new(
                 test_helpers::mock_default_service(),
             ))),
@@ -1325,7 +1344,7 @@ mod tests {
         });
         test_helpers::assert_eventually(
             Duration::from_secs(5),
-            || mock_proxy_state.fetch_destination(&dst),
+            || mock_proxy_state.fetch_destination(&dst, None),
             None,
         )
         .await;
@@ -1337,7 +1356,7 @@ mod tests {
         });
         test_helpers::assert_eventually(
             Duration::from_secs(5),
-            || mock_proxy_state.fetch_destination(&dst),
+            || mock_proxy_state.fetch_destination(&dst, None),
             None,
         )
         .await;
