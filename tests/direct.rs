@@ -349,7 +349,35 @@ async fn test_hostname_request_local() {
 
 #[tokio::test]
 async fn test_stats_exist() {
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
+    let echo_addr = echo.address();
+    tokio::spawn(echo.run());
     testapp::with_app(test_config(), async move |app| {
+        // Send some traffic so that traffic metrics are populated.
+        // prometheus-client 0.24.1+ does not encode empty metric families.
+        let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
+        let mut stream = app
+            .socks5_connect(
+                DestinationAddr::Ip(dst),
+                TEST_WORKLOAD_SOURCE.parse().unwrap(),
+            )
+            .await;
+        read_write_stream(&mut stream).await;
+        drop(stream);
+
+        // Wait for connection close to be recorded
+        assert_eventually(
+            Duration::from_secs(2),
+            || async {
+                app.metrics()
+                    .await
+                    .unwrap()
+                    .query_sum("istio_tcp_connections_closed_total", &Default::default())
+            },
+            1,
+        )
+        .await;
+
         let metrics = app.metrics().await.unwrap();
         for metric in &[
             // Meta
