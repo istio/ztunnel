@@ -379,21 +379,16 @@ async fn test_stats_exist() {
         .await;
 
         let metrics = app.metrics().await.unwrap();
+        // prometheus-client 0.24.1+ does not encode empty metric families,
+        // so we can only assert metrics that have been populated.
         for metric in &[
             // Meta
             ("istio_build"),
-            // Traffic
+            // Traffic (populated by the connection above)
             ("istio_tcp_connections_opened_total"),
             ("istio_tcp_connections_closed_total"),
             ("istio_tcp_received_bytes_total"),
             ("istio_tcp_sent_bytes_total"),
-            // XDS
-            ("istio_xds_connection_terminations_total"),
-            // DNS.
-            ("istio_dns_requests_total"),
-            ("istio_dns_upstream_requests_total"),
-            ("istio_dns_upstream_failures_total"),
-            ("istio_dns_upstream_request_duration_seconds"),
         ] {
             assert!(
                 metrics.query(metric, &Default::default()).is_some(),
