@@ -747,7 +747,7 @@ mod tests {
     use super::*;
     use crate::state::workload::{NetworkCidr, network_cidr};
     use ipnet::IpNet;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     fn nw(ip: IpAddr) -> NetworkAddress {
         NetworkAddress {
@@ -782,6 +782,10 @@ mod tests {
 
     fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    fn ip6(segments: [u16; 8]) -> IpAddr {
+        IpAddr::V6(Ipv6Addr::from(segments))
     }
 
     #[test]
@@ -866,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn cidr_match() {
+    fn cidr_match_v4() {
         let mut store = ServiceStore::default();
         store.insert(make_service("svc", "ns", vec![], vec![cidr("10.0.0.0/24")]));
 
@@ -880,7 +884,37 @@ mod tests {
     }
 
     #[test]
-    fn longest_prefix_match() {
+    fn cidr_match_v6() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service("svc", "ns", vec![], vec![cidr("fd00::/112")]));
+
+        // Inside the /112
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])), None)
+                .is_some()
+        );
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 0xffff])), None)
+                .is_some()
+        );
+        // Outside the /112
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 1, 0])), None)
+                .is_none()
+        );
+        // Different prefix entirely
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd01, 0, 0, 0, 0, 0, 0, 5])), None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn longest_prefix_match_v4() {
         let mut store = ServiceStore::default();
         store.insert(make_service(
             "wide",
@@ -903,7 +937,110 @@ mod tests {
     }
 
     #[test]
-    fn exact_match_priority_over_cidr() {
+    fn longest_prefix_match_v6() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service("wide", "ns", vec![], vec![cidr("fd00::/48")]));
+        store.insert(make_service(
+            "narrow",
+            "ns",
+            vec![],
+            vec![cidr("fd00::/112")],
+        ));
+
+        // Inside both, /112 wins
+        let svc = store
+            .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])), None)
+            .unwrap();
+        assert_eq!(svc.name, "narrow");
+
+        // Outside /112 but inside /48
+        let svc = store
+            .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 1, 0])), None)
+            .unwrap();
+        assert_eq!(svc.name, "wide");
+    }
+
+    #[test]
+    fn dual_stack_cidr() {
+        let mut store = ServiceStore::default();
+        // A single service with both v4 and v6 CIDRs
+        store.insert(make_service(
+            "dual",
+            "ns",
+            vec![],
+            vec![cidr("10.0.0.0/24"), cidr("fd00::/112")],
+        ));
+
+        // v4 matches
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).is_some());
+        // v6 matches
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])), None)
+                .is_some()
+        );
+        // v4 outside range
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 1, 5)), None).is_none());
+        // v6 outside range
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 1, 0])), None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cidr_family_mismatch() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service("v4", "ns", vec![], vec![cidr("10.0.0.0/24")]));
+        store.insert(make_service("v6", "ns", vec![], vec![cidr("fd00::/112")]));
+
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])), None)
+                .is_some()
+        );
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).is_some());
+
+        // IPv4 addresses should never match IPv6 CIDRs.
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip(0xfd, 0, 0, 0)), None)
+                .is_none()
+        );
+        // IPv6 addresses should never match IPv4 CIDRs.
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0x0a00, 0, 0, 0, 0, 0, 0, 5])), None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn exact_v4_with_cidr_v6() {
+        let mut store = ServiceStore::default();
+        // Service with exact v4 VIP and v6 CIDR
+        store.insert(make_service(
+            "mixed",
+            "ns",
+            vec![ip(10, 0, 0, 1)],
+            vec![cidr("fd00::/112")],
+        ));
+
+        // Exact v4 match
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 1)), None).is_some());
+        // v6 CIDR match
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])), None)
+                .is_some()
+        );
+        // v4 not in exact set
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 2)), None).is_none());
+    }
+
+    #[test]
+    fn exact_match_priority_over_cidr_v4() {
         let mut store = ServiceStore::default();
         store.insert(make_service(
             "cidr-svc",
@@ -922,6 +1059,33 @@ mod tests {
         assert_eq!(svc.name, "exact-svc");
 
         let svc = store.get_best_by_vip(&nw(ip(10, 0, 0, 6)), None).unwrap();
+        assert_eq!(svc.name, "cidr-svc");
+    }
+
+    #[test]
+    fn exact_match_priority_over_cidr_v6() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service(
+            "cidr-svc",
+            "ns",
+            vec![],
+            vec![cidr("fd00::/112")],
+        ));
+        store.insert(make_service(
+            "exact-svc",
+            "ns",
+            vec![ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])],
+            vec![],
+        ));
+
+        let svc = store
+            .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])), None)
+            .unwrap();
+        assert_eq!(svc.name, "exact-svc");
+
+        let svc = store
+            .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 6])), None)
+            .unwrap();
         assert_eq!(svc.name, "cidr-svc");
     }
 
