@@ -331,12 +331,10 @@ async fn test_stats_exist() {
         // so counter families with no samples (traffic, xds, dns) won't appear
         // until they are incremented. Those are covered by dedicated tests
         // (test_tcp_connections_metrics, test_dns_metrics, etc).
-        for metric in &[("istio_build")] {
-            assert!(
-                metrics.query(metric, &Default::default()).is_some(),
-                "expected metric {metric}"
-            );
-        }
+        assert!(
+            metrics.query("istio_build", &Default::default()).is_some(),
+            "expected metric istio_build"
+        );
         let metric_info = metrics.metric_info();
         // Note: this is referring to the HELP doc line
         // This does NOT have the _total suffix
