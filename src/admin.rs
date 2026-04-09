@@ -625,6 +625,7 @@ mod tests {
                 destination: Some(XdsDestination::Address(XdsNetworkAddress {
                     network: "defaultnw".to_string(),
                     address: [127, 0, 0, 10].to_vec(),
+                    length: None,
                 })),
                 hbone_mtls_port: 15008,
             }),
@@ -632,6 +633,7 @@ mod tests {
                 destination: Some(XdsDestination::Address(XdsNetworkAddress {
                     network: "defaultnw".to_string(),
                     address: [127, 0, 0, 11].to_vec(),
+                    length: None,
                 })),
                 hbone_mtls_port: 15008,
             }),
@@ -679,6 +681,7 @@ mod tests {
             addresses: vec![XdsNetworkAddress {
                 network: "defaultnw".to_string(),
                 address: [127, 0, 1, 1].to_vec(),
+                length: None,
             }],
             ports: vec![XdsPort {
                 service_port: 80,

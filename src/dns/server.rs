@@ -1881,6 +1881,7 @@ mod tests {
                 .map(|vip| XdsNetworkAddress {
                     network: vip.network.to_string(),
                     address: addr_bytes(vip.address),
+                    length: None,
                 })
                 .collect(),
             ports: vec![XdsPort {

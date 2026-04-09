@@ -20,6 +20,7 @@ use crate::strng::Strng;
 use crate::xds::istio::workload::{Port, PortList};
 use crate::{strng, xds};
 use bytes::Bytes;
+use ipnet::IpNet;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
@@ -675,6 +676,24 @@ pub fn network_addr(network: Strng, vip: IpAddr) -> NetworkAddress {
     }
 }
 
+#[derive(Debug, Eq, PartialEq, Hash, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NetworkCidr {
+    pub network: Strng,
+    pub cidr: IpNet,
+}
+
+impl fmt::Display for NetworkCidr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(&self.network)?;
+        f.write_char('/')?;
+        fmt::Display::fmt(&self.cidr, f)
+    }
+}
+
+pub fn network_cidr(network: Strng, cidr: IpNet) -> NetworkCidr {
+    NetworkCidr { network, cidr }
+}
+
 /// WorkloadIdentity provides information about a workloads identity. This is used in place of Identity
 /// in places where we do not have the full identity (no trust domain) and know we are working with workloads specifically.
 #[derive(Debug, Hash, Eq, PartialEq)]
@@ -1128,6 +1147,7 @@ mod tests {
                     addresses: vec![XdsNetworkAddress {
                         network: "".to_string(),
                         address: vip1.octets().to_vec(),
+                        length: None,
                     }],
                     ports: vec![XdsPort {
                         service_port: 80,
@@ -1158,10 +1178,12 @@ mod tests {
                         XdsNetworkAddress {
                             network: "".to_string(),
                             address: vip1.octets().to_vec(), // old endpoints associated with this address should be carried over
+                            length: None,
                         },
                         XdsNetworkAddress {
                             network: "".to_string(),
                             address: vip2.octets().to_vec(), // new address just to test upsert
+                            length: None,
                         },
                     ],
                     ports: vec![XdsPort {
@@ -1224,6 +1246,7 @@ mod tests {
                     addresses: vec![XdsNetworkAddress {
                         network: "".to_string(),
                         address: vip1.octets().to_vec(),
+                        length: None,
                     }],
                     ports: vec![XdsPort {
                         service_port: 80,
@@ -1542,6 +1565,7 @@ mod tests {
                     addresses: vec![XdsNetworkAddress {
                         network: "".to_string(),
                         address: vip1.octets().to_vec(),
+                        length: None,
                     }],
                     ports: vec![XdsPort {
                         service_port: 80,
@@ -1566,6 +1590,7 @@ mod tests {
                     addresses: vec![XdsNetworkAddress {
                         network: "".to_string(),
                         address: vip2.octets().to_vec(),
+                        length: None,
                     }],
                     ports: vec![XdsPort {
                         service_port: 80,
@@ -1618,6 +1643,7 @@ mod tests {
             addresses: vec![XdsNetworkAddress {
                 network: "".to_string(),
                 address: vip2.octets().to_vec(),
+                length: None,
             }],
             ports: vec![XdsPort {
                 service_port: 80,
@@ -1644,6 +1670,7 @@ mod tests {
                     addresses: vec![XdsNetworkAddress {
                         network: "".to_string(),
                         address: vip1.octets().to_vec(),
+                        length: None,
                     }],
                     ports: vec![XdsPort {
                         service_port: 80,

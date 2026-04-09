@@ -1009,6 +1009,7 @@ mod tests {
                 address: vip.parse().unwrap(),
                 network: "".into(),
             }],
+            cidr_vips: vec![],
             ports: std::collections::HashMap::from([(80u16, 8080u16)]),
             endpoints: EndpointSet::from_list([Endpoint {
                 workload_uid: strng::format!("cluster1//v1/Pod/default/{name}"),

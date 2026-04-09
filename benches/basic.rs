@@ -47,6 +47,7 @@ pub fn xds(c: &mut Criterion) {
                 addresses: vec![XdsNetworkAddress {
                     network: "".to_string(),
                     address: vec![127, 0, 0, 3],
+                    length: None,
                 }],
                 ..Default::default()
             };
@@ -134,6 +135,7 @@ fn build_load_balancer(
         addresses: vec![XdsNetworkAddress {
             network: "".to_string(),
             address: vec![127, 0, 0, 3],
+            length: None,
         }],
         ports: vec![Port {
             service_port: 80,
