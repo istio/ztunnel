@@ -27,6 +27,7 @@ use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response};
 use itertools::Itertools;
+use prometheus_client::registry::Registry;
 use prometheus_parse::Scrape;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
@@ -79,14 +80,24 @@ where
     F: AsyncFn(TestApp) -> FO,
 {
     initialize_telemetry();
-    let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
+    let registry = Registry::default();
+    let identity_metrics = Arc::new(crate::identity::metrics::Metrics::new());
+    let cert_manager = identity::mock::new_secret_manager_with_metrics(
+        Duration::from_secs(10),
+        identity_metrics.clone(),
+    );
     info!(
         "running with config: {}",
         serde_yaml::to_string(&cfg).unwrap()
     );
-    let app = app::build_with_cert(Arc::new(cfg), cert_manager.clone())
-        .await
-        .unwrap();
+    let app = app::build_with_cert_and_registry(
+        Arc::new(cfg),
+        cert_manager.clone(),
+        identity_metrics,
+        registry,
+    )
+    .await
+    .unwrap();
     let shutdown = app.shutdown.trigger().clone();
 
     let ta = TestApp::from((&app, cert_manager));
