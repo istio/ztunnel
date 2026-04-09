@@ -14,6 +14,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::TryFutureExt;
 use hyper::header::FORWARDED;
@@ -202,58 +203,87 @@ impl OutboundConnection {
                 return;
             }
         };
+
+        if let Request::RaceTcp(ref r) = *req {
+            // Box::pin to avoid inflating the parent future's size with the racing state machine.
+            Box::pin(self.proxy_to_race(
+                source_stream,
+                r,
+                source_addr,
+                dest_addr,
+                start,
+            ))
+            .await;
+            return;
+        }
+
+        let metrics = self.pi.metrics.clone();
+
         // TODO: should we use the original address or the actual address? Both seems nice!
         let _conn_guard = self.pi.connection_manager.track_outbound(
             source_addr,
             dest_addr,
-            req.actual_destination,
-            req.protocol,
+            req.addr(),
+            req.protocol(),
         );
 
-        let metrics = self.pi.metrics.clone();
-        let hbone_target = req.hbone_target_destination.clone();
         let connection_result_builder = Box::new(ConnectionResultBuilder::new(
             source_addr,
-            req.actual_destination,
-            hbone_target,
+            req.addr(),
+            req.hbone_target_destination().cloned(),
             start,
-            Self::conn_metrics_from_request(&req),
+            Self::conn_metrics(
+                req.source(),
+                req.actual_destination_workload(),
+                req.intended_destination_service(),
+                req.protocol(),
+            ),
             metrics,
         ));
 
-        match req.protocol {
-            OutboundProtocol::DOUBLEHBONE => {
+        match *req {
+            Request::DoubleHbone(ref r) => {
                 // We box this since its not a common path and it would make the future really big.
                 Box::pin(self.proxy_to_double_hbone(
                     source_stream,
                     source_addr,
-                    &req,
+                    r,
                     connection_result_builder,
                 ))
                 .await
             }
-            OutboundProtocol::HBONE => {
-                self.proxy_to_hbone(source_stream, source_addr, &req, connection_result_builder)
+            Request::Hbone(ref r) => {
+                self.proxy_to_hbone(source_stream, source_addr, r, connection_result_builder)
                     .await
             }
-            OutboundProtocol::TCP => {
-                self.proxy_to_tcp(source_stream, &req, connection_result_builder)
+            Request::Tcp(ref r) => {
+                self.proxy_to_tcp(source_stream, r, connection_result_builder)
                     .await
             }
-        };
+            Request::RaceTcp(_) => unreachable!(),
+        }
     }
 
     async fn proxy_to_double_hbone(
         &mut self,
         stream: TcpStream,
-        remote_addr: SocketAddr,
-        req: &Request,
+        source_addr: SocketAddr,
+        req: &DoubleHboneRequest,
         mut connection_stats_builder: Box<ConnectionResultBuilder>,
     ) {
+
         // async move block allows use of ? operator
         let res = (async move {
             // Create the outer HBONE stream
-            let (upgraded, _) = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
+            let (upgraded, _) = Box::pin(self.send_hbone_request(
+                source_addr,
+                &req.source,
+                req.addr,
+                &req.hbone_target_destination,
+                &req.intended_destination_service,
+                &req.upstream_sans,
+            ))
+            .await?;
             // Wrap upgraded to implement tokio's Async{Write,Read}
             let upgraded = TokioH2Stream::new(upgraded);
 
@@ -263,8 +293,8 @@ impl OutboundConnection {
             let wl_key = WorkloadKey {
                 src_id: req.source.identity(),
                 dst_id: req.final_sans.clone(),
-                src: remote_addr.ip(),
-                dst: req.actual_destination,
+                src: source_addr.ip(),
+                dst: req.addr,
             };
 
             // Fetch certs and establish inner TLS connection.
@@ -288,7 +318,13 @@ impl OutboundConnection {
             )
             .await?;
             let origin_network = &self.pi.cfg.network;
-            let http_request = self.create_hbone_request(remote_addr, req, Some(origin_network));
+            let http_request = self.create_hbone_request(
+                source_addr,
+                &req.source,
+                &req.hbone_target_destination,
+                &req.intended_destination_service,
+                Some(origin_network),
+            );
             let (inner_upgraded, baggage) = sender.send_request(http_request).await?;
 
             // Proxy
@@ -334,13 +370,21 @@ impl OutboundConnection {
     async fn proxy_to_hbone(
         &mut self,
         stream: TcpStream,
-        remote_addr: SocketAddr,
-        req: &Request,
+        source_addr: SocketAddr,
+        req: &HboneRequest,
         connection_stats_builder: Box<ConnectionResultBuilder>,
     ) {
         let connection_stats = Box::new(connection_stats_builder.build());
         let res = (async {
-            let (upgraded, _) = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
+            let (upgraded, _) = Box::pin(self.send_hbone_request(
+                source_addr,
+                &req.source,
+                req.addr,
+                &req.hbone_target_destination,
+                &req.intended_destination_service,
+                &req.upstream_sans,
+            ))
+            .await?;
             copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, &connection_stats)
                 .await
         })
@@ -351,22 +395,19 @@ impl OutboundConnection {
     fn create_hbone_request(
         &self,
         remote_addr: SocketAddr,
-        req: &Request,
+        source: &Arc<Workload>,
+        hbone_target_destination: &HboneAddress,
+        intended_destination_service: &Option<ServiceDescription>,
         origin_network: Option<&Strng>,
     ) -> http::Request<()> {
         let mut builder = http::Request::builder()
-            .uri(
-                req.hbone_target_destination
-                    .as_ref()
-                    .expect("HBONE must have target")
-                    .to_string(),
-            )
+            .uri(hbone_target_destination.to_string())
             .method(hyper::Method::CONNECT)
             .version(hyper::Version::HTTP_2)
-            .header(BAGGAGE_HEADER, baggage(req))
+            .header(BAGGAGE_HEADER, baggage(source))
             .header(
                 FORWARDED,
-                build_forwarded(remote_addr, &req.intended_destination_service),
+                build_forwarded(remote_addr, intended_destination_service),
             )
             .header(TRACEPARENT_HEADER, self.id.header());
 
@@ -384,19 +425,29 @@ impl OutboundConnection {
     async fn send_hbone_request(
         &mut self,
         remote_addr: SocketAddr,
-        req: &Request,
+        source: &Arc<Workload>,
+        addr: SocketAddr,
+        hbone_target_destination: &HboneAddress,
+        intended_destination_service: &Option<ServiceDescription>,
+        upstream_sans: &[Identity],
     ) -> Result<(H2Stream, Option<Baggage>), Error> {
         // This is the single cluster/single-HBONE codepath (and also the outer tunnel
         // for double HBONE). We don't need the x-istio-origin-network header here because:
         // - For single HBONE: both source and destination are in the same network
         // - For double HBONE outer: the gateway doesn't need origin network info
-        let request = self.create_hbone_request(remote_addr, req, None);
+        let request = self.create_hbone_request(
+            remote_addr,
+            source,
+            hbone_target_destination,
+            intended_destination_service,
+            None,
+        );
         let pool_key = Box::new(WorkloadKey {
-            src_id: req.source.identity(),
+            src_id: source.identity(),
             // Clone here shouldn't be needed ideally, we could just take ownership of Request.
-            dst_id: req.upstream_sans.clone(),
+            dst_id: upstream_sans.to_vec(),
             src: remote_addr.ip(),
-            dst: req.actual_destination,
+            dst: addr,
         });
         let (upgraded, baggage) = Box::pin(self.pool.send_request_pooled(&pool_key, request))
             .instrument(trace_span!("outbound connect"))
@@ -407,7 +458,7 @@ impl OutboundConnection {
     async fn proxy_to_tcp(
         &mut self,
         stream: TcpStream,
-        req: &Request,
+        req: &TcpRequest,
         connection_stats_builder: Box<ConnectionResultBuilder>,
     ) {
         let connection_stats = Box::new(connection_stats_builder.build());
@@ -415,7 +466,7 @@ impl OutboundConnection {
         let res = (async {
             let outbound = super::freebind_connect(
                 None, // No need to spoof source IP on outbound
-                req.actual_destination,
+                req.addr,
                 self.pi.socket_factory.as_ref(),
             )
             .await?;
@@ -432,12 +483,153 @@ impl OutboundConnection {
         connection_stats.record(res);
     }
 
-    fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {
-        let (derived_source, security_policy) = match req.protocol {
+    /// Delay between successive connection attempts in FIRST_HEALTHY_RACE mode.
+    /// If a connection attempt neither succeeds nor fails within this window,
+    /// the next candidate is started in parallel. If the attempt fails immediately
+    /// (e.g. RST), the next candidate starts right away without waiting.
+    const RACE_ATTEMPT_DELAY: Duration = Duration::from_millis(300);
+
+    #[allow(clippy::too_many_arguments)]
+    async fn proxy_to_race(
+        &mut self,
+        stream: TcpStream,
+        req: &RaceTcpRequest,
+        source_addr: SocketAddr,
+        orig_dst: SocketAddr,
+        start: Instant,
+    ) {
+        let candidates = &req.candidates;
+
+        debug!(
+            count = candidates.len(),
+            ?candidates,
+            "racing upstream connections (FIRST_HEALTHY_RACE)"
+        );
+
+        let socket_factory = self.pi.socket_factory.as_ref();
+        let mut futs = futures_util::stream::FuturesUnordered::new();
+        let mut remaining = candidates.iter();
+
+        // Start the first connection attempt immediately
+        if let Some(&addr) = remaining.next() {
+            futs.push(super::freebind_connect(None, addr, socket_factory));
+        }
+
+        let mut winner = None;
+        loop {
+            if futs.is_empty() {
+                // No more in-flight attempts and no more candidates
+                break;
+            }
+
+            if remaining.len() > 0 {
+                // We have more candidates to try. Wait for either:
+                // 1. An in-flight attempt to complete (success or failure)
+                // 2. The delay timer to expire (start next candidate in parallel)
+                tokio::select! {
+                    biased;
+                    result = futures_util::StreamExt::next(&mut futs) => {
+                        match result {
+                            Some(Ok(tcp)) => {
+                                winner = Some(tcp);
+                                break;
+                            }
+                            Some(Err(err)) => {
+                                debug!(?err, "race candidate connection failed");
+                                // Race candidate failure: start next candidate right away
+                                if let Some(&addr) = remaining.next() {
+                                    futs.push(super::freebind_connect(None, addr, socket_factory));
+                                }
+                            }
+                            None => break, // FuturesUnordered is empty
+                        }
+                    }
+                    _ = tokio::time::sleep(Self::RACE_ATTEMPT_DELAY) => {
+                        // Timer expired without success or failure.
+                        // Start the next candidate in parallel.
+                        if let Some(&addr) = remaining.next() {
+                            debug!(?addr, "race timer expired, starting next candidate");
+                            futs.push(super::freebind_connect(None, addr, socket_factory));
+                        }
+                    }
+                }
+            } else {
+                // No more candidates to start. Just wait for remaining in-flight
+                // attempts to complete.
+                match futures_util::StreamExt::next(&mut futs).await {
+                    Some(Ok(tcp)) => {
+                        winner = Some(tcp);
+                        break;
+                    }
+                    Some(Err(err)) => {
+                        debug!(?err, "race candidate connection failed");
+                    }
+                    None => break,
+                }
+            }
+        }
+        // Explicitly drop remaining futures to cancel in-progress connection attempts.
+        drop(futs);
+
+        let outbound = match winner {
+            Some(tcp) => tcp,
+            None => {
+                // All candidates failed; RST-close the downstream socket
+                rst_close(stream);
+                return;
+            }
+        };
+
+        // Now that we know the winning destination, build the connection stats
+        // with the actual peer address rather than the representative.
+        let actual_dst = outbound
+            .peer_addr()
+            .unwrap_or_else(|_| req.candidates[0]);
+        let metrics = self.pi.metrics.clone();
+        let _conn_guard = self.pi.connection_manager.track_outbound(
+            source_addr,
+            orig_dst,
+            actual_dst,
+            OutboundProtocol::TCP,
+        );
+        let connection_stats = Box::new(
+            ConnectionResultBuilder::new(
+                source_addr,
+                actual_dst,
+                None,
+                start,
+                Self::conn_metrics(
+                    &req.source,
+                    req.actual_destination_workload.as_ref(),
+                    req.intended_destination_service.as_ref(),
+                    OutboundProtocol::TCP,
+                ),
+                metrics,
+            )
+            .build(),
+        );
+
+        // Proxying data between downstream and winning upstream
+        let res = copy::copy_bidirectional(
+            copy::TcpStreamSplitter(stream),
+            copy::TcpStreamSplitter(outbound),
+            &connection_stats,
+        )
+        .await;
+        connection_stats.record(res);
+    }
+
+    fn conn_metrics(
+        source: &Arc<Workload>,
+        destination: Option<&Arc<Workload>>,
+        destination_service: Option<&ServiceDescription>,
+        protocol: OutboundProtocol,
+    ) -> ConnectionOpen {
+        let (derived_source, security_policy) = match protocol {
             OutboundProtocol::HBONE | OutboundProtocol::DOUBLEHBONE => (
                 Some(DerivedWorkload {
                     // We are going to do mTLS, so report our identity
-                    identity: Some(req.source.as_ref().identity()),
+                    identity: Some(source.as_ref().identity()),
                     ..Default::default()
                 }),
                 metrics::SecurityPolicy::mutual_tls,
@@ -447,10 +639,10 @@ impl OutboundConnection {
         ConnectionOpen {
             reporter: Reporter::source,
             derived_source,
-            source: Some(req.source.clone()),
-            destination: req.actual_destination_workload.clone(),
+            source: Some(source.clone()),
+            destination: destination.cloned(),
             connection_security_policy: security_policy,
-            destination_service: req.intended_destination_service.clone(),
+            destination_service: destination_service.cloned(),
         }
     }
 
@@ -498,21 +690,21 @@ impl OutboundConnection {
                 .state
                 .fetch_network_gateway(gateway, &source, target)
                 .await?;
-            let hbone_target_destination = Some(HboneAddress::SvcHostname(
-                service.hostname.clone(),
-                target.port(),
-            ));
 
             debug!("built request to a destination on another network through an E/W gateway");
-            Ok(Request {
-                protocol: OutboundProtocol::DOUBLEHBONE,
+            Ok(Request::DoubleHbone(DoubleHboneRequest {
                 source,
-                hbone_target_destination,
                 actual_destination_workload: Some(gateway_upstream.workload.clone()),
                 intended_destination_service: Some(ServiceDescription::from(service)),
-                actual_destination: gateway_upstream.workload_socket_addr().ok_or(
-                    Error::NoValidDestination(Box::new((*gateway_upstream.workload).clone())),
-                )?,
+                addr: gateway_upstream
+                    .workload_socket_addr()
+                    .ok_or(Error::NoValidDestination(Box::new(
+                        (*gateway_upstream.workload).clone(),
+                    )))?,
+                hbone_target_destination: HboneAddress::SvcHostname(
+                    service.hostname.clone(),
+                    target.port(),
+                ),
                 // The outer tunnel of double HBONE is terminated by the E/W
                 // gateway and so for the credentials of the next hop
                 // (upstream_sans) we use gateway credentials.
@@ -522,7 +714,7 @@ impl OutboundConnection {
                 // the configuration. So for the final destination credentials
                 // (final_sans) we use the upstream workload credentials.
                 final_sans: upstream.service_sans(),
-            })
+            }))
         } else {
             // Do not try to send cross-network traffic without network gateway.
             Err(Error::NoValidDestination(Box::new(
@@ -578,16 +770,14 @@ impl OutboundConnection {
                             (*waypoint.workload).clone(),
                         )))?;
                 debug!("built request to service waypoint proxy");
-                return Ok(Request {
-                    protocol: OutboundProtocol::HBONE,
+                return Ok(Request::Hbone(HboneRequest {
                     source: source_workload,
-                    hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
+                    hbone_target_destination: HboneAddress::SocketAddr(target),
                     actual_destination_workload: Some(waypoint.workload),
                     intended_destination_service: Some(ServiceDescription::from(&*target_service)),
-                    actual_destination,
+                    addr: actual_destination,
                     upstream_sans,
-                    final_sans: vec![],
-                });
+                }));
             }
             // this was service addressed but we did not find a waypoint
             Some(target_service)
@@ -617,16 +807,12 @@ impl OutboundConnection {
                 return Err(Error::NoHealthyUpstream(target));
             }
             debug!("built request as passthrough; no upstream found");
-            return Ok(Request {
-                protocol: OutboundProtocol::TCP,
+            return Ok(Request::Tcp(TcpRequest {
                 source: source_workload,
-                hbone_target_destination: None,
                 actual_destination_workload: None,
                 intended_destination_service: None,
-                actual_destination: target,
-                upstream_sans: vec![],
-                final_sans: vec![],
-            });
+                addr: target,
+            }));
         };
 
         // Check whether we are using an E/W gateway and sending cross network traffic
@@ -679,18 +865,15 @@ impl OutboundConnection {
                         )))?;
                 let upstream_sans = waypoint.workload_and_services_san();
                 debug!("built request to workload waypoint proxy");
-                return Ok(Request {
-                    // Always use HBONE here
-                    protocol: OutboundProtocol::HBONE,
+                return Ok(Request::Hbone(HboneRequest {
                     source: source_workload,
                     // Use the original VIP, not translated
-                    hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
+                    hbone_target_destination: HboneAddress::SocketAddr(target),
                     actual_destination_workload: Some(waypoint.workload),
                     intended_destination_service: us.destination_service.clone(),
-                    actual_destination,
+                    addr: actual_destination,
                     upstream_sans,
-                    final_sans: vec![],
-                });
+                }));
             }
             // Workload doesn't have a waypoint; send directly
         }
@@ -699,35 +882,65 @@ impl OutboundConnection {
             .selected_workload_ip
             .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?;
 
-        // only change the port if we're sending HBONE
-        let actual_destination = match us.workload.protocol {
-            InboundProtocol::HBONE => SocketAddr::from((selected_workload_ip, self.hbone_port)),
-            InboundProtocol::TCP => us
-                .workload_socket_addr()
-                .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?,
-        };
-        let hbone_target_destination = match us.workload.protocol {
-            InboundProtocol::HBONE => Some(HboneAddress::SocketAddr(
-                us.workload_socket_addr()
-                    .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?,
-            )),
-            InboundProtocol::TCP => None,
-        };
+        let upstream_sans = us.workload_and_services_san();
 
         // For case no waypoint for both side and direct to remote node proxy
-        let (upstream_sans, final_sans) = (us.workload_and_services_san(), vec![]);
         debug!("built request to workload");
-        Ok(Request {
-            protocol: OutboundProtocol::from(us.workload.protocol),
-            source: source_workload,
-            hbone_target_destination,
-            actual_destination_workload: Some(us.workload.clone()),
-            intended_destination_service: us.destination_service.clone(),
-            actual_destination,
-            upstream_sans,
-            final_sans,
-        })
+        match us.workload.protocol {
+            InboundProtocol::HBONE => {
+                let addr = SocketAddr::from((selected_workload_ip, self.hbone_port));
+                let hbone_target_destination = HboneAddress::SocketAddr(
+                    us.workload_socket_addr()
+                        .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?,
+                );
+                Ok(Request::Hbone(HboneRequest {
+                    source: source_workload,
+                    hbone_target_destination,
+                    actual_destination_workload: Some(us.workload.clone()),
+                    intended_destination_service: us.destination_service.clone(),
+                    addr,
+                    upstream_sans,
+                }))
+            }
+            InboundProtocol::TCP => {
+                // Only race connections for TCP (non-mesh) destinations.
+                if !us.race_candidates.is_empty() {
+                    let candidates: Vec<SocketAddr> = us
+                        .race_candidates
+                        .iter()
+                        .map(|ip| SocketAddr::new(*ip, us.port))
+                        .collect();
+                    Ok(Request::RaceTcp(RaceTcpRequest {
+                        source: source_workload,
+                        actual_destination_workload: Some(us.workload.clone()),
+                        intended_destination_service: us.destination_service.clone(),
+                        candidates,
+                    }))
+                } else {
+                    let addr = us
+                        .workload_socket_addr()
+                        .ok_or(Error::NoValidDestination(Box::new(
+                            (*us.workload).clone(),
+                        )))?;
+                    Ok(Request::Tcp(TcpRequest {
+                        source: source_workload,
+                        actual_destination_workload: Some(us.workload.clone()),
+                        intended_destination_service: us.destination_service.clone(),
+                        addr,
+                    }))
+                }
+            }
+        }
     }
+}
+
+/// RST-close a downstream TCP stream by setting SO_LINGER(0) before dropping.
+/// This sends a TCP RST instead of FIN, which is critical for happy-eyeballs
+/// clients that interpret FIN as "connection succeeded then server hung up".
+fn rst_close(stream: TcpStream) {
+    let sock_ref = socket2::SockRef::from(&stream);
+    let _ = sock_ref.set_linger(Some(std::time::Duration::ZERO));
+    drop(stream);
 }
 
 fn build_forwarded(remote_addr: SocketAddr, server: &Option<ServiceDescription>) -> String {
@@ -741,38 +954,133 @@ fn build_forwarded(remote_addr: SocketAddr, server: &Option<ServiceDescription>)
     }
 }
 
-fn baggage(r: &Request) -> String {
-    baggage::baggage_header_val(&r.source.baggage(), &r.source.workload_type)
+fn baggage(source: &Workload) -> String {
+    baggage::baggage_header_val(&source.baggage(), &source.workload_type)
+}
+
+/// Direct TCP connection to a single destination.
+#[derive(Debug)]
+struct TcpRequest {
+    source: Arc<Workload>,
+    /// May be unset in case of passthrough.
+    actual_destination_workload: Option<Arc<Workload>>,
+    /// May be unset in case of non-service traffic.
+    intended_destination_service: Option<ServiceDescription>,
+    addr: SocketAddr,
+}
+
+/// Race TCP connections to multiple candidates (FIRST_HEALTHY_RACE).
+/// Candidates are tried sequentially with a delay between attempts. If an attempt
+/// fails immediately, the next candidate starts right away. If neither success nor
+/// failure occurs within the delay, the next candidate starts in parallel.
+/// The first successful TCP handshake wins; others are cancelled.
+#[derive(Debug)]
+struct RaceTcpRequest {
+    source: Arc<Workload>,
+    actual_destination_workload: Option<Arc<Workload>>,
+    intended_destination_service: Option<ServiceDescription>,
+    /// Candidate addresses to race connections against, in order of preference.
+    candidates: Vec<SocketAddr>,
+}
+
+/// Single HBONE tunnel to the destination workload.
+#[derive(Debug)]
+struct HboneRequest {
+    source: Arc<Workload>,
+    /// The actual destination workload we are targeting. When proxying through a waypoint,
+    /// this is the waypoint, not the original.
+    actual_destination_workload: Option<Arc<Workload>>,
+    /// The intended destination service for the request. When proxying through a waypoint,
+    /// this is *not* the waypoint service, but rather the original intended service.
+    intended_destination_service: Option<ServiceDescription>,
+    addr: SocketAddr,
+    /// The inner (:authority) of the HBONE request.
+    hbone_target_destination: HboneAddress,
+    /// The identity we will assert for the next hop.
+    upstream_sans: Vec<Identity>,
+}
+
+/// Nested HBONE tunnels for cross-network traffic through an East/West gateway.
+#[derive(Debug)]
+struct DoubleHboneRequest {
+    source: Arc<Workload>,
+    /// The actual destination workload (the E/W gateway workload).
+    actual_destination_workload: Option<Arc<Workload>>,
+    /// The original intended destination service.
+    intended_destination_service: Option<ServiceDescription>,
+    addr: SocketAddr,
+    /// The inner (:authority) of the HBONE request.
+    hbone_target_destination: HboneAddress,
+    /// The identity we will assert for the next hop (E/W gateway credentials).
+    upstream_sans: Vec<Identity>,
+    /// The identity of the workload that will ultimately process this request
+    /// (the actual destination behind the gateway).
+    final_sans: Vec<Identity>,
 }
 
 #[derive(Debug)]
-struct Request {
-    protocol: OutboundProtocol,
-    // Source workload sending the request
-    source: Arc<Workload>,
-    // The actual destination workload we are targeting. When proxying through a waypoint, this is the waypoint,
-    // not the original.
-    // May be unset in case of passthrough.
-    actual_destination_workload: Option<Arc<Workload>>,
-    // The intended destination service for the request. When proxying through a waypoint, this is *not* the waypoint
-    // service, but rather the original intended service.
-    // May be unset in case of non-service traffic
-    intended_destination_service: Option<ServiceDescription>,
-    // The address we should actually request to. This is the "next hop" address; could be a waypoint, network gateway,
-    // etc.
-    // When using HBONE, the `hbone_target_destination` is the inner :authority and `actual_destination` is the TCP destination.
-    actual_destination: SocketAddr,
-    // If using HBONE, the inner (:authority) of the HBONE request.
-    hbone_target_destination: Option<HboneAddress>,
+enum Request {
+    Tcp(TcpRequest),
+    RaceTcp(RaceTcpRequest),
+    Hbone(HboneRequest),
+    DoubleHbone(DoubleHboneRequest),
+}
 
-    // The identity we will assert for the next hop; this may not be the same as actual_destination_workload
-    // in the case of proxies along the path.
-    upstream_sans: Vec<Identity>,
+impl Request {
+    fn source(&self) -> &Arc<Workload> {
+        match self {
+            Request::Tcp(r) => &r.source,
+            Request::RaceTcp(r) => &r.source,
+            Request::Hbone(r) => &r.source,
+            Request::DoubleHbone(r) => &r.source,
+        }
+    }
 
-    // The identity of workload that will ultimately process this request.
-    // This field only matters if we need to know both the identity of the next hop, as well as the
-    // final hop (currently, this is only double HBONE).
-    final_sans: Vec<Identity>,
+    fn protocol(&self) -> OutboundProtocol {
+        match self {
+            Request::Tcp(_) | Request::RaceTcp(_) => OutboundProtocol::TCP,
+            Request::Hbone(_) => OutboundProtocol::HBONE,
+            Request::DoubleHbone(_) => OutboundProtocol::DOUBLEHBONE,
+        }
+    }
+
+    /// Returns a representative address for this request.
+    /// For RaceTcp, this is the first candidate (the real winning address is
+    /// determined after racing).
+    fn addr(&self) -> SocketAddr {
+        match self {
+            Request::Tcp(r) => r.addr,
+            Request::RaceTcp(r) => r.candidates[0],
+            Request::Hbone(r) => r.addr,
+            Request::DoubleHbone(r) => r.addr,
+        }
+    }
+
+    fn hbone_target_destination(&self) -> Option<&HboneAddress> {
+        match self {
+            Request::Tcp(_) | Request::RaceTcp(_) => None,
+            Request::Hbone(r) => Some(&r.hbone_target_destination),
+            Request::DoubleHbone(r) => Some(&r.hbone_target_destination),
+        }
+    }
+
+    fn actual_destination_workload(&self) -> Option<&Arc<Workload>> {
+        match self {
+            Request::Tcp(r) => r.actual_destination_workload.as_ref(),
+            Request::RaceTcp(r) => r.actual_destination_workload.as_ref(),
+            Request::Hbone(r) => r.actual_destination_workload.as_ref(),
+            Request::DoubleHbone(r) => r.actual_destination_workload.as_ref(),
+        }
+    }
+
+    fn intended_destination_service(&self) -> Option<&ServiceDescription> {
+        match self {
+            Request::Tcp(r) => r.intended_destination_service.as_ref(),
+            Request::RaceTcp(r) => r.intended_destination_service.as_ref(),
+            Request::Hbone(r) => r.intended_destination_service.as_ref(),
+            Request::DoubleHbone(r) => r.intended_destination_service.as_ref(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -907,13 +1215,12 @@ mod tests {
             assert_eq!(
                 expect,
                 Some(ExpectedRequest {
-                    protocol: r.protocol,
+                    protocol: r.protocol(),
                     hbone_destination: &r
-                        .hbone_target_destination
-                        .as_ref()
+                        .hbone_target_destination()
                         .map(|s| s.to_string())
                         .unwrap_or_default(),
-                    destination: &r.actual_destination.to_string(),
+                    destination: &r.addr().to_string(),
                 })
             );
         } else {
@@ -1688,7 +1995,7 @@ mod tests {
         .expect("must resolve");
         // Ensure it actually went to pod1, not the other pod with the same IP
         assert_eq!(
-            res.actual_destination_workload.expect("found a dest").name,
+            res.actual_destination_workload().expect("found a dest").name,
             "pod1"
         );
 
@@ -1708,7 +2015,7 @@ mod tests {
         .await
         .expect("must resolve");
         // Ensure it actually went to pod1, not the other pod with the same IP
-        assert_eq!(res.actual_destination_workload, None);
+        assert_eq!(res.actual_destination_workload(), None);
     }
 
     #[tokio::test]
@@ -2009,23 +2316,26 @@ mod tests {
             .unwrap();
 
         // Create a minimal test request with required fields
-        let req = Request {
-            protocol: OutboundProtocol::HBONE,
+        let hbone_target = HboneAddress::SocketAddr("10.0.0.1:8080".parse().unwrap());
+        let req = HboneRequest {
             source: source_workload,
-            hbone_target_destination: Some(HboneAddress::SocketAddr(
-                "10.0.0.1:8080".parse().unwrap(),
-            )),
+            hbone_target_destination: hbone_target.clone(),
             actual_destination_workload: None,
             intended_destination_service: None,
-            actual_destination: "10.0.0.1:8080".parse().unwrap(),
+            addr: "10.0.0.1:8080".parse().unwrap(),
             upstream_sans: vec![],
-            final_sans: vec![],
         };
 
         let remote_addr = "127.0.0.1:12345".parse().unwrap();
 
         // Test the single HBONE case - header should NOT be added when origin_network is None
-        let http_request_no_header = outbound.create_hbone_request(remote_addr, &req, None);
+        let http_request_no_header = outbound.create_hbone_request(
+            remote_addr,
+            &req.source,
+            &req.hbone_target_destination,
+            &req.intended_destination_service,
+            None,
+        );
         assert!(
             http_request_no_header
                 .headers()
@@ -2036,8 +2346,13 @@ mod tests {
 
         // Test the double HBONE inner request case - header should be added when network is specified
         let network = crate::strng::Strng::from("test-network");
-        let http_request_with_header =
-            outbound.create_hbone_request(remote_addr, &req, Some(&network));
+        let http_request_with_header = outbound.create_hbone_request(
+            remote_addr,
+            &req.source,
+            &req.hbone_target_destination,
+            &req.intended_destination_service,
+            Some(&network),
+        );
         assert_eq!(
             http_request_with_header
                 .headers()
@@ -2046,6 +2361,134 @@ mod tests {
             "test-network",
             "x-istio-origin-network header should contain the network name for double HBONE inner request"
         );
+    }
+
+    #[tokio::test]
+    async fn test_race_reports_actual_destination() {
+        initialize_telemetry();
+
+        // Candidate 1: bind a port and immediately drop the listener so connections are refused.
+        let refused_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let refused_addr = refused_listener.local_addr().unwrap();
+        drop(refused_listener);
+
+        // Candidate 2: a real TCP echo server that accepts connections.
+        let good_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let good_addr = good_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = good_listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let (mut r, mut w) = socket.split();
+                    let _ = tokio::io::copy(&mut r, &mut w).await;
+                });
+            }
+        });
+
+        let cfg = Arc::new(Config {
+            local_node: Some("local-node".to_string()),
+            ..crate::config::parse_config().unwrap()
+        });
+        let source = XdsWorkload {
+            uid: "cluster1//v1/Pod/ns/source-workload".to_string(),
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 1])],
+            node: "local-node".to_string(),
+            ..Default::default()
+        };
+        let state = new_proxy_state(&[source], &[], &[]);
+        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory::default());
+        let wi = WorkloadInfo {
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            service_account: "default".to_string(),
+        };
+        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(wi),
+            state.clone(),
+            identity::mock::new_secret_manager(Duration::from_secs(10)),
+        ));
+        let metrics = test_proxy_metrics();
+        let mut outbound = OutboundConnection {
+            pi: Arc::new(ProxyInputs {
+                state: state.clone(),
+                cfg: cfg.clone(),
+                metrics: metrics.clone(),
+                socket_factory: sock_fact.clone(),
+                local_workload_information: local_workload_information.clone(),
+                connection_manager: ConnectionManager::default(),
+                resolver: None,
+                disable_inbound_freebind: false,
+                crl_manager: None,
+            }),
+            id: TraceParent::new(),
+            pool: WorkloadHBONEPool::new(
+                cfg.clone(),
+                sock_fact,
+                local_workload_information.clone(),
+            ),
+            hbone_port: cfg.inbound_addr.port(),
+        };
+
+        let source_workload = outbound
+            .pi
+            .local_workload_information
+            .get_workload()
+            .await
+            .unwrap();
+
+        // The first candidate is refused, so the winner should be the second (good_addr).
+        let req = RaceTcpRequest {
+            source: source_workload,
+            actual_destination_workload: None,
+            intended_destination_service: None,
+            candidates: vec![refused_addr, good_addr],
+        };
+
+        // Create a connected TCP pair to simulate downstream.
+        let downstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let downstream_addr = downstream_listener.local_addr().unwrap();
+        let connect_fut = tokio::net::TcpStream::connect(downstream_addr);
+        let accept_fut = downstream_listener.accept();
+        let (downstream_stream, accept_result) = tokio::join!(connect_fut, accept_fut);
+        let downstream_stream = downstream_stream.unwrap();
+        let (proxy_stream, _) = accept_result.unwrap();
+
+        let source_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let start = Instant::now();
+
+        // Spawn proxy_to_race in a task, then close the downstream to let it finish.
+        let handle = tokio::spawn({
+            async move {
+                outbound
+                    .proxy_to_race(
+                        proxy_stream,
+                        &req,
+                        source_addr,
+                        refused_addr, // orig_dst: use first candidate as the original destination
+                        start,
+                    )
+                    .await;
+            }
+        });
+
+        // Give the race a moment to connect, then close downstream to end the copy.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        drop(downstream_stream);
+
+        // Wait for proxy_to_race to complete.
+        handle.await.unwrap();
+
+        // The access log should have dst.addr set to the actual winning address (good_addr),
+        // NOT the first candidate (refused_addr).
+        let good_addr_str = good_addr.to_string();
+        crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
+            ("scope", "access"),
+            ("dst.addr", good_addr_str.as_str()),
+            ("direction", "outbound"),
+            ("message", "connection complete"),
+        ]));
     }
 
     #[derive(PartialEq, Debug)]
