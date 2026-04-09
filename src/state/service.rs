@@ -387,9 +387,7 @@ impl ServiceStore {
         vip: &NetworkAddress,
         ns: Option<&Strng>,
     ) -> Option<Arc<Service>> {
-        let services = self
-            .get_by_vip(vip)
-            .or_else(|| self.get_by_cidr_vip(vip))?;
+        let services = self.get_by_vip(vip).or_else(|| self.get_by_cidr_vip(vip))?;
         Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone())
     }
 
@@ -873,7 +871,11 @@ mod tests {
         store.insert(make_service("svc", "ns", vec![], vec![cidr("10.0.0.0/24")]));
 
         assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).is_some());
-        assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 255)), None).is_some());
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip(10, 0, 0, 255)), None)
+                .is_some()
+        );
         assert!(store.get_best_by_vip(&nw(ip(10, 0, 1, 5)), None).is_none());
     }
 
