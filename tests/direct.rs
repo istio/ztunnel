@@ -326,27 +326,15 @@ async fn test_hostname_request_local() {
 async fn test_stats_exist() {
     testapp::with_app(test_config(), async move |app| {
         let metrics = app.metrics().await.unwrap();
-        for metric in &[
-            // Meta
-            ("istio_build"),
-            // Traffic
-            ("istio_tcp_connections_opened_total"),
-            ("istio_tcp_connections_closed_total"),
-            ("istio_tcp_received_bytes_total"),
-            ("istio_tcp_sent_bytes_total"),
-            // XDS
-            ("istio_xds_connection_terminations_total"),
-            // DNS.
-            ("istio_dns_requests_total"),
-            ("istio_dns_upstream_requests_total"),
-            ("istio_dns_upstream_failures_total"),
-            ("istio_dns_upstream_request_duration_seconds"),
-        ] {
-            assert!(
-                metrics.query(metric, &Default::default()).is_some(),
-                "expected metric {metric}"
-            );
-        }
+        // Only check metrics that are always populated at startup.
+        // prometheus-client 0.24.1+ omits empty metric families from output,
+        // so counter families with no samples (traffic, xds, dns) won't appear
+        // until they are incremented. Those are covered by dedicated tests
+        // (test_tcp_connections_metrics, test_dns_metrics, etc).
+        assert!(
+            metrics.query("istio_build", &Default::default()).is_some(),
+            "expected metric istio_build"
+        );
         let metric_info = metrics.metric_info();
         // Note: this is referring to the HELP doc line
         // This does NOT have the _total suffix
