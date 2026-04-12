@@ -43,91 +43,100 @@ struct LabelSet {
     worker: usize,
 }
 
-macro_rules! encode_gauge {
-    ($self:expr, $encoder:expr, $name:tt, $help:expr) => {{
-        let metric = ConstGauge::new($self.metrics.$name() as i64);
-        let metric_encoder =
-            $encoder.encode_descriptor(stringify!($name), $help, None, metric.metric_type())?;
+fn encode_gauge(
+    encoder: &mut DescriptorEncoder,
+    name: &str,
+    help: &str,
+    value: i64,
+) -> Result<(), std::fmt::Error> {
+    let metric = ConstGauge::new(value);
+    let metric_encoder = encoder.encode_descriptor(name, help, None, metric.metric_type())?;
+    metric.encode(metric_encoder)
+}
+
+fn encode_per_worker_duration_seconds(
+    encoder: &mut DescriptorEncoder,
+    name: &str,
+    help: &str,
+    num_workers: usize,
+    value_for_worker: impl Fn(usize) -> std::time::Duration,
+) -> Result<(), std::fmt::Error> {
+    let mut family_encoder = encoder.encode_descriptor(name, help, None, MetricType::Counter)?;
+    for worker in 0..num_workers {
+        let metric = ConstCounter::new(value_for_worker(worker).as_secs_f64());
+        let labels = LabelSet { worker };
+        let metric_encoder = family_encoder.encode_family(&labels)?;
         metric.encode(metric_encoder)?;
-    }};
+    }
+    Ok(())
 }
 
-macro_rules! encode_per_worker_duration_seconds {
-    ($self:expr, $encoder:expr, $name:tt, $help:expr) => {{
-        let mut family_encoder = $encoder.encode_descriptor(
-            concat!(stringify!($name), "_seconds"),
-            $help,
-            None,
-            MetricType::Counter,
-        )?;
-        for worker in 0..$self.metrics.num_workers() {
-            let metric = ConstCounter::new($self.metrics.$name(worker).as_secs_f64());
-            let labels = LabelSet { worker };
-            let metric_encoder = family_encoder.encode_family(&labels)?;
-            metric.encode(metric_encoder)?;
-        }
-    }};
-}
-
-macro_rules! encode_per_worker_count {
-    ($self:expr, $encoder:expr, $name:tt, $help:expr) => {{
-        let mut family_encoder =
-            $encoder.encode_descriptor(stringify!($name), $help, None, MetricType::Counter)?;
-        for worker in 0..$self.metrics.num_workers() {
-            let metric = ConstGauge::new($self.metrics.$name(worker) as i64);
-            let labels = LabelSet { worker };
-            let metric_encoder = family_encoder.encode_family(&labels)?;
-            metric.encode(metric_encoder)?;
-        }
-    }};
+fn encode_per_worker_count(
+    encoder: &mut DescriptorEncoder,
+    name: &str,
+    help: &str,
+    num_workers: usize,
+    value_for_worker: impl Fn(usize) -> u64,
+) -> Result<(), std::fmt::Error> {
+    let mut family_encoder = encoder.encode_descriptor(name, help, None, MetricType::Counter)?;
+    for worker in 0..num_workers {
+        let metric = ConstGauge::new(value_for_worker(worker) as i64);
+        let labels = LabelSet { worker };
+        let metric_encoder = family_encoder.encode_family(&labels)?;
+        metric.encode(metric_encoder)?;
+    }
+    Ok(())
 }
 
 impl Collector for TokioRuntimeCollector {
     fn encode(&self, mut encoder: DescriptorEncoder) -> Result<(), std::fmt::Error> {
-        encode_gauge!(
-            self,
+        encode_gauge(
             &mut encoder,
-            num_workers,
-            "the number of worker threads used by the runtime"
-        );
+            "num_workers",
+            "the number of worker threads used by the runtime",
+            self.metrics.num_workers() as i64,
+        )?;
 
-        encode_gauge!(
-            self,
+        encode_gauge(
             &mut encoder,
-            global_queue_depth,
-            "the number of tasks currently scheduled in the runtime's global queue"
-        );
+            "global_queue_depth",
+            "the number of tasks currently scheduled in the runtime's global queue",
+            self.metrics.global_queue_depth() as i64,
+        )?;
 
-        encode_gauge!(
-            self,
+        encode_gauge(
             &mut encoder,
-            num_alive_tasks,
-            "the number of alive tasks in the runtime"
-        );
-
-        #[cfg(target_has_atomic = "64")]
-        encode_per_worker_duration_seconds!(
-            self,
-            &mut encoder,
-            worker_total_busy_duration,
-            "the amount of time worker threads have been busy"
-        );
+            "num_alive_tasks",
+            "the number of alive tasks in the runtime",
+            self.metrics.num_alive_tasks() as i64,
+        )?;
 
         #[cfg(target_has_atomic = "64")]
-        encode_per_worker_count!(
-            self,
+        encode_per_worker_duration_seconds(
             &mut encoder,
-            worker_park_count,
-            "the total number of times the given worker thread has parked"
-        );
+            "worker_total_busy_duration_seconds",
+            "the amount of time worker threads have been busy",
+            self.metrics.num_workers(),
+            |w| self.metrics.worker_total_busy_duration(w),
+        )?;
 
         #[cfg(target_has_atomic = "64")]
-        encode_per_worker_count!(
-            self,
+        encode_per_worker_count(
             &mut encoder,
-            worker_park_unpark_count,
-            "the total number of times the given worker thread has parked and unparked"
-        );
+            "worker_park_count",
+            "the total number of times the given worker thread has parked",
+            self.metrics.num_workers(),
+            |w| self.metrics.worker_park_count(w),
+        )?;
+
+        #[cfg(target_has_atomic = "64")]
+        encode_per_worker_count(
+            &mut encoder,
+            "worker_park_unpark_count",
+            "the total number of times the given worker thread has parked and unparked",
+            self.metrics.num_workers(),
+            |w| self.metrics.worker_park_unpark_count(w),
+        )?;
 
         Ok(())
     }
