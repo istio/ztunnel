@@ -402,18 +402,21 @@ impl ServiceStore {
         vip: &NetworkAddress,
         ns: Option<&Strng>,
     ) -> Option<Arc<Service>> {
-        let mut best: Option<((bool, u8, bool), &Arc<Service>)> = None;
+        let mut best: Option<RankedMatch<'_>> = None;
         for (nc, svc) in &self.by_cidr_vip {
             if nc.network != vip.network || !nc.cidr.contains(&vip.address) {
                 continue;
             }
-            let in_ns = ns.is_some_and(|n| &svc.namespace == n);
-            let score = (in_ns, nc.cidr.prefix_len(), svc.canonical);
-            if best.is_none_or(|(b, _)| score > b) {
-                best = Some((score, svc));
+            let rank = CidrMatchRank {
+                in_namespace: ns.is_some_and(|n| &svc.namespace == n),
+                prefix_len: nc.cidr.prefix_len(),
+                canonical: svc.canonical,
+            };
+            if best.as_ref().is_none_or(|b| rank > b.rank) {
+                best = Some(RankedMatch { rank, svc });
             }
         }
-        best.map(|(_, s)| s.clone())
+        best.map(|m| m.svc.clone())
     }
 
     /// Returns the list of [Service]s matching the given hostname. Istio `ServiceEntry`
@@ -672,6 +675,22 @@ impl ServiceStore {
     pub fn num_staged_services(&self) -> usize {
         self.staged_services.len()
     }
+}
+
+/// Ranking for a CIDR-VIP match. Ordered lexicographically over
+/// `(in_namespace, prefix_len, canonical)` via the derived `Ord`: a service
+/// in the client's namespace wins, then the longest matching prefix, then
+/// a service marked `canonical`.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct CidrMatchRank {
+    in_namespace: bool,
+    prefix_len: u8,
+    canonical: bool,
+}
+
+struct RankedMatch<'a> {
+    rank: CidrMatchRank,
+    svc: &'a Arc<Service>,
 }
 
 /// Represents the reason a service was matched during lookup.
