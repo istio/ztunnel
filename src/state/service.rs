@@ -381,46 +381,39 @@ impl ServiceStore {
     /// Returns the "best" [Service] matching the given VIP.
     /// If a namespace is provided, a Service from that namespace is preferred.
     /// Next, a Service marked `canonical` is preferred.
-    /// Falls back to CIDR matching with longest-prefix-match if no exact VIP match.
+    /// Falls back to CIDR matching if no exact VIP match: namespace match wins
+    /// over specificity, then longest-prefix, then canonical.
     pub fn get_best_by_vip(
         &self,
         vip: &NetworkAddress,
         ns: Option<&Strng>,
     ) -> Option<Arc<Service>> {
-        let services = self.get_by_vip(vip).or_else(|| self.get_by_cidr_vip(vip))?;
-        Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone())
+        if let Some(services) = self.get_by_vip(vip) {
+            return Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone());
+        }
+        self.get_best_by_cidr_vip(vip, ns)
     }
 
-    /// Returns all services whose CIDR VIPs contain the given address,
-    /// filtered to the longest matching prefix length.
-    fn get_by_cidr_vip(&self, vip: &NetworkAddress) -> Option<Vec<Arc<Service>>> {
-        let mut best_prefix: Option<u8> = None;
-        let mut matches: Vec<Arc<Service>> = Vec::new();
+    /// Picks the best CIDR-VIP match for `vip`. Ranking is lexicographic over
+    /// `(in_namespace, prefix_len, canonical)` — a less-specific CIDR in the
+    /// client's namespace beats a more-specific CIDR in a different namespace.
+    fn get_best_by_cidr_vip(
+        &self,
+        vip: &NetworkAddress,
+        ns: Option<&Strng>,
+    ) -> Option<Arc<Service>> {
+        let mut best: Option<((bool, u8, bool), &Arc<Service>)> = None;
         for (nc, svc) in &self.by_cidr_vip {
-            if nc.network == vip.network && nc.cidr.contains(&vip.address) {
-                let pl = nc.cidr.prefix_len();
-                match best_prefix {
-                    Some(bp) if pl > bp => {
-                        best_prefix = Some(pl);
-                        matches.clear();
-                        matches.push(svc.clone());
-                    }
-                    Some(bp) if pl == bp => {
-                        matches.push(svc.clone());
-                    }
-                    None => {
-                        best_prefix = Some(pl);
-                        matches.push(svc.clone());
-                    }
-                    _ => {}
-                }
+            if nc.network != vip.network || !nc.cidr.contains(&vip.address) {
+                continue;
+            }
+            let in_ns = ns.is_some_and(|n| &svc.namespace == n);
+            let score = (in_ns, nc.cidr.prefix_len(), svc.canonical);
+            if best.is_none_or(|(b, _)| score > b) {
+                best = Some((score, svc));
             }
         }
-        if matches.is_empty() {
-            None
-        } else {
-            Some(matches)
-        }
+        best.map(|(_, s)| s.clone())
     }
 
     /// Returns the list of [Service]s matching the given hostname. Istio `ServiceEntry`
@@ -1190,5 +1183,50 @@ mod tests {
         });
         assert!(store.by_cidr_vip.is_empty());
         assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).is_none());
+    }
+
+    #[test]
+    fn cidr_namespace_preferred_over_cidr_specificity() {
+        let mut store = ServiceStore::default();
+        // Less-specific /16 in the local namespace.
+        store.insert(make_service(
+            "local",
+            "ns-local",
+            vec![],
+            vec![cidr("10.0.0.0/16")],
+        ));
+        // More-specific /24 in a shared/global namespace that no client belongs to.
+        store.insert(make_service(
+            "global",
+            "istio-system",
+            vec![],
+            vec![cidr("10.0.0.0/24")],
+        ));
+
+        let ns_local: Strng = "ns-local".into();
+        let ns_other: Strng = "ns-other".into();
+
+        // Local namespace wins even though its CIDR is less specific.
+        let svc = store
+            .get_best_by_vip(&nw(ip(10, 0, 0, 5)), Some(&ns_local))
+            .unwrap();
+        assert_eq!(svc.namespace, ns_local);
+        assert_eq!(svc.name, "local");
+
+        // From ns-other, neither service is in-namespace, so longest prefix wins.
+        let svc = store
+            .get_best_by_vip(&nw(ip(10, 0, 0, 5)), Some(&ns_other))
+            .unwrap();
+        assert_eq!(svc.name, "global");
+
+        // With no namespace preference, longest prefix wins.
+        let svc = store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).unwrap();
+        assert_eq!(svc.name, "global");
+
+        // Outside /24 but inside /16 — only the local match is available regardless of ns.
+        let svc = store
+            .get_best_by_vip(&nw(ip(10, 0, 1, 5)), Some(&ns_other))
+            .unwrap();
+        assert_eq!(svc.name, "local");
     }
 }
