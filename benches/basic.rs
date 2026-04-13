@@ -22,7 +22,7 @@ use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use pprof::criterion::{Output, PProfProfiler};
 use prometheus_client::registry::Registry;
 use tokio::runtime::Runtime;
-use ztunnel::state::workload::Workload;
+use ztunnel::state::workload::{NetworkAddress, Workload};
 use ztunnel::state::{DemandProxyState, ProxyState, ServiceResolutionMode};
 use ztunnel::strng;
 use ztunnel::xds::ProxyStateUpdateMutator;
@@ -193,12 +193,107 @@ fn build_load_balancer(
     (rt, demand, src_wl, svc_addr)
 }
 
+pub fn vip_match(c: &mut Criterion) {
+    let mut g = c.benchmark_group("vip_match");
+    g.throughput(Throughput::Elements(1));
+    g.measurement_time(Duration::from_secs(5));
+
+    for &n in &[1usize, 10, 100, 1000, 10000] {
+        let (state_exact, miss, hit) = build_exact_vip_state(n);
+        g.bench_function(format!("exact-miss-{n}"), |b| {
+            b.iter(|| {
+                let s = state_exact.read().unwrap();
+                std::hint::black_box(s.services.get_best_by_vip(&miss, None))
+            })
+        });
+        g.bench_function(format!("exact-hit-{n}"), |b| {
+            b.iter(|| {
+                let s = state_exact.read().unwrap();
+                std::hint::black_box(s.services.get_best_by_vip(&hit, None))
+            })
+        });
+
+        let (state_cidr, miss, hit) = build_cidr_vip_state(n);
+        g.bench_function(format!("cidr-miss-{n}"), |b| {
+            b.iter(|| {
+                let s = state_cidr.read().unwrap();
+                std::hint::black_box(s.services.get_best_by_vip(&miss, None))
+            })
+        });
+        g.bench_function(format!("cidr-hit-{n}"), |b| {
+            b.iter(|| {
+                let s = state_cidr.read().unwrap();
+                std::hint::black_box(s.services.get_best_by_vip(&hit, None))
+            })
+        });
+    }
+}
+
+fn build_exact_vip_state(n: usize) -> (Arc<RwLock<ProxyState>>, NetworkAddress, NetworkAddress) {
+    let mut state = ProxyState::new(None);
+    let updater = ProxyStateUpdateMutator::new_no_fetch();
+    for i in 0..n {
+        let svc = XdsService {
+            hostname: format!("svc-{i}.example.com"),
+            addresses: vec![XdsNetworkAddress {
+                network: "".to_string(),
+                address: vec![
+                    10,
+                    ((i >> 16) & 0xff) as u8,
+                    ((i >> 8) & 0xff) as u8,
+                    (i & 0xff) as u8,
+                ],
+                length: None,
+            }],
+            ..Default::default()
+        };
+        updater.insert_service(&mut state, svc).unwrap();
+    }
+    let miss = NetworkAddress {
+        network: strng::EMPTY,
+        address: "192.0.2.1".parse().unwrap(),
+    };
+    // Service 0 is always at 10.0.0.0
+    let hit = NetworkAddress {
+        network: strng::EMPTY,
+        address: "10.0.0.0".parse().unwrap(),
+    };
+    (Arc::new(RwLock::new(state)), miss, hit)
+}
+
+fn build_cidr_vip_state(n: usize) -> (Arc<RwLock<ProxyState>>, NetworkAddress, NetworkAddress) {
+    let mut state = ProxyState::new(None);
+    let updater = ProxyStateUpdateMutator::new_no_fetch();
+    for i in 0..n {
+        let svc = XdsService {
+            hostname: format!("svc-{i}.example.com"),
+            addresses: vec![XdsNetworkAddress {
+                network: "".to_string(),
+                address: vec![10, ((i >> 8) & 0xff) as u8, (i & 0xff) as u8, 0],
+                length: Some(24),
+            }],
+            ..Default::default()
+        };
+        updater.insert_service(&mut state, svc).unwrap();
+    }
+    let miss = NetworkAddress {
+        network: strng::EMPTY,
+        address: "192.0.2.1".parse().unwrap(),
+    };
+    // Service 0 is always at 10.0.0.0/24 — 10.0.0.1 matches
+    let hit = NetworkAddress {
+        network: strng::EMPTY,
+        address: "10.0.0.1".parse().unwrap(),
+    };
+    (Arc::new(RwLock::new(state)), miss, hit)
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(100, Output::Protobuf))
         .warm_up_time(Duration::from_millis(1));
-    targets = xds, load_balance
+    targets = xds, load_balance, vip_match
 }
 
 criterion_main!(benches);
