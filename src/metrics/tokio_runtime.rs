@@ -80,7 +80,7 @@ fn encode_per_worker_count(
 ) -> Result<(), std::fmt::Error> {
     let mut family_encoder = encoder.encode_descriptor(name, help, None, MetricType::Counter)?;
     for worker in 0..num_workers {
-        let metric = ConstGauge::new(value_for_worker(worker) as i64);
+        let metric = ConstCounter::new(value_for_worker(worker) as i64);
         let labels = LabelSet { worker };
         let metric_encoder = family_encoder.encode_family(&labels)?;
         metric.encode(metric_encoder)?;
