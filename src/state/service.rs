@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use bytes::Bytes;
+use ipnet::IpNet;
 use itertools::Itertools;
 use serde::{Deserializer, Serializer};
 use std::collections::{HashMap, HashSet};
@@ -23,8 +24,8 @@ use tracing::trace;
 use xds::istio::workload::Service as XdsService;
 
 use crate::state::workload::{
-    GatewayAddress, NamespacedHostname, NetworkAddress, Workload, WorkloadError, byte_to_ip,
-    network_addr,
+    GatewayAddress, NamespacedHostname, NetworkAddress, NetworkCidr, Workload, WorkloadError,
+    byte_to_ip, network_addr, network_cidr,
 };
 use crate::state::workload::{HealthStatus, is_default};
 use crate::strng::Strng;
@@ -39,6 +40,8 @@ pub struct Service {
     pub namespace: Strng,
     pub hostname: Strng,
     pub vips: Vec<NetworkAddress>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cidr_vips: Vec<NetworkCidr>,
     pub ports: HashMap<u16, u16>,
 
     /// Maps endpoint UIDs to service [Endpoint]s.
@@ -285,12 +288,20 @@ impl TryFrom<&XdsService> for Service {
 
     fn try_from(s: &XdsService) -> Result<Self, Self::Error> {
         let mut nw_addrs = Vec::new();
+        let mut cidr_vips = Vec::new();
         for addr in &s.addresses {
-            let network_address = network_addr(
-                strng::new(&addr.network),
-                byte_to_ip(&Bytes::copy_from_slice(&addr.address))?,
-            );
-            nw_addrs.push(network_address);
+            let ip = byte_to_ip(&Bytes::copy_from_slice(&addr.address))?;
+            let network = strng::new(&addr.network);
+            let max_prefix: u32 = if ip.is_ipv4() { 32 } else { 128 };
+            match addr.length {
+                Some(pl) if pl != max_prefix => {
+                    let cidr = IpNet::new(ip, pl as u8)?;
+                    cidr_vips.push(network_cidr(network, cidr));
+                }
+                _ => {
+                    nw_addrs.push(network_addr(network, ip));
+                }
+            }
         }
         let waypoint = match &s.waypoint {
             Some(w) => Some(GatewayAddress::try_from(w)?),
@@ -322,6 +333,7 @@ impl TryFrom<&XdsService> for Service {
             namespace: Strng::from(&s.namespace),
             hostname: Strng::from(&s.hostname),
             vips: nw_addrs,
+            cidr_vips,
             ports: (&PortList {
                 ports: s.ports.clone(),
             })
@@ -348,6 +360,10 @@ pub struct ServiceStore {
     /// Multiple services in different namespaces may share the same VIP.
     pub(super) by_vip: HashMap<NetworkAddress, Vec<Arc<Service>>>,
 
+    /// Allows for lookup of services by CIDR VIP. Checked as a fallback when exact VIP
+    /// lookup misses, using longest-prefix-match semantics.
+    pub(super) by_cidr_vip: Vec<(NetworkCidr, Arc<Service>)>,
+
     /// Allows for lookup of services by hostname, and then by namespace. XDS uses a combination
     /// of hostname and namespace as the primary key. In most cases, there will be a single
     /// service for a given hostname. However, `ServiceEntry` allows hostnames to be overridden
@@ -365,13 +381,42 @@ impl ServiceStore {
     /// Returns the "best" [Service] matching the given VIP.
     /// If a namespace is provided, a Service from that namespace is preferred.
     /// Next, a Service marked `canonical` is preferred.
+    /// Falls back to CIDR matching if no exact VIP match: namespace match wins
+    /// over specificity, then longest-prefix, then canonical.
     pub fn get_best_by_vip(
         &self,
         vip: &NetworkAddress,
         ns: Option<&Strng>,
     ) -> Option<Arc<Service>> {
-        let services = self.get_by_vip(vip)?;
-        Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone())
+        if let Some(services) = self.get_by_vip(vip) {
+            return Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone());
+        }
+        self.get_best_by_cidr_vip(vip, ns)
+    }
+
+    /// Picks the best CIDR-VIP match for `vip`. Ranking is lexicographic over
+    /// `(in_namespace, prefix_len, canonical)` — a less-specific CIDR in the
+    /// client's namespace beats a more-specific CIDR in a different namespace.
+    fn get_best_by_cidr_vip(
+        &self,
+        vip: &NetworkAddress,
+        ns: Option<&Strng>,
+    ) -> Option<Arc<Service>> {
+        let mut best: Option<RankedMatch<'_>> = None;
+        for (nc, svc) in &self.by_cidr_vip {
+            if nc.network != vip.network || !nc.cidr.contains(&vip.address) {
+                continue;
+            }
+            let rank = CidrMatchRank {
+                in_namespace: ns.is_some_and(|n| &svc.namespace == n),
+                prefix_len: nc.cidr.prefix_len(),
+                canonical: svc.canonical,
+            };
+            if best.as_ref().is_none_or(|b| rank > b.rank) {
+                best = Some(RankedMatch { rank, svc });
+            }
+        }
+        best.map(|m| m.svc.clone())
     }
 
     /// Returns the list of [Service]s matching the given hostname. Istio `ServiceEntry`
@@ -539,6 +584,9 @@ impl ServiceStore {
                 }
             }
         }
+        for cidr in &service.cidr_vips {
+            self.by_cidr_vip.push((cidr.clone(), service.clone()));
+        }
 
         // Map the hostname to the service.
         match self.by_host.get_mut(hostname) {
@@ -595,6 +643,9 @@ impl ServiceStore {
                         }
                     }
                 });
+                let prev_host = prev.namespaced_hostname();
+                self.by_cidr_vip
+                    .retain(|(_, svc)| svc.namespaced_hostname() != prev_host);
 
                 // Remove the staged service.
                 // TODO(nmittler): no endpoints for this service should be staged at this point.
@@ -624,6 +675,22 @@ impl ServiceStore {
     pub fn num_staged_services(&self) -> usize {
         self.staged_services.len()
     }
+}
+
+/// Ranking for a CIDR-VIP match. Ordered lexicographically over
+/// `(in_namespace, prefix_len, canonical)` via the derived `Ord`: a service
+/// in the client's namespace wins, then the longest matching prefix, then
+/// a service marked `canonical`.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct CidrMatchRank {
+    in_namespace: bool,
+    prefix_len: u8,
+    canonical: bool,
+}
+
+struct RankedMatch<'a> {
+    rank: CidrMatchRank,
+    svc: &'a Arc<Service>,
 }
 
 /// Represents the reason a service was matched during lookup.
@@ -690,7 +757,9 @@ impl<'a> ServiceMatch<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use crate::state::workload::{NetworkCidr, network_cidr};
+    use ipnet::IpNet;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     fn nw(ip: IpAddr) -> NetworkAddress {
         NetworkAddress {
@@ -699,12 +768,16 @@ mod tests {
         }
     }
 
-    fn make_service(name: &str, ns: &str, vips: Vec<IpAddr>) -> Service {
+    fn make_service(name: &str, ns: &str, vips: Vec<IpAddr>, cidrs: Vec<IpNet>) -> Service {
         Service {
             name: name.into(),
             namespace: ns.into(),
             hostname: format!("{name}.{ns}.svc.cluster.local").into(),
             vips: vips.into_iter().map(nw).collect(),
+            cidr_vips: cidrs
+                .into_iter()
+                .map(|c| network_cidr(crate::strng::EMPTY, c))
+                .collect(),
             ports: HashMap::new(),
             endpoints: EndpointSet::from_list([]),
             subject_alt_names: vec![],
@@ -715,37 +788,43 @@ mod tests {
         }
     }
 
+    fn cidr(s: &str) -> IpNet {
+        s.parse().unwrap()
+    }
+
+    fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    fn ip6(segments: [u16; 8]) -> IpAddr {
+        IpAddr::V6(Ipv6Addr::from(segments))
+    }
+
     #[test]
     fn shared_vip_different_namespaces() {
         let mut store = ServiceStore::default();
-        // shared: both services claim this VIP
         let shared = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        // exclusive to each service
         let only_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
         let only_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
 
         let ns_a: Strng = "ns-a".into();
         let ns_b: Strng = "ns-b".into();
 
-        let svc_a = make_service("svc", "ns-a", vec![shared, only_a]);
-        let svc_b = make_service("svc", "ns-b", vec![shared, only_b]);
+        let svc_a = make_service("svc", "ns-a", vec![shared, only_a], vec![]);
+        let svc_b = make_service("svc", "ns-b", vec![shared, only_b], vec![]);
 
         store.insert(svc_a);
         store.insert(svc_b);
 
-        // 3 unique VIP addresses, 2 services.
         assert_eq!(store.num_vips(), 3);
         assert_eq!(store.num_services(), 2);
 
-        // Shared VIP has both services.
         let all = store.get_by_vip(&nw(shared)).unwrap();
         assert_eq!(all.len(), 2);
 
-        // Exclusive VIPs have one service each.
         assert_eq!(store.get_by_vip(&nw(only_a)).unwrap().len(), 1);
         assert_eq!(store.get_by_vip(&nw(only_b)).unwrap().len(), 1);
 
-        // Namespace preference on shared VIP returns the correct service.
         assert_eq!(
             store
                 .get_best_by_vip(&nw(shared), Some(&ns_a))
@@ -761,7 +840,6 @@ mod tests {
             ns_b,
         );
 
-        // Exclusive VIPs always return their owner regardless of namespace hint.
         assert_eq!(
             store
                 .get_best_by_vip(&nw(only_a), Some(&ns_b))
@@ -777,15 +855,13 @@ mod tests {
             ns_b,
         );
 
-        // None returns some service.
         assert!(store.get_best_by_vip(&nw(shared), None).is_some());
 
-        // Remove svc_a: shared VIP keeps svc_b, only_a is gone, only_b remains.
         store.remove(&NamespacedHostname {
             namespace: "ns-a".into(),
             hostname: "svc.ns-a.svc.cluster.local".into(),
         });
-        assert_eq!(store.num_vips(), 2); // shared + only_b
+        assert_eq!(store.num_vips(), 2);
         assert_eq!(store.num_services(), 1);
 
         let all = store.get_by_vip(&nw(shared)).unwrap();
@@ -795,7 +871,6 @@ mod tests {
         assert!(store.get_by_vip(&nw(only_a)).is_none());
         assert!(store.get_by_vip(&nw(only_b)).is_some());
 
-        // Remove svc_b: everything is gone.
         store.remove(&NamespacedHostname {
             namespace: "ns-b".into(),
             hostname: "svc.ns-b.svc.cluster.local".into(),
@@ -804,5 +879,373 @@ mod tests {
         assert_eq!(store.num_services(), 0);
         assert!(store.get_by_vip(&nw(shared)).is_none());
         assert!(store.get_by_vip(&nw(only_b)).is_none());
+    }
+
+    #[test]
+    fn cidr_match_v4() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service("svc", "ns", vec![], vec![cidr("10.0.0.0/24")]));
+
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).is_some());
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip(10, 0, 0, 255)), None)
+                .is_some()
+        );
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 1, 5)), None).is_none());
+    }
+
+    #[test]
+    fn cidr_match_v6() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service("svc", "ns", vec![], vec![cidr("fd00::/112")]));
+
+        // Inside the /112
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])), None)
+                .is_some()
+        );
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 0xffff])), None)
+                .is_some()
+        );
+        // Outside the /112
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 1, 0])), None)
+                .is_none()
+        );
+        // Different prefix entirely
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd01, 0, 0, 0, 0, 0, 0, 5])), None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn longest_prefix_match_v4() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service(
+            "wide",
+            "ns",
+            vec![],
+            vec![cidr("10.0.0.0/16")],
+        ));
+        store.insert(make_service(
+            "narrow",
+            "ns",
+            vec![],
+            vec![cidr("10.0.0.0/24")],
+        ));
+
+        let svc = store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).unwrap();
+        assert_eq!(svc.name, "narrow");
+
+        let svc = store.get_best_by_vip(&nw(ip(10, 0, 1, 5)), None).unwrap();
+        assert_eq!(svc.name, "wide");
+    }
+
+    #[test]
+    fn longest_prefix_match_v6() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service("wide", "ns", vec![], vec![cidr("fd00::/48")]));
+        store.insert(make_service(
+            "narrow",
+            "ns",
+            vec![],
+            vec![cidr("fd00::/112")],
+        ));
+
+        // Inside both, /112 wins
+        let svc = store
+            .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])), None)
+            .unwrap();
+        assert_eq!(svc.name, "narrow");
+
+        // Outside /112 but inside /48
+        let svc = store
+            .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 1, 0])), None)
+            .unwrap();
+        assert_eq!(svc.name, "wide");
+    }
+
+    #[test]
+    fn dual_stack_cidr() {
+        let mut store = ServiceStore::default();
+        // A single service with both v4 and v6 CIDRs
+        store.insert(make_service(
+            "dual",
+            "ns",
+            vec![],
+            vec![cidr("10.0.0.0/24"), cidr("fd00::/112")],
+        ));
+
+        // v4 matches
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).is_some());
+        // v6 matches
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])), None)
+                .is_some()
+        );
+        // v4 outside range
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 1, 5)), None).is_none());
+        // v6 outside range
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 1, 0])), None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cidr_family_mismatch() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service("v4", "ns", vec![], vec![cidr("10.0.0.0/24")]));
+        store.insert(make_service("v6", "ns", vec![], vec![cidr("fd00::/112")]));
+
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])), None)
+                .is_some()
+        );
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).is_some());
+
+        // IPv4 addresses should never match IPv6 CIDRs.
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip(0xfd, 0, 0, 0)), None)
+                .is_none()
+        );
+        // IPv6 addresses should never match IPv4 CIDRs.
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0x0a00, 0, 0, 0, 0, 0, 0, 5])), None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn exact_v4_with_cidr_v6() {
+        let mut store = ServiceStore::default();
+        // Service with exact v4 VIP and v6 CIDR
+        store.insert(make_service(
+            "mixed",
+            "ns",
+            vec![ip(10, 0, 0, 1)],
+            vec![cidr("fd00::/112")],
+        ));
+
+        // Exact v4 match
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 1)), None).is_some());
+        // v6 CIDR match
+        assert!(
+            store
+                .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])), None)
+                .is_some()
+        );
+        // v4 not in exact set
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 2)), None).is_none());
+    }
+
+    #[test]
+    fn exact_match_priority_over_cidr_v4() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service(
+            "cidr-svc",
+            "ns",
+            vec![],
+            vec![cidr("10.0.0.0/24")],
+        ));
+        store.insert(make_service(
+            "exact-svc",
+            "ns",
+            vec![ip(10, 0, 0, 5)],
+            vec![],
+        ));
+
+        let svc = store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).unwrap();
+        assert_eq!(svc.name, "exact-svc");
+
+        let svc = store.get_best_by_vip(&nw(ip(10, 0, 0, 6)), None).unwrap();
+        assert_eq!(svc.name, "cidr-svc");
+    }
+
+    #[test]
+    fn exact_match_priority_over_cidr_v6() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service(
+            "cidr-svc",
+            "ns",
+            vec![],
+            vec![cidr("fd00::/112")],
+        ));
+        store.insert(make_service(
+            "exact-svc",
+            "ns",
+            vec![ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])],
+            vec![],
+        ));
+
+        let svc = store
+            .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 5])), None)
+            .unwrap();
+        assert_eq!(svc.name, "exact-svc");
+
+        let svc = store
+            .get_best_by_vip(&nw(ip6([0xfd00, 0, 0, 0, 0, 0, 0, 6])), None)
+            .unwrap();
+        assert_eq!(svc.name, "cidr-svc");
+    }
+
+    #[test]
+    fn cidr_network_scoping() {
+        let mut store = ServiceStore::default();
+        let svc = Service {
+            name: "svc".into(),
+            namespace: "ns".into(),
+            hostname: "svc.ns.svc.cluster.local".into(),
+            vips: vec![],
+            cidr_vips: vec![NetworkCidr {
+                network: "net-a".into(),
+                cidr: cidr("10.0.0.0/24"),
+            }],
+            ports: HashMap::new(),
+            endpoints: EndpointSet::from_list([]),
+            subject_alt_names: vec![],
+            waypoint: None,
+            load_balancer: None,
+            ip_families: None,
+            canonical: false,
+        };
+        store.insert(svc);
+
+        let addr_a = NetworkAddress {
+            network: "net-a".into(),
+            address: ip(10, 0, 0, 5),
+        };
+        assert!(store.get_best_by_vip(&addr_a, None).is_some());
+
+        let addr_b = NetworkAddress {
+            network: "net-b".into(),
+            address: ip(10, 0, 0, 5),
+        };
+        assert!(store.get_best_by_vip(&addr_b, None).is_none());
+    }
+
+    #[test]
+    fn cidr_remove_cleanup() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service("svc", "ns", vec![], vec![cidr("10.0.0.0/24")]));
+
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).is_some());
+
+        store.remove(&NamespacedHostname {
+            namespace: "ns".into(),
+            hostname: "svc.ns.svc.cluster.local".into(),
+        });
+
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).is_none());
+        assert!(store.by_cidr_vip.is_empty());
+    }
+
+    #[test]
+    fn overlapping_cidr_different_namespaces() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service(
+            "svc",
+            "ns-a",
+            vec![],
+            vec![cidr("10.0.0.0/24")],
+        ));
+        store.insert(make_service(
+            "svc",
+            "ns-b",
+            vec![],
+            vec![cidr("10.0.0.0/24")],
+        ));
+
+        assert_eq!(store.by_cidr_vip.len(), 2);
+
+        let ns_a: Strng = "ns-a".into();
+        let ns_b: Strng = "ns-b".into();
+
+        assert_eq!(
+            store
+                .get_best_by_vip(&nw(ip(10, 0, 0, 5)), Some(&ns_a))
+                .unwrap()
+                .namespace,
+            ns_a,
+        );
+        assert_eq!(
+            store
+                .get_best_by_vip(&nw(ip(10, 0, 0, 5)), Some(&ns_b))
+                .unwrap()
+                .namespace,
+            ns_b,
+        );
+
+        store.remove(&NamespacedHostname {
+            namespace: "ns-a".into(),
+            hostname: "svc.ns-a.svc.cluster.local".into(),
+        });
+        assert_eq!(store.by_cidr_vip.len(), 1);
+        let svc = store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).unwrap();
+        assert_eq!(svc.namespace, "ns-b");
+
+        store.remove(&NamespacedHostname {
+            namespace: "ns-b".into(),
+            hostname: "svc.ns-b.svc.cluster.local".into(),
+        });
+        assert!(store.by_cidr_vip.is_empty());
+        assert!(store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).is_none());
+    }
+
+    #[test]
+    fn cidr_namespace_preferred_over_cidr_specificity() {
+        let mut store = ServiceStore::default();
+        // Less-specific /16 in the local namespace.
+        store.insert(make_service(
+            "local",
+            "ns-local",
+            vec![],
+            vec![cidr("10.0.0.0/16")],
+        ));
+        // More-specific /24 in a shared/global namespace that no client belongs to.
+        store.insert(make_service(
+            "global",
+            "istio-system",
+            vec![],
+            vec![cidr("10.0.0.0/24")],
+        ));
+
+        let ns_local: Strng = "ns-local".into();
+        let ns_other: Strng = "ns-other".into();
+
+        // Local namespace wins even though its CIDR is less specific.
+        let svc = store
+            .get_best_by_vip(&nw(ip(10, 0, 0, 5)), Some(&ns_local))
+            .unwrap();
+        assert_eq!(svc.namespace, ns_local);
+        assert_eq!(svc.name, "local");
+
+        // From ns-other, neither service is in-namespace, so longest prefix wins.
+        let svc = store
+            .get_best_by_vip(&nw(ip(10, 0, 0, 5)), Some(&ns_other))
+            .unwrap();
+        assert_eq!(svc.name, "global");
+
+        // With no namespace preference, longest prefix wins.
+        let svc = store.get_best_by_vip(&nw(ip(10, 0, 0, 5)), None).unwrap();
+        assert_eq!(svc.name, "global");
+
+        // Outside /24 but inside /16 — only the local match is available regardless of ns.
+        let svc = store
+            .get_best_by_vip(&nw(ip(10, 0, 1, 5)), Some(&ns_other))
+            .unwrap();
+        assert_eq!(svc.name, "local");
     }
 }
