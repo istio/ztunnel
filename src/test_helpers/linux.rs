@@ -400,6 +400,7 @@ impl<'a> TestServiceBuilder<'a> {
                 namespace: "default".into(),
                 hostname: strng::format!("{name}.default.svc.cluster.local"),
                 vips: vec![],
+                cidr_vips: vec![],
                 ports: Default::default(),
                 endpoints: Default::default(), // populated later when workloads are added
                 subject_alt_names: vec![],

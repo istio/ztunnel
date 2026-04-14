@@ -59,6 +59,7 @@ fn main() -> Result<(), anyhow::Error> {
         c
     };
     tonic_prost_build::configure()
+        .protoc_arg("--experimental_allow_proto3_optional")
         .build_server(true)
         .compile_with_config(
             config,
