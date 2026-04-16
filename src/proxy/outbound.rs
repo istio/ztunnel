@@ -475,8 +475,8 @@ impl OutboundConnection {
     // bytes without trying to interpret it.
     //
     // NOTE: when connecting through an E/W gateway, regardless of whether there is
-    // a waypoint or not, we always use service hostname and the service port. It's
-    // somewhat different from how regular HBONE works, so I'm calling it out here.
+    // a waypoint or not, we always use service hostname and the service port.
+    // This is also the case for service-addressed waypoint traffic (see build_request).
     async fn build_request_through_gateway(
         &self,
         source: Arc<Workload>,
@@ -581,7 +581,10 @@ impl OutboundConnection {
                 return Ok(Request {
                     protocol: OutboundProtocol::HBONE,
                     source: source_workload,
-                    hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
+                    hbone_target_destination: Some(HboneAddress::SvcHostname(
+                        target_service.hostname.clone(),
+                        target.port(),
+                    )),
                     actual_destination_workload: Some(waypoint.workload),
                     intended_destination_service: Some(ServiceDescription::from(&*target_service)),
                     actual_destination,
@@ -1531,6 +1534,7 @@ mod tests {
             "127.0.0.1",
             "127.0.0.3:80",
             XdsAddressType::Service(XdsService {
+                hostname: "my-svc.default.svc.cluster.local".to_string(),
                 addresses: vec![XdsNetworkAddress {
                     network: "".to_string(),
                     address: vec![127, 0, 0, 3],
@@ -1552,10 +1556,10 @@ mod tests {
                 }),
                 ..Default::default()
             }),
-            // Should use the waypoint
+            // Should use the waypoint with service hostname as authority
             Some(ExpectedRequest {
                 protocol: OutboundProtocol::HBONE,
-                hbone_destination: "127.0.0.3:80",
+                hbone_destination: "my-svc.default.svc.cluster.local:80",
                 destination: "127.0.0.10:15008",
             }),
         )
@@ -1904,7 +1908,7 @@ mod tests {
             "127.0.0.1",
             "1.2.3.4:80",
             XdsAddressType::Service(XdsService {
-                hostname: "example.com".to_string(),
+                hostname: "my-svc.default.svc.cluster.local".to_string(),
                 waypoint: Some(xds::istio::workload::GatewayAddress {
                     destination: Some(xds::istio::workload::gateway_address::Destination::Address(
                         XdsNetworkAddress {
@@ -1940,7 +1944,7 @@ mod tests {
             Some(ExpectedRequest {
                 protocol: OutboundProtocol::HBONE,
                 destination: "127.0.0.10:15008",
-                hbone_destination: "1.2.3.4:80",
+                hbone_destination: "my-svc.default.svc.cluster.local:80",
             }),
         )
         .await;
