@@ -51,9 +51,10 @@ fi
 gsutil cp "${WD}/../out/rust/release/ztunnel" "${DEST}/${RELEASE_NAME}"
 
 R2_DEST="${DEST/gs:\/\//s3:\/\/}"
-R2_ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-AWS_ACCESS_KEY_ID="$CF_ACCESS_KEY_ID" \
-    AWS_SECRET_ACCESS_KEY="$CF_ACCESS_SECRET" \
+ENDPOINT=$(echo "${CF_CREDENTIALS}" | jq -r '.endpoint')
+AWS_ACCESS_KEY_ID=$(echo "${CF_CREDENTIALS}" | jq -r '.access_key') \
+    AWS_SECRET_ACCESS_KEY=$(echo "${CF_CREDENTIALS}" | jq -r '.secret_key') \
+    AWS_SESSION_TOKEN=$(echo "${CF_CREDENTIALS}" | jq -r '.session_token') \
     aws s3 cp "${WD}/../out/rust/release/ztunnel" \
     "${R2_DEST}/${RELEASE_NAME}" \
-    --endpoint-url "${R2_ENDPOINT}"
+    --endpoint-url "${ENDPOINT}"
