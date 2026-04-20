@@ -31,7 +31,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
-use crate::tls;
 use x509_parser::certificate::X509Certificate;
 
 #[derive(Clone, Debug)]
@@ -301,26 +300,19 @@ impl WorkloadCertificate {
     pub fn server_config(
         &self,
         crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
-        mesh_settings: Option<&crate::tls::MeshSettings>,
+        resolved: &crate::tls::ResolvedMeshConfig,
     ) -> Result<ServerConfig, Error> {
-        // Trust domain priority: xDS > certificate
-        let td = mesh_settings
-            .filter(|ms| !ms.trust_domain.is_empty())
-            .map(|ms| ms.trust_domain.clone())
-            .or_else(|| {
-                self.cert.identity().map(|i| match i {
-                    Identity::Spiffe { trust_domain, .. } => trust_domain,
-                })
-            });
-
-        let td_aliases = mesh_settings
-            .map(|ms| ms.trust_domain_aliases.clone())
-            .unwrap_or_default();
+        // Trust domain: resolved config (xDS) > certificate
+        let td = resolved.trust_domain.clone().or_else(|| {
+            self.cert.identity().map(|i| match i {
+                Identity::Spiffe { trust_domain, .. } => trust_domain,
+            })
+        });
 
         // build the base client cert verifier with optional CRL support
         let mut builder = WebPkiClientVerifier::builder_with_provider(
             self.root_store.clone(),
-            crate::tls::lib::provider(mesh_settings),
+            resolved.provider.clone(),
         );
 
         // add CRLs if available
@@ -334,10 +326,13 @@ impl WorkloadCertificate {
         // TODO: check if our own certificate is revoked in the CRL and log warning
         let raw_client_cert_verifier = builder.build()?;
 
-        let client_cert_verifier =
-            crate::tls::workload::TrustDomainVerifier::new(raw_client_cert_verifier, td, td_aliases);
-        let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider(mesh_settings))
-            .with_protocol_versions(tls::tls_versions(mesh_settings))
+        let client_cert_verifier = crate::tls::workload::TrustDomainVerifier::new(
+            raw_client_cert_verifier,
+            td,
+            resolved.trust_domain_aliases.clone(),
+        );
+        let mut sc = ServerConfig::builder_with_provider(resolved.provider.clone())
+            .with_protocol_versions(resolved.tls_versions())
             .expect("server config must be valid")
             .with_client_cert_verifier(client_cert_verifier)
             .with_single_cert(
@@ -353,12 +348,16 @@ impl WorkloadCertificate {
     pub fn client_config(
         &self,
         identity: Vec<Identity>,
-        mesh_settings: Option<&crate::tls::MeshSettings>,
+        resolved: &crate::tls::ResolvedMeshConfig,
     ) -> Result<ClientConfig, rustls::Error> {
         let roots = self.root_store.clone();
-        let verifier = IdentityVerifier { roots, identity };
-        let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider(mesh_settings))
-            .with_protocol_versions(tls::tls_versions(mesh_settings))
+        let verifier = IdentityVerifier {
+            roots,
+            identity,
+            provider: resolved.provider.clone(),
+        };
+        let mut cc = ClientConfig::builder_with_provider(resolved.provider.clone())
+            .with_protocol_versions(resolved.tls_versions())
             .expect("client config must be valid")
             .dangerous() // Customer verifier is requires "dangerous" opt-in
             .with_custom_certificate_verifier(Arc::new(verifier))
@@ -375,9 +374,9 @@ impl WorkloadCertificate {
     pub fn outbound_connector(
         &self,
         identity: Vec<Identity>,
-        mesh_settings: Option<&crate::tls::MeshSettings>,
+        resolved: &crate::tls::ResolvedMeshConfig,
     ) -> Result<OutboundConnector, Error> {
-        let cc = self.client_config(identity, mesh_settings)?;
+        let cc = self.client_config(identity, resolved)?;
         Ok(OutboundConnector {
             client_config: Arc::new(cc),
         })
@@ -485,7 +484,7 @@ mod test {
             WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![&joined]).unwrap();
 
         // Do a simple handshake between them; we should be able to accept the trusted root
-        let server = cert1.server_config(None, None).unwrap();
+        let server = cert1.server_config(None, &crate::tls::resolve_mesh_config(None)).unwrap();
         let tls = TlsAcceptor::from(Arc::new(server));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -496,7 +495,7 @@ mod test {
         });
 
         let stream = TcpStream::connect(addr).await.unwrap();
-        let client = cert2.outbound_connector(vec![id], None).unwrap();
+        let client = cert2.outbound_connector(vec![id], &crate::tls::resolve_mesh_config(None)).unwrap();
         let mut tls = client.connect(stream).await.unwrap();
 
         let _ = tls.write(b"hi").await.unwrap();
@@ -529,7 +528,7 @@ mod test {
         };
 
         // server_config should work with matching trust domain
-        let server = cert1.server_config(None, Some(&mesh_settings));
+        let server = cert1.server_config(None, &crate::tls::resolve_mesh_config(Some(&mesh_settings)));
         assert!(server.is_ok(), "server_config should succeed with matching trust domain");
     }
 
@@ -580,7 +579,7 @@ mod test {
 
         // Server config with trust domain alias
         let server = server_certs
-            .server_config(None, Some(&mesh_settings))
+            .server_config(None, &crate::tls::resolve_mesh_config(Some(&mesh_settings)))
             .unwrap();
         let tls = TlsAcceptor::from(Arc::new(server));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -595,7 +594,7 @@ mod test {
 
         let stream = TcpStream::connect(addr).await.unwrap();
         let client = client_certs
-            .outbound_connector(vec![server_id], None)
+            .outbound_connector(vec![server_id], &crate::tls::resolve_mesh_config(None))
             .unwrap();
         let mut tls = client.connect(stream).await.unwrap();
 
@@ -647,7 +646,7 @@ mod test {
         };
 
         let server = server_certs
-            .server_config(None, Some(&mesh_settings))
+            .server_config(None, &crate::tls::resolve_mesh_config(Some(&mesh_settings)))
             .unwrap();
         let tls = TlsAcceptor::from(Arc::new(server));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -662,7 +661,7 @@ mod test {
 
         let stream = TcpStream::connect(addr).await.unwrap();
         let client = client_certs
-            .outbound_connector(vec![server_id], None)
+            .outbound_connector(vec![server_id], &crate::tls::resolve_mesh_config(None))
             .unwrap();
         let result = client.connect(stream).await;
         assert!(result.is_err());
@@ -690,7 +689,7 @@ mod test {
             tls: None,
         };
 
-        let server = cert1.server_config(None, Some(&mesh_settings));
+        let server = cert1.server_config(None, &crate::tls::resolve_mesh_config(Some(&mesh_settings)));
         assert!(server.is_ok(), "empty trust_domain should fall back to certificate extraction");
     }
 }

@@ -17,6 +17,7 @@ mod control;
 pub mod crl;
 pub mod csr;
 mod lib;
+mod mesh_config;
 #[cfg(any(test, feature = "testing"))]
 pub mod mock;
 mod workload;
@@ -26,6 +27,7 @@ use std::sync::Arc;
 pub use crate::tls::certificate::*;
 pub use crate::tls::control::*;
 pub use crate::tls::lib::*;
+pub use crate::tls::mesh_config::*;
 pub use crate::tls::workload::*;
 use hyper::http::uri::InvalidUri;
 use rustls::server::VerifierBuilderError;

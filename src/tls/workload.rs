@@ -16,7 +16,6 @@ use crate::identity::Identity;
 use std::error::Error;
 use std::fmt::{Debug, Display};
 
-use crate::tls::lib::provider;
 use crate::tls::{ServerCertProvider, TlsError};
 use futures_util::TryFutureExt;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -200,6 +199,7 @@ impl OutboundConnector {
 pub struct IdentityVerifier {
     pub(super) roots: Arc<RootCertStore>,
     pub(super) identity: Vec<Identity>,
+    pub(super) provider: Arc<rustls::crypto::CryptoProvider>,
 }
 
 impl IdentityVerifier {
@@ -268,7 +268,7 @@ impl ServerCertVerifier for IdentityVerifier {
     ) -> Result<ServerCertVerified, rustls::Error> {
         let cert = ParsedCertificate::try_from(end_entity)?;
 
-        let algs = provider(None).signature_verification_algorithms;
+        let algs = self.provider.signature_verification_algorithms;
         rustls::client::verify_server_cert_signed_by_trust_anchor(
             &cert,
             &self.roots,
@@ -298,7 +298,7 @@ impl ServerCertVerifier for IdentityVerifier {
             message,
             cert,
             dss,
-            &provider(None).signature_verification_algorithms,
+            &self.provider.signature_verification_algorithms,
         )
     }
 
@@ -312,12 +312,12 @@ impl ServerCertVerifier for IdentityVerifier {
             message,
             cert,
             dss,
-            &provider(None).signature_verification_algorithms,
+            &self.provider.signature_verification_algorithms,
         )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        provider(None)
+        self.provider
             .signature_verification_algorithms
             .supported_schemes()
     }

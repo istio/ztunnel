@@ -181,9 +181,9 @@ pub struct ProxyState {
 
     pub policies: PolicyStore,
 
-    /// Runtime mesh settings received from xDS.
-    /// When set, overrides environment variable settings for TLS, trust domain, etc.
-    pub mesh_settings: Option<Arc<crate::tls::MeshSettings>>,
+    /// Pre-resolved mesh configuration (TLS, trust domain) from xDS + env var defaults.
+    /// Recomputed whenever MeshSettings arrives or is removed via xDS.
+    pub resolved_mesh_config: Arc<crate::tls::ResolvedMeshConfig>,
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -193,7 +193,7 @@ struct ProxyStateSerialization<'a> {
     services: Vec<Arc<Service>>,
     policies: Vec<Authorization>,
     staged_services: &'a HashMap<NamespacedHostname, HashMap<Strng, Endpoint>>,
-    mesh_settings: &'a Option<Arc<crate::tls::MeshSettings>>,
+    resolved_mesh_config: &'a Arc<crate::tls::ResolvedMeshConfig>,
 }
 
 impl serde::Serialize for ProxyState {
@@ -232,7 +232,7 @@ impl serde::Serialize for ProxyState {
             services,
             policies,
             staged_services: &self.services.staged_services,
-            mesh_settings: &self.mesh_settings,
+            resolved_mesh_config: &self.resolved_mesh_config,
         };
         serializable.serialize(serializer)
     }
@@ -244,7 +244,7 @@ impl ProxyState {
             workloads: WorkloadStore::new(local_node),
             services: Default::default(),
             policies: Default::default(),
-            mesh_settings: None,
+            resolved_mesh_config: Arc::new(crate::tls::resolve_mesh_config(None)),
         }
     }
 
@@ -525,10 +525,9 @@ impl DemandProxyState {
             .get_by_workload(wl)
     }
 
-    /// Get the current mesh settings from xDS, if available.
-    /// Returns None if no mesh settings have been received from the control plane.
-    pub fn mesh_settings(&self) -> Option<Arc<crate::tls::MeshSettings>> {
-        self.state.read().expect("mutex").mesh_settings.clone()
+    /// Get the resolved mesh configuration (pre-computed from xDS settings + env var defaults).
+    pub fn resolved_mesh_config(&self) -> Arc<crate::tls::ResolvedMeshConfig> {
+        self.state.read().expect("mutex").resolved_mesh_config.clone()
     }
 }
 

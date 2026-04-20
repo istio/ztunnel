@@ -274,8 +274,8 @@ impl OutboundConnection {
                 .local_workload_information
                 .fetch_certificate()
                 .await?;
-            let mesh_settings = self.pi.state.mesh_settings();
-            let connector = cert.outbound_connector(wl_key.dst_id.clone(), mesh_settings.as_deref())?;
+            let resolved = self.pi.state.resolved_mesh_config();
+            let connector = cert.outbound_connector(wl_key.dst_id.clone(), &resolved)?;
             let tls_stream = connector.connect(upgraded).await?;
             let (_, ssl) = tls_stream.get_ref();
             let peer_identity = identity_from_connection(ssl);

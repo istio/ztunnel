@@ -407,11 +407,11 @@ impl Handler<XdsMeshSettings> for ProxyStateUpdater {
                         tls = ?settings.tls,
                         "received MeshSettings update from xDS"
                     );
-                    state.mesh_settings = Some(Arc::new(settings));
+                    state.resolved_mesh_config = Arc::new(tls::resolve_mesh_config(Some(&settings)));
                 }
                 XdsUpdate::Remove(_name) => {
                     info!("MeshSettings removed, reverting to defaults");
-                    state.mesh_settings = None;
+                    state.resolved_mesh_config = Arc::new(tls::resolve_mesh_config(None));
                 }
             }
             Ok(())

@@ -84,8 +84,8 @@ impl ConnSpawner {
         debug!("spawning new pool conn for {}", key);
 
         let cert = self.local_workload.fetch_certificate().await?;
-        let mesh_settings = self.state.mesh_settings();
-        let connector = cert.outbound_connector(key.dst_id.clone(), mesh_settings.as_deref())?;
+        let resolved = self.state.resolved_mesh_config();
+        let connector = cert.outbound_connector(key.dst_id.clone(), &resolved)?;
         let tcp_stream = super::freebind_connect(None, key.dst, self.socket_factory.as_ref())
             .await
             .map_err(|e: io::Error| match e.kind() {

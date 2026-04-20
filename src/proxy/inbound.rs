@@ -736,10 +736,10 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
             "fetching cert"
         );
         let cert = self.local_workload.fetch_certificate().await?;
-        let mesh_settings = self.state.mesh_settings();
+        let resolved = self.state.resolved_mesh_config();
         Ok(Arc::new(cert.server_config(
             self.crl_manager.clone(),
-            mesh_settings.as_deref(),
+            &resolved,
         )?))
     }
 }
