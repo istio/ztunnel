@@ -50,3 +50,12 @@ if [[ "$CI" == "" && "$DEST" == "gs://istio-build/ztunnel" ]]; then
   exit 1
 fi
 gsutil cp "${WD}/../out/rust/release/ztunnel" "${DEST}/${RELEASE_NAME}"
+
+R2_DEST="${DEST/gs:\/\//s3:\/\/}"
+ENDPOINT=$(echo "${CF_CREDENTIALS}" | jq -r '.endpoint')
+AWS_ACCESS_KEY_ID=$(echo "${CF_CREDENTIALS}" | jq -r '.access_key') \
+    AWS_SECRET_ACCESS_KEY=$(echo "${CF_CREDENTIALS}" | jq -r '.secret_key') \
+    AWS_SESSION_TOKEN=$(echo "${CF_CREDENTIALS}" | jq -r '.session_token') \
+    aws s3 cp "${WD}/../out/rust/release/ztunnel" \
+    "${R2_DEST}/${RELEASE_NAME}" \
+    --endpoint-url "${ENDPOINT}"
