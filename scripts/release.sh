@@ -49,3 +49,11 @@ if [[ "$CI" == "" && "$DEST" == "gs://istio-build/ztunnel" ]]; then
   exit 1
 fi
 gsutil cp "${WD}/../out/rust/release/ztunnel" "${DEST}/${RELEASE_NAME}"
+
+R2_DEST="${DEST/gs:\/\//s3:\/\/}"
+R2_ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+AWS_ACCESS_KEY_ID="$CF_ACCESS_KEY_ID" \
+    AWS_SECRET_ACCESS_KEY="$CF_ACCESS_SECRET" \
+    aws s3 cp "${WD}/../out/rust/release/ztunnel" \
+    "${R2_DEST}/${RELEASE_NAME}" \
+    --endpoint-url "${R2_ENDPOINT}"
