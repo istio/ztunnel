@@ -652,19 +652,22 @@ mod test {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        tokio::task::spawn(async move {
+        let server_handle = tokio::task::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             // Handshake should fail — evil.cluster.local is not in the alias list
-            let result = tls.accept(stream).await;
-            assert!(result.is_err());
+            tls.accept(stream).await
         });
 
         let stream = TcpStream::connect(addr).await.unwrap();
         let client = client_certs
             .outbound_connector(vec![server_id], &crate::tls::resolve_mesh_config(None))
             .unwrap();
-        let result = client.connect(stream).await;
-        assert!(result.is_err());
+        // Client side may or may not see the error — the rejection happens server-side
+        let _ = client.connect(stream).await;
+
+        // The server must have rejected the handshake due to trust domain mismatch
+        let server_result = server_handle.await.unwrap();
+        assert!(server_result.is_err(), "server should reject client from untrusted domain");
     }
 
     #[tokio::test]
