@@ -141,6 +141,7 @@ fn is_tls12_enabled(settings: Option<&MeshSettings>) -> bool {
     *TLS12_ENABLED
 }
 
+#[allow(unused_macros)]
 macro_rules! impl_parse_cipher_suites {
     ($fn_name:ident, $provider_mod:path) => {
         fn $fn_name(
