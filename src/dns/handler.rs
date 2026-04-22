@@ -67,7 +67,10 @@ impl RequestHandler for Handler {
                 }
             },
             MessageType::Response => {
-                warn!("got a response as a request from id: {}", request.metadata.id);
+                warn!(
+                    "got a response as a request from id: {}",
+                    request.metadata.id
+                );
                 send_error(request, response_handle, ResponseCode::FormErr).await
             }
         }
@@ -125,7 +128,9 @@ async fn send_lookup_error<R: ResponseHandler>(
         LookupError::NetError(NetError::Dns(DnsError::ResponseCode(code))) => {
             send_error(request, response_handle, code).await
         }
-        LookupError::NetError(_) => send_error(request, response_handle, ResponseCode::ServFail).await,
+        LookupError::NetError(_) => {
+            send_error(request, response_handle, ResponseCode::ServFail).await
+        }
         LookupError::Io(_) => {
             // TODO(nmittler): log?
             send_error(request, response_handle, ResponseCode::ServFail).await
@@ -305,7 +310,9 @@ mod tests {
             encoder.set_max_size(self.max_size);
 
             // Serialize the response.
-            let response_info = response.destructive_emit(&mut encoder).map_err(NetError::from)?;
+            let response_info = response
+                .destructive_emit(&mut encoder)
+                .map_err(NetError::from)?;
 
             // Deserialize back into the response message.
             let msg = Message::from_vec(&buf)

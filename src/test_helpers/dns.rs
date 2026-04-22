@@ -113,7 +113,8 @@ pub async fn send_with_max_size(
     max_payload: u16,
 ) -> DnsResponse {
     // Build the request message.
-    let mut message: Message = Message::new(rand::random::<u16>(), MessageType::Query, OpCode::Query);
+    let mut message: Message =
+        Message::new(rand::random::<u16>(), MessageType::Query, OpCode::Query);
     let mut query = Query::query(name, rr_type);
     query.set_query_class(DNSClass::IN);
     message.add_query(query);

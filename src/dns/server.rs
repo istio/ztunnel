@@ -1436,7 +1436,10 @@ mod tests {
                 tasks.push(async move {
                     let name = format!("[{protocol}] {}", c.name);
                     let resp = send_request(&mut client, n(c.host), c.query_type).await;
-                    assert_eq!(c.expect_authoritative, resp.metadata.authoritative, "{name}");
+                    assert_eq!(
+                        c.expect_authoritative, resp.metadata.authoritative,
+                        "{name}"
+                    );
                     assert_eq!(c.expect_code, resp.metadata.response_code, "{name}");
 
                     if c.expect_code == ResponseCode::NoError {
