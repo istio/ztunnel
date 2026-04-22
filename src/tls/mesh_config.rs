@@ -131,12 +131,11 @@ pub fn resolve_mesh_config(settings: Option<&MeshSettings>) -> ResolvedMeshConfi
 // `cfg` guards.
 
 fn is_tls12_enabled(settings: Option<&MeshSettings>) -> bool {
-    if let Some(ms) = settings {
-        if let Some(ref tls) = ms.tls {
-            if let Some(min_version) = tls.min_protocol_version {
-                return min_version == TlsVersion::Tls12;
-            }
-        }
+    if let Some(ms) = settings
+        && let Some(ref tls) = ms.tls
+        && let Some(min_version) = tls.min_protocol_version
+    {
+        return min_version == TlsVersion::Tls12;
     }
     *TLS12_ENABLED
 }
