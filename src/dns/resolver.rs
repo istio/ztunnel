@@ -14,8 +14,8 @@
 
 use hickory_proto::rr::Record;
 use hickory_resolver::lookup::Lookup;
-use hickory_server::authority::LookupError;
 use hickory_server::server::Request;
+use hickory_server::zone_handler::LookupError;
 use std::slice::Iter;
 
 /// Similar to a TrustDNS `Authority`, although the resulting [Answer] indicates whether
@@ -56,7 +56,7 @@ impl Answer {
 impl From<Lookup> for Answer {
     fn from(value: Lookup) -> Self {
         Self {
-            records: value.records().to_vec(),
+            records: value.answers().to_vec(),
             is_authoritative: false, // Non-authoritative, since results came from upstream resolver.
         }
     }
