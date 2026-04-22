@@ -527,7 +527,11 @@ impl DemandProxyState {
 
     /// Get the resolved mesh configuration (pre-computed from xDS settings + env var defaults).
     pub fn resolved_mesh_config(&self) -> Arc<crate::tls::ResolvedMeshConfig> {
-        self.state.read().expect("mutex").resolved_mesh_config.clone()
+        self.state
+            .read()
+            .expect("mutex")
+            .resolved_mesh_config
+            .clone()
     }
 }
 
@@ -1142,7 +1146,10 @@ impl ProxyStateManager {
             Some(
                 xds::Config::new(config.clone(), tls_client_fetcher)
                     .with_watched_handler::<XdsAddress>(xds::ADDRESS_TYPE, updater.clone())
-                    .with_watched_handler::<XdsAuthorization>(xds::AUTHORIZATION_TYPE, updater.clone())
+                    .with_watched_handler::<XdsAuthorization>(
+                        xds::AUTHORIZATION_TYPE,
+                        updater.clone(),
+                    )
                     .with_watched_handler::<XdsMeshSettings>(xds::MESH_SETTINGS_TYPE, updater)
                     .build(xds_metrics, awaiting_ready),
             )

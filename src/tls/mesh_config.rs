@@ -199,7 +199,9 @@ macro_rules! impl_parse_cipher_suites {
 fn provider(_settings: Option<&MeshSettings>) -> Arc<CryptoProvider> {
     if let Some(ms) = _settings {
         if ms.tls.is_some() {
-            tracing::warn!("MeshSettings TLS configuration ignored: BoringSSL FIPS uses fixed cipher suites");
+            tracing::warn!(
+                "MeshSettings TLS configuration ignored: BoringSSL FIPS uses fixed cipher suites"
+            );
         }
     }
     Arc::new(boring_rustls_provider::provider())
@@ -234,7 +236,10 @@ fn provider(settings: Option<&MeshSettings>) -> Arc<CryptoProvider> {
 }
 
 #[cfg(feature = "tls-aws-lc")]
-impl_parse_cipher_suites!(parse_cipher_suites_aws_lc, rustls::crypto::aws_lc_rs::cipher_suite);
+impl_parse_cipher_suites!(
+    parse_cipher_suites_aws_lc,
+    rustls::crypto::aws_lc_rs::cipher_suite
+);
 
 #[cfg(feature = "tls-aws-lc")]
 fn provider(settings: Option<&MeshSettings>) -> Arc<CryptoProvider> {
@@ -415,7 +420,10 @@ mod tests {
         };
         let resolved = resolve_mesh_config(Some(&settings));
         assert_eq!(resolved.trust_domain, Some("cluster.local".into()));
-        assert_eq!(resolved.trust_domain_aliases, vec![Strng::from("old.cluster.local")]);
+        assert_eq!(
+            resolved.trust_domain_aliases,
+            vec![Strng::from("old.cluster.local")]
+        );
     }
 
     #[test]
@@ -476,7 +484,12 @@ mod tests {
         };
         let resolved = resolve_mesh_config(Some(&settings));
         assert_eq!(resolved.cipher_suites.len(), 2);
-        assert!(resolved.cipher_suites.iter().all(|cs| cs.starts_with("TLS13_")));
+        assert!(
+            resolved
+                .cipher_suites
+                .iter()
+                .all(|cs| cs.starts_with("TLS13_"))
+        );
     }
 
     #[test]

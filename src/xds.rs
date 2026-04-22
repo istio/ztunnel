@@ -407,7 +407,8 @@ impl Handler<XdsMeshSettings> for ProxyStateUpdater {
                         tls = ?settings.tls,
                         "received MeshSettings update from xDS"
                     );
-                    state.resolved_mesh_config = Arc::new(tls::resolve_mesh_config(Some(&settings)));
+                    state.resolved_mesh_config =
+                        Arc::new(tls::resolve_mesh_config(Some(&settings)));
                 }
                 XdsUpdate::Remove(_name) => {
                     info!("MeshSettings removed, reverting to defaults");
@@ -435,7 +436,11 @@ fn convert_mesh_settings(proto: &XdsMeshSettings) -> tls::MeshSettings {
 
     tls::MeshSettings {
         trust_domain: proto.trust_domain.as_str().into(),
-        trust_domain_aliases: proto.trust_domain_aliases.iter().map(|a| a.as_str().into()).collect(),
+        trust_domain_aliases: proto
+            .trust_domain_aliases
+            .iter()
+            .map(|a| a.as_str().into())
+            .collect(),
         tls,
     }
 }

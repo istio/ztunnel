@@ -117,7 +117,10 @@ impl ServerCertVerifier for AltHostnameVerifier {
     ) -> Result<ServerCertVerified, rustls::Error> {
         let cert = rustls::server::ParsedCertificate::try_from(end_entity)?;
 
-        let algs = default_mesh_config().provider.clone().signature_verification_algorithms;
+        let algs = default_mesh_config()
+            .provider
+            .clone()
+            .signature_verification_algorithms;
         rustls::client::verify_server_cert_signed_by_trust_anchor(
             &cert,
             &self.roots,
@@ -155,7 +158,10 @@ impl ServerCertVerifier for AltHostnameVerifier {
             message,
             cert,
             dss,
-            &default_mesh_config().provider.clone().signature_verification_algorithms,
+            &default_mesh_config()
+                .provider
+                .clone()
+                .signature_verification_algorithms,
         )
     }
 
@@ -169,12 +175,17 @@ impl ServerCertVerifier for AltHostnameVerifier {
             message,
             cert,
             dss,
-            &default_mesh_config().provider.clone().signature_verification_algorithms,
+            &default_mesh_config()
+                .provider
+                .clone()
+                .signature_verification_algorithms,
         )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        default_mesh_config().provider.clone()
+        default_mesh_config()
+            .provider
+            .clone()
             .signature_verification_algorithms
             .supported_schemes()
     }

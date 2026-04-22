@@ -87,8 +87,7 @@ impl TrustDomainVerifier {
         })?;
         trace!(
             "verifying client identities {ids:?} against trust domain {:?} (aliases: {:?})",
-            want_trust_domain,
-            self.trust_domain_aliases
+            want_trust_domain, self.trust_domain_aliases
         );
         let accepted = ids.iter().any(|id| {
             let Identity::Spiffe { trust_domain, .. } = id;

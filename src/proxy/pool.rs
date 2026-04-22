@@ -1033,7 +1033,8 @@ mod test {
             mock_proxy_state.clone(),
             identity::mock::new_secret_manager(Duration::from_secs(10)),
         ));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), mock_proxy_state, sock_fact, local_workload);
+        let pool =
+            WorkloadHBONEPool::new(Arc::new(cfg), mock_proxy_state, sock_fact, local_workload);
         let server = TestServer {
             conn_counter,
             drop_rx,

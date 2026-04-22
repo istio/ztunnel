@@ -484,7 +484,9 @@ mod test {
             WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![&joined]).unwrap();
 
         // Do a simple handshake between them; we should be able to accept the trusted root
-        let server = cert1.server_config(None, &crate::tls::resolve_mesh_config(None)).unwrap();
+        let server = cert1
+            .server_config(None, &crate::tls::resolve_mesh_config(None))
+            .unwrap();
         let tls = TlsAcceptor::from(Arc::new(server));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -495,7 +497,9 @@ mod test {
         });
 
         let stream = TcpStream::connect(addr).await.unwrap();
-        let client = cert2.outbound_connector(vec![id], &crate::tls::resolve_mesh_config(None)).unwrap();
+        let client = cert2
+            .outbound_connector(vec![id], &crate::tls::resolve_mesh_config(None))
+            .unwrap();
         let mut tls = client.connect(stream).await.unwrap();
 
         let _ = tls.write(b"hi").await.unwrap();
@@ -528,8 +532,12 @@ mod test {
         };
 
         // server_config should work with matching trust domain
-        let server = cert1.server_config(None, &crate::tls::resolve_mesh_config(Some(&mesh_settings)));
-        assert!(server.is_ok(), "server_config should succeed with matching trust domain");
+        let server =
+            cert1.server_config(None, &crate::tls::resolve_mesh_config(Some(&mesh_settings)));
+        assert!(
+            server.is_ok(),
+            "server_config should succeed with matching trust domain"
+        );
     }
 
     #[tokio::test]
@@ -667,7 +675,10 @@ mod test {
 
         // The server must have rejected the handshake due to trust domain mismatch
         let server_result = server_handle.await.unwrap();
-        assert!(server_result.is_err(), "server should reject client from untrusted domain");
+        assert!(
+            server_result.is_err(),
+            "server should reject client from untrusted domain"
+        );
     }
 
     #[tokio::test]
@@ -692,7 +703,11 @@ mod test {
             tls: None,
         };
 
-        let server = cert1.server_config(None, &crate::tls::resolve_mesh_config(Some(&mesh_settings)));
-        assert!(server.is_ok(), "empty trust_domain should fall back to certificate extraction");
+        let server =
+            cert1.server_config(None, &crate::tls::resolve_mesh_config(Some(&mesh_settings)));
+        assert!(
+            server.is_ok(),
+            "empty trust_domain should fall back to certificate extraction"
+        );
     }
 }
