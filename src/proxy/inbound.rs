@@ -90,7 +90,7 @@ impl Inbound {
         let acceptor = InboundCertProvider {
             local_workload: self.pi.local_workload_information.clone(),
             crl_manager: self.pi.crl_manager.clone(),
-            state: self.pi.state.clone(),
+            mesh_config: self.pi.state.mesh_config_handle(),
         };
 
         // Safety: we set nodelay directly in tls_server, so it is safe to convert to a normal listener.
@@ -176,7 +176,7 @@ impl Inbound {
                 };
                 // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
                 // and measured above.
-                assertions::size_between_ref(1000, 2200, &serve_client);
+                assertions::size_between_ref(1000, 1600, &serve_client);
                 tokio::task::spawn(serve_client.in_current_span());
             }
         };
@@ -725,7 +725,7 @@ impl InboundFlagError {
 struct InboundCertProvider {
     local_workload: Arc<LocalWorkloadInformation>,
     crl_manager: Option<Arc<tls::crl::CrlManager>>,
-    state: DemandProxyState,
+    mesh_config: crate::state::MeshConfigHandle,
 }
 
 #[async_trait::async_trait]
@@ -736,7 +736,7 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
             "fetching cert"
         );
         let cert = self.local_workload.fetch_certificate().await?;
-        let resolved = self.state.resolved_mesh_config();
+        let resolved = self.mesh_config.resolved_mesh_config();
         Ok(Arc::new(
             cert.server_config(self.crl_manager.clone(), &resolved)?,
         ))

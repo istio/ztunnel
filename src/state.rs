@@ -533,6 +533,28 @@ impl DemandProxyState {
             .resolved_mesh_config
             .clone()
     }
+
+    pub fn mesh_config_handle(&self) -> MeshConfigHandle {
+        MeshConfigHandle {
+            state: self.state.clone(),
+        }
+    }
+}
+
+/// Lightweight handle that reads the current resolved mesh config from ProxyState.
+#[derive(Clone)]
+pub struct MeshConfigHandle {
+    state: Arc<RwLock<ProxyState>>,
+}
+
+impl MeshConfigHandle {
+    pub fn resolved_mesh_config(&self) -> Arc<crate::tls::ResolvedMeshConfig> {
+        self.state
+            .read()
+            .expect("mutex")
+            .resolved_mesh_config
+            .clone()
+    }
 }
 
 impl DemandProxyState {

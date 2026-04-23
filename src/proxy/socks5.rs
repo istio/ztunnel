@@ -74,7 +74,7 @@ impl Socks5 {
         let pi = self.pi.clone();
         let pool = crate::proxy::pool::WorkloadHBONEPool::new(
             self.pi.cfg.clone(),
-            self.pi.state.clone(),
+            &self.pi.state,
             self.pi.socket_factory.clone(),
             self.pi.local_workload_information.clone(),
         );

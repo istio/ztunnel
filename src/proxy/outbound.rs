@@ -82,7 +82,7 @@ impl Outbound {
     pub(super) async fn run(self) {
         let pool = proxy::pool::WorkloadHBONEPool::new(
             self.pi.cfg.clone(),
-            self.pi.state.clone(),
+            &self.pi.state,
             self.pi.socket_factory.clone(),
             self.pi.local_workload_information.clone(),
         );
@@ -889,7 +889,7 @@ mod tests {
             id: TraceParent::new(),
             pool: WorkloadHBONEPool::new(
                 cfg.clone(),
-                state.clone(),
+                &state,
                 sock_fact,
                 local_workload_information.clone(),
             ),
@@ -2022,7 +2022,7 @@ mod tests {
             id: TraceParent::new(),
             pool: WorkloadHBONEPool::new(
                 cfg.clone(),
-                state.clone(),
+                &state,
                 sock_fact,
                 local_workload_information.clone(),
             ),

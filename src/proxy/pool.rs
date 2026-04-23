@@ -72,7 +72,7 @@ struct PoolState {
 
 struct ConnSpawner {
     cfg: Arc<config::Config>,
-    state: DemandProxyState,
+    mesh_config: crate::state::MeshConfigHandle,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     local_workload: Arc<LocalWorkloadInformation>,
     timeout_rx: watch::Receiver<bool>,
@@ -84,7 +84,7 @@ impl ConnSpawner {
         debug!("spawning new pool conn for {}", key);
 
         let cert = self.local_workload.fetch_certificate().await?;
-        let resolved = self.state.resolved_mesh_config();
+        let resolved = self.mesh_config.resolved_mesh_config();
         let connector = cert.outbound_connector(key.dst_id.clone(), &resolved)?;
         let tcp_stream = super::freebind_connect(None, key.dst, self.socket_factory.as_ref())
             .await
@@ -339,7 +339,7 @@ impl WorkloadHBONEPool {
     // Callers should then be safe to drop() the pool instance.
     pub fn new(
         cfg: Arc<crate::config::Config>,
-        state: DemandProxyState,
+        state: &DemandProxyState,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         local_workload: Arc<LocalWorkloadInformation>,
     ) -> WorkloadHBONEPool {
@@ -349,7 +349,7 @@ impl WorkloadHBONEPool {
 
         let spawner = ConnSpawner {
             cfg,
-            state,
+            mesh_config: state.mesh_config_handle(),
             socket_factory,
             local_workload,
             timeout_rx: timeout_recv.clone(),
@@ -1034,7 +1034,7 @@ mod test {
             identity::mock::new_secret_manager(Duration::from_secs(10)),
         ));
         let pool =
-            WorkloadHBONEPool::new(Arc::new(cfg), mock_proxy_state, sock_fact, local_workload);
+            WorkloadHBONEPool::new(Arc::new(cfg), &mock_proxy_state, sock_fact, local_workload);
         let server = TestServer {
             conn_counter,
             drop_rx,
