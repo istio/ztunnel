@@ -55,6 +55,7 @@ ENDPOINT=$(echo "${CF_CREDENTIALS}" | jq -r '.endpoint')
 AWS_ACCESS_KEY_ID=$(echo "${CF_CREDENTIALS}" | jq -r '.access_key') \
     AWS_SECRET_ACCESS_KEY=$(echo "${CF_CREDENTIALS}" | jq -r '.secret_key') \
     AWS_SESSION_TOKEN=$(echo "${CF_CREDENTIALS}" | jq -r '.session_token') \
+    AWS_REGION=$(echo "${CF_CREDENTIALS}" | jq -r '.region') \
     aws s3 cp "${WD}/../out/rust/release/ztunnel" \
     "${R2_DEST}/${RELEASE_NAME}" \
     --endpoint-url "${ENDPOINT}"
