@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dns::resolver::{Answer, Resolver};
+use crate::dns::resolver::{Resolver, Response};
 use crate::proxy::SocketFactory;
 use hickory_net::NetError;
 use hickory_net::runtime::RuntimeProvider;
@@ -106,7 +106,7 @@ impl RuntimeProvider for RuntimeProviderAdaptor {
 
 #[async_trait::async_trait]
 impl Resolver for Forwarder {
-    async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
+    async fn lookup(&self, request: &Request) -> Result<Response, LookupError> {
         // TODO(nmittler): Should we allow requests to the upstream resolver to be authoritative?
         let query = request.request_info()?.query;
         let name = query.name();
@@ -114,7 +114,7 @@ impl Resolver for Forwarder {
         self.0
             .lookup(name, rr_type)
             .await
-            .map(Answer::from)
+            .map(Response::from)
             .map_err(LookupError::from)
     }
 }
@@ -149,10 +149,10 @@ mod tests {
             socket_addr("1.1.1.1:80"),
             Protocol::Udp,
         );
-        let answer = f.lookup(&req).await.unwrap();
-        assert!(!answer.is_authoritative());
+        let response = f.lookup(&req).await.unwrap();
+        assert!(!response.is_authoritative());
 
-        let record = answer.record_iter().next().unwrap();
+        let record = response.answers().next().unwrap();
         assert_eq!(n("test.example.com."), record.name);
         assert_eq!(RecordType::A, record.record_type());
     }

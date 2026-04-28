@@ -14,7 +14,7 @@
 
 use crate::config::Address;
 use crate::dns::Metrics;
-use crate::dns::resolver::{Answer, Resolver};
+use crate::dns::resolver::{Resolver, Response};
 use crate::drain::DrainTrigger;
 use crate::proxy::Error;
 use crate::state::WorkloadInfo;
@@ -293,13 +293,13 @@ impl crate::dns::Forwarder for TestDnsServer {
         &self,
         _: Option<&Workload>,
         request: &Request,
-    ) -> Result<Answer, LookupError> {
+    ) -> Result<Response, LookupError> {
         self.resolver.lookup(request).await
     }
 }
 #[async_trait::async_trait]
 impl Resolver for TestDnsServer {
-    async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
+    async fn lookup(&self, request: &Request) -> Result<Response, LookupError> {
         self.resolver.lookup(request).await
     }
 }
@@ -319,14 +319,15 @@ impl crate::dns::Forwarder for FakeForwarder {
         &self,
         _: Option<&Workload>,
         request: &Request,
-    ) -> Result<Answer, LookupError> {
+    ) -> Result<Response, LookupError> {
         let query = request.request_info()?.query;
         let name: Name = query.name().into();
         let utf = name.to_string();
         if let Some(ip) = utf.strip_suffix(".reflect.internal.") {
             // Magic to allow `ip.reflect.internal` to always return ip (like nip.io)
-            return Ok(Answer::new(
+            return Ok(Response::new(
                 vec![a(query.name().into(), ip.parse().unwrap())],
+                Vec::default(),
                 false,
             ));
         }
@@ -353,6 +354,6 @@ impl crate::dns::Forwarder for FakeForwarder {
             }
         }
 
-        return Ok(Answer::new(out, false));
+        return Ok(Response::new(out, Vec::default(), false));
     }
 }

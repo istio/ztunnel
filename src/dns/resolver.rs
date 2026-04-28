@@ -24,27 +24,33 @@ use std::slice::Iter;
 /// may not.
 #[async_trait::async_trait]
 pub trait Resolver: Sync + Send {
-    async fn lookup(&self, request: &Request) -> Result<Answer, LookupError>;
+    async fn lookup(&self, request: &Request) -> Result<Response, LookupError>;
 }
 
 /// Answer returned by a [Resolver].
 #[derive(Debug)]
-pub struct Answer {
-    records: Vec<Record>,
+pub struct Response {
+    answers: Vec<Record>,
+    additionals: Vec<Record>,
     is_authoritative: bool,
 }
 
-impl Answer {
-    pub fn new(records: Vec<Record>, is_authoritative: bool) -> Self {
+impl Response {
+    pub fn new(answers: Vec<Record>, additionals: Vec<Record>, is_authoritative: bool) -> Self {
         Self {
-            records,
+            answers,
+            additionals,
             is_authoritative,
         }
     }
 
     /// Returns an iterator over the records returned by the [Resolver].
-    pub fn record_iter(&self) -> RecordIter<'_> {
-        RecordIter(self.records.iter())
+    pub fn answers(&self) -> RecordIter<'_> {
+        RecordIter(self.answers.iter())
+    }
+
+    pub fn additionals(&self) -> RecordIter<'_> {
+        RecordIter(self.additionals.iter())
     }
 
     /// Indicates whether the [Resolver] is the authority for the returned records.
@@ -53,10 +59,11 @@ impl Answer {
     }
 }
 
-impl From<Lookup> for Answer {
+impl From<Lookup> for Response {
     fn from(value: Lookup) -> Self {
         Self {
-            records: value.answers().to_vec(),
+            answers: value.answers().to_vec(),
+            additionals: value.additionals().to_vec(),
             is_authoritative: false, // Non-authoritative, since results came from upstream resolver.
         }
     }

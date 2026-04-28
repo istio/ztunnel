@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dns::resolver::{Answer, Resolver};
+use crate::dns::resolver::{Resolver, Response};
 use hickory_net::runtime::Time;
 use hickory_net::{DnsError, NetError, NoRecords};
 use hickory_proto::op::{Edns, Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
@@ -45,7 +45,7 @@ impl Handler {
         response_handle: R,
     ) -> ResponseInfo {
         match self.resolver.lookup(request).await {
-            Ok(answer) => send_lookup(request, response_handle, answer).await,
+            Ok(response) => send_lookup(request, response_handle, response).await,
             Err(e) => send_lookup_error(request, response_handle, e).await,
         }
     }
@@ -80,12 +80,12 @@ impl RequestHandler for Handler {
 async fn send_lookup<R: ResponseHandler>(
     request: &Request,
     response_handle: R,
-    answer: Answer,
+    response: Response,
 ) -> ResponseInfo {
     let mut response_metadata = Metadata::response_from_request(&request.metadata);
 
     // We are the authority here, since we control DNS for known hostnames
-    response_metadata.authoritative = answer.is_authoritative();
+    response_metadata.authoritative = response.is_authoritative();
     response_metadata.recursion_available = true;
 
     // Create the response builder.
@@ -100,10 +100,10 @@ async fn send_lookup<R: ResponseHandler>(
     // Build the response.
     let response = builder.build(
         response_metadata,
-        answer.record_iter(),
+        response.answers(),
         None.iter(),
         None.iter(),
-        None.iter(),
+        response.additionals(),
     );
 
     // Send the response.
@@ -211,8 +211,8 @@ fn response_edns(request: &Request) -> Option<Edns> {
 #[cfg(any(unix, target_os = "windows"))]
 mod tests {
     use crate::dns::handler::Handler;
-    use crate::dns::resolver::{Answer, Resolver};
-    use crate::test_helpers::dns::{a, a_request, n, socket_addr};
+    use crate::dns::resolver::{Resolver, Response};
+    use crate::test_helpers::dns::{a, a_request, aaaa, n, socket_addr};
     use crate::test_helpers::helpers::initialize_telemetry;
     use hickory_net::NetError;
     use hickory_net::runtime::TokioTime;
@@ -223,7 +223,7 @@ mod tests {
     use hickory_proto::serialize::binary::BinEncoder;
     use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
     use hickory_server::zone_handler::{LookupError, MessageResponse};
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio::sync::mpsc::Sender;
@@ -266,16 +266,22 @@ mod tests {
 
         let expected = a(n("fake.com."), Ipv4Addr::new(127, 0, 0, 1));
         assert_eq!(expected, *answers.iter().next().unwrap());
+
+        let additionals = &resp.additionals;
+        assert!(!additionals.is_empty());
+        let expected = aaaa(n("fake.com."), Ipv6Addr::LOCALHOST);
+        assert_eq!(expected, *additionals.iter().next().unwrap());
     }
 
     struct FakeResolver();
 
     #[async_trait::async_trait]
     impl Resolver for FakeResolver {
-        async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
+        async fn lookup(&self, request: &Request) -> Result<Response, LookupError> {
             let name = Name::from(request.request_info()?.query.name().clone());
-            let records = vec![a(name, Ipv4Addr::new(127, 0, 0, 1))];
-            Ok(Answer::new(records, false))
+            let answers = vec![a(name.clone(), Ipv4Addr::new(127, 0, 0, 1))];
+            let additionals = vec![aaaa(name, Ipv6Addr::LOCALHOST)];
+            Ok(Response::new(answers, additionals, false))
         }
     }
 

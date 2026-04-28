@@ -326,14 +326,14 @@ async fn dns_lookup(
     } else {
         aaaa_request(name, client_addr, Protocol::Udp)
     };
-    let answer = resolver.lookup(&req).await?;
-    let response = answer
-        .record_iter()
+    let response = resolver.lookup(&req).await?;
+    let addrs = response
+        .answers()
         .filter_map(|rec| rec.data.ip_addr())
         .next() // TODO: do not always use the first result
         .ok_or_else(|| Error::DnsEmpty)?;
 
-    Ok(response)
+    Ok(addrs)
 }
 
 /// send_error sends an error back to the SOCKS client

@@ -40,7 +40,7 @@ use crate::dns::metrics::{
     DnsRequest, ForwardedDuration, ForwardedFailure, ForwardedRequest, Metrics,
 };
 use crate::dns::name_util::{has_domain, trim_domain};
-use crate::dns::resolver::{Answer, Resolver};
+use crate::dns::resolver::{Resolver, Response};
 use crate::drain::{DrainMode, DrainWatcher};
 use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
@@ -486,7 +486,7 @@ impl Store {
         &self,
         client: Option<&Workload>,
         request: &Request,
-    ) -> Result<Answer, LookupError> {
+    ) -> Result<Response, LookupError> {
         // Increment counter for all requests.
         self.metrics.increment(&DnsRequest {
             request,
@@ -556,7 +556,7 @@ impl Resolver for Store {
             name=%request.request_info()?.query.name(),
         ),
     )]
-    async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
+    async fn lookup(&self, request: &Request) -> Result<Response, LookupError> {
         let client = self.local_workload.get_workload().await.map_err(|_| {
             debug!("unknown source");
             self.metrics.increment(&DnsRequest {
@@ -573,12 +573,12 @@ impl Resolver for Store {
             debug!("unknown record type");
             let result = self.forward(Some(&client), request).await;
             match result {
-                Ok(ref answer) => {
+                Ok(ref response) => {
                     access_log(
                         request,
                         Some(&client),
                         "forwarded",
-                        answer.record_iter().count(),
+                        response.answers().count(),
                     );
                 }
                 Err(e) => {
@@ -603,12 +603,12 @@ impl Resolver for Store {
             // Unknown host. Forward to the upstream resolver.
             let result = self.forward(Some(&client), request).await;
             match result {
-                Ok(ref answer) => {
+                Ok(ref response) => {
                     access_log(
                         request,
                         Some(&client),
                         "forwarded",
-                        answer.record_iter().count(),
+                        response.answers().count(),
                     );
                 }
                 Err(e) => {
@@ -642,7 +642,11 @@ impl Resolver for Store {
                 0,
             );
             // This is not NXDOMAIN, since we found the host. Just return an empty set of records.
-            return Ok(Answer::new(Vec::default(), is_authoritative));
+            return Ok(Response::new(
+                Vec::default(),
+                Vec::default(),
+                is_authoritative,
+            ));
         }
 
         // Get the addresses for the service.
@@ -652,11 +656,15 @@ impl Resolver for Store {
             access_log(request, Some(&client), "no records", 0);
             // Lookup succeeded, but no records were returned. This is not NXDOMAIN, since we
             // found the host. Just return an empty set of records.
-            return Ok(Answer::new(Vec::default(), is_authoritative));
+            return Ok(Response::new(
+                Vec::default(),
+                Vec::default(),
+                is_authoritative,
+            ));
         }
 
         // Create a vec to hold the output records.
-        let mut records = Vec::new();
+        let mut answers = Vec::new();
 
         // Assume that we'll just use the requested name as the record name.
         let mut ip_record_name = requested_name.clone();
@@ -667,17 +675,17 @@ impl Resolver for Store {
             && !service_match.name.is_wildcard()
         {
             // Create a CNAME record to map from the requested name -> stripped name.
-            records.push(cname_record(requested_name.clone(), stripped.clone()));
+            answers.push(cname_record(requested_name.clone(), stripped.clone()));
 
             // Also use the stripped name as the IP record name.
             ip_record_name = stripped;
         }
 
-        access_log(request, Some(&client), "success", records.len());
+        access_log(request, Some(&client), "success", answers.len());
         // Add the IP records.
-        ip_records(ip_record_name, addresses, &mut records);
+        ip_records(ip_record_name, addresses, &mut answers);
 
-        Ok(Answer::new(records, is_authoritative))
+        Ok(Response::new(answers, Vec::default(), is_authoritative))
     }
 }
 
@@ -801,7 +809,7 @@ pub trait Forwarder: Send + Sync {
         &self,
         client: Option<&Workload>,
         request: &Request,
-    ) -> Result<Answer, LookupError>;
+    ) -> Result<Response, LookupError>;
 }
 
 /// Creates the appropriate DNS forwarder for the proxy mode.
@@ -916,7 +924,7 @@ impl Forwarder for SystemForwarder {
         &self,
         _: Option<&Workload>,
         request: &Request,
-    ) -> Result<Answer, LookupError> {
+    ) -> Result<Response, LookupError> {
         self.resolver.lookup(request).await
     }
 }
@@ -926,7 +934,7 @@ mod tests {
     use futures_util::StreamExt;
     use std::cmp::Ordering;
     use std::collections::HashMap;
-    use std::net::{SocketAddrV4, SocketAddrV6};
+    use std::net::{Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
     use bytes::Bytes;
     use hickory_net::xfer::Protocol;
@@ -1102,7 +1110,8 @@ mod tests {
             query_type: RecordType,
             expect_code: ResponseCode,
             expect_authoritative: bool,
-            expect_records: Vec<Record>,
+            expect_answers: Vec<Record>,
+            expect_additionals: Vec<Record>,
         }
 
         impl Default for Case {
@@ -1113,7 +1122,8 @@ mod tests {
                     query_type: RecordType::A,
                     expect_code: ResponseCode::NoError,
                     expect_authoritative: true,
-                    expect_records: vec![],
+                    expect_answers: vec![],
+                    expect_additionals: vec![],
                 }
             }
         }
@@ -1130,13 +1140,13 @@ mod tests {
             Case {
                 name: "success: non k8s host in local cache",
                 host: "www.google.com",
-                expect_records: vec![a(n("www.google.com."), ipv4("1.1.1.1"))],
+                expect_answers: vec![a(n("www.google.com."), ipv4("1.1.1.1"))],
                 ..Default::default()
             },
             Case {
                 name: "success: non k8s host with search namespace yields cname+A record",
                 host: "www.google.com.ns1.svc.cluster.local.",
-                expect_records: vec![
+                expect_answers: vec![
                     cname(
                         n("www.google.com.ns1.svc.cluster.local."),
                         n("www.google.com."),
@@ -1149,31 +1159,32 @@ mod tests {
                 name: "success: non k8s host not in local cache",
                 host: "www.bing.com",
                 expect_authoritative: false,
-                expect_records: vec![a(n("www.bing.com."), ipv4("1.1.1.1"))],
+                expect_answers: vec![a(n("www.bing.com."), ipv4("1.1.1.1"))],
+                expect_additionals: vec![aaaa(n("www.bing.com."), Ipv6Addr::LOCALHOST)],
                 ..Default::default()
             },
             Case {
                 name: "success: k8s host - fqdn",
                 host: "productpage.ns1.svc.cluster.local.",
-                expect_records: vec![a(n("productpage.ns1.svc.cluster.local."), ipv4("9.9.9.9"))],
+                expect_answers: vec![a(n("productpage.ns1.svc.cluster.local."), ipv4("9.9.9.9"))],
                 ..Default::default()
             },
             Case {
                 name: "success: k8s host - name.namespace",
                 host: "productpage.ns1.",
-                expect_records: vec![a(n("productpage.ns1."), ipv4("9.9.9.9"))],
+                expect_answers: vec![a(n("productpage.ns1."), ipv4("9.9.9.9"))],
                 ..Default::default()
             },
             Case {
                 name: "success: k8s host - shortname",
                 host: "productpage.",
-                expect_records: vec![a(n("productpage."), ipv4("9.9.9.9"))],
+                expect_answers: vec![a(n("productpage."), ipv4("9.9.9.9"))],
                 ..Default::default()
             },
             Case {
                 name: "success: k8s host (name.namespace) with search namespace yields cname+A record",
                 host: "productpage.ns1.ns1.svc.cluster.local.",
-                expect_records: vec![
+                expect_answers: vec![
                     cname(
                         n("productpage.ns1.ns1.svc.cluster.local."),
                         n("productpage.ns1."),
@@ -1186,25 +1197,25 @@ mod tests {
                 name: "success: AAAA query for IPv4 k8s host (name.namespace) with search namespace",
                 host: "productpage.ns1.ns1.svc.cluster.local.",
                 query_type: RecordType::AAAA,
-                expect_records: vec![],
+                expect_answers: vec![],
                 ..Default::default()
             },
             Case {
                 name: "success: k8s host - non local namespace - name.namespace",
                 host: "example.ns2.",
-                expect_records: vec![a(n("example.ns2."), ipv4("10.10.10.10"))],
+                expect_answers: vec![a(n("example.ns2."), ipv4("10.10.10.10"))],
                 ..Default::default()
             },
             Case {
                 name: "success: k8s host - non local namespace - fqdn",
                 host: "example.ns2.svc.cluster.local.",
-                expect_records: vec![a(n("example.ns2.svc.cluster.local."), ipv4("10.10.10.10"))],
+                expect_answers: vec![a(n("example.ns2.svc.cluster.local."), ipv4("10.10.10.10"))],
                 ..Default::default()
             },
             Case {
                 name: "success: k8s host - non local namespace - name.namespace.svc",
                 host: "example.ns2.svc.",
-                expect_records: vec![a(n("example.ns2.svc."), ipv4("10.10.10.10"))],
+                expect_answers: vec![a(n("example.ns2.svc."), ipv4("10.10.10.10"))],
                 ..Default::default()
             },
             Case {
@@ -1217,7 +1228,7 @@ mod tests {
             Case {
                 name: "success: remote cluster k8s svc - same ns and different domain - fqdn",
                 host: "details.ns2.svc.cluster.remote.",
-                expect_records: vec![
+                expect_answers: vec![
                     a(n("details.ns2.svc.cluster.remote."), ipv4("11.11.11.11")),
                     a(n("details.ns2.svc.cluster.remote."), ipv4("12.12.12.12")),
                     a(n("details.ns2.svc.cluster.remote."), ipv4("13.13.13.13")),
@@ -1235,14 +1246,14 @@ mod tests {
             Case {
                 name: "success: TypeA query returns A records only",
                 host: "dual.localhost.",
-                expect_records: vec![a(n("dual.localhost."), ipv4("2.2.2.2"))],
+                expect_answers: vec![a(n("dual.localhost."), ipv4("2.2.2.2"))],
                 ..Default::default()
             },
             Case {
                 name: "success: TypeAAAA query returns AAAA records only",
                 host: "dual.localhost.",
                 query_type: RecordType::AAAA,
-                expect_records: vec![aaaa(
+                expect_answers: vec![aaaa(
                     n("dual.localhost."),
                     ipv6("2001:db8:0:0:0:ff00:42:8329"),
                 )],
@@ -1264,31 +1275,31 @@ mod tests {
             Case {
                 name: "success: wild card returns A record correctly",
                 host: "foo.wildcard.",
-                expect_records: vec![a(n("foo.wildcard."), ipv4("10.10.10.10"))],
+                expect_answers: vec![a(n("foo.wildcard."), ipv4("10.10.10.10"))],
                 ..Default::default()
             },
             Case {
                 name: "success: specific wild card returns A record correctly",
                 host: "a.b.wildcard.",
-                expect_records: vec![a(n("a.b.wildcard."), ipv4("11.11.11.11"))],
+                expect_answers: vec![a(n("a.b.wildcard."), ipv4("11.11.11.11"))],
                 ..Default::default()
             },
             Case {
                 name: "success: wild card with domain returns A record correctly",
                 host: "foo.svc.mesh.company.net.",
-                expect_records: vec![a(n("foo.svc.mesh.company.net."), ipv4("10.1.2.3"))],
+                expect_answers: vec![a(n("foo.svc.mesh.company.net."), ipv4("10.1.2.3"))],
                 ..Default::default()
             },
             Case {
                 name: "success: wild card with namespace with domain returns A record correctly",
                 host: "foo.foons.svc.mesh.company.net.",
-                expect_records: vec![a(n("foo.foons.svc.mesh.company.net."), ipv4("10.1.2.3"))],
+                expect_answers: vec![a(n("foo.foons.svc.mesh.company.net."), ipv4("10.1.2.3"))],
                 ..Default::default()
             },
             Case {
                 name: "success: wild card with search domain returns A record correctly",
                 host: "foo.svc.mesh.company.net.ns1.svc.cluster.local.",
-                expect_records: vec![a(
+                expect_answers: vec![a(
                     n("foo.svc.mesh.company.net.ns1.svc.cluster.local."),
                     ipv4("10.1.2.3"),
                 )],
@@ -1297,13 +1308,13 @@ mod tests {
             Case {
                 name: "success: no vip on client network returns no records",
                 host: "nw2-only.ns1.svc.cluster.local.",
-                expect_records: vec![],
+                expect_answers: vec![],
                 ..Default::default()
             },
             Case {
                 name: "success: return vip for client network only",
                 host: "both-networks.ns1.svc.cluster.local.",
-                expect_records: vec![a(
+                expect_answers: vec![a(
                     n("both-networks.ns1.svc.cluster.local."),
                     ipv4("21.21.21.21"),
                 )],
@@ -1312,7 +1323,7 @@ mod tests {
             Case {
                 name: "success: headless service returns workload ips for A",
                 host: "headless.ns1.svc.cluster.local.",
-                expect_records: vec![
+                expect_answers: vec![
                     a(n("headless.ns1.svc.cluster.local."), ipv4("30.30.30.30")),
                     a(n("headless.ns1.svc.cluster.local."), ipv4("31.31.31.31")),
                 ],
@@ -1322,7 +1333,7 @@ mod tests {
                 name: "success: headless service returns workload ips for AAAA",
                 host: "headless.ns1.svc.cluster.local.",
                 query_type: RecordType::AAAA,
-                expect_records: vec![
+                expect_answers: vec![
                     aaaa(n("headless.ns1.svc.cluster.local."), ipv6("2001:db8::30")),
                     aaaa(n("headless.ns1.svc.cluster.local."), ipv6("2001:db8::31")),
                 ],
@@ -1332,7 +1343,7 @@ mod tests {
                 name: "success: headless-ipv6 service returns records for AAAA",
                 host: "headless-ipv6.ns1.svc.cluster.local.",
                 query_type: RecordType::AAAA,
-                expect_records: vec![aaaa(
+                expect_answers: vec![aaaa(
                     n("headless-ipv6.ns1.svc.cluster.local."),
                     ipv6("2001:db8::33"),
                 )],
@@ -1341,7 +1352,7 @@ mod tests {
             Case {
                 name: "success: headless-ipv6 service returns empty for A",
                 host: "headless-ipv6.ns1.svc.cluster.local.",
-                expect_records: vec![],
+                expect_answers: vec![],
                 ..Default::default()
             },
             // TODO(https://github.com/istio/ztunnel/issues/1119)
@@ -1377,25 +1388,25 @@ mod tests {
             Case {
                 name: "success: preferred namespace is chosen if local namespace is not defined",
                 host: "preferred.io.",
-                expect_records: vec![a(n("preferred.io."), ipv4("10.10.10.211"))],
+                expect_answers: vec![a(n("preferred.io."), ipv4("10.10.10.211"))],
                 ..Default::default()
             },
             Case {
                 name: "success: external service resolves to local namespace's address",
                 host: "everywhere.io.",
-                expect_records: vec![a(n("everywhere.io."), ipv4("10.10.10.112"))],
+                expect_answers: vec![a(n("everywhere.io."), ipv4("10.10.10.112"))],
                 ..Default::default()
             },
             Case {
                 name: "success: canonical services are preferred when no ns-local hostname is present",
                 host: "canonical.svc",
-                expect_records: vec![a(n("canonical.svc."), ipv4("10.10.10.141"))],
+                expect_answers: vec![a(n("canonical.svc."), ipv4("10.10.10.141"))],
                 ..Default::default()
             },
             Case {
                 name: "success: namespace-local service should be preferred over canonical",
                 host: "canonical.with.local",
-                expect_records: vec![a(n("canonical.with.local."), ipv4("10.10.10.150"))],
+                expect_answers: vec![a(n("canonical.with.local."), ipv4("10.10.10.150"))],
                 ..Default::default()
             },
         ];
@@ -1443,15 +1454,16 @@ mod tests {
                     assert_eq!(c.expect_code, resp.metadata.response_code, "{name}");
 
                     if c.expect_code == ResponseCode::NoError {
-                        let mut actual = resp.answers.to_vec();
+                        let mut actual_answers = resp.answers.to_vec();
 
                         // The IP records in an authoritative response will be randomly sorted to
                         // accommodate DNS-based load balancing. If the response is authoritative,
                         // sort the IP records so that we can directly compare them to the expected.
                         if c.expect_authoritative {
-                            sort_records(&mut actual);
+                            sort_records(&mut actual_answers);
                         }
-                        assert_eq!(c.expect_records, actual, "{name}");
+                        assert_eq!(c.expect_answers, actual_answers, "{name}");
+                        assert_eq!(c.expect_additionals, resp.additionals.to_vec(), "{name}");
                     }
                 });
             }
@@ -1579,6 +1591,7 @@ mod tests {
         let forwarder = Arc::new(FakeForwarder {
             search_domains: vec![],
             ips: HashMap::from([(n("large.com."), new_large_response())]),
+            additionals: Default::default(),
         });
         let domain = "cluster.local".to_string();
         let (_signal, drain) = drain::new();
@@ -1700,6 +1713,7 @@ mod tests {
                 n("cluster.local"),
             ],
             ips: HashMap::from([(n("www.bing.com."), vec![ip("1.1.1.1")])]),
+            additionals: HashMap::from([(n("www.bing.com."), vec![ip("::1")])]),
         })
     }
 
@@ -1961,6 +1975,7 @@ mod tests {
     struct FakeForwarder {
         search_domains: Vec<Name>,
         ips: HashMap<Name, Vec<IpAddr>>,
+        additionals: HashMap<Name, Vec<IpAddr>>,
     }
 
     #[async_trait::async_trait]
@@ -1973,7 +1988,7 @@ mod tests {
             &self,
             _: Option<&Workload>,
             request: &Request,
-        ) -> Result<Answer, LookupError> {
+        ) -> Result<Response, LookupError> {
             let query = request.request_info()?.query;
             let name = query.name().into();
             let Some(ips) = self.ips.get(&name) else {
@@ -1981,24 +1996,34 @@ mod tests {
                 return Err(LookupError::ResponseCode(ResponseCode::NXDomain));
             };
 
-            let mut out = Vec::new();
+            let mut answers = Vec::new();
             let rtype = query.query_type();
             for ip in ips {
                 match ip {
                     IpAddr::V4(ip) => {
                         if rtype == RecordType::A {
-                            out.push(a(query.name().into(), *ip));
+                            answers.push(a(query.name().into(), *ip));
                         }
                     }
                     IpAddr::V6(ip) => {
                         if rtype == RecordType::AAAA {
-                            out.push(aaaa(query.name().into(), *ip));
+                            answers.push(aaaa(query.name().into(), *ip));
                         }
                     }
                 }
             }
 
-            return Ok(Answer::new(out, false));
+            let mut additionals = Vec::new();
+            if let Some(ips) = self.additionals.get(&name) {
+                for ip in ips {
+                    match ip {
+                        IpAddr::V4(ip) => additionals.push(a(query.name().into(), *ip)),
+                        IpAddr::V6(ip) => additionals.push(aaaa(query.name().into(), *ip)),
+                    }
+                }
+            }
+
+            return Ok(Response::new(answers, additionals, false));
         }
     }
 
