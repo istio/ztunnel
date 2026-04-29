@@ -162,7 +162,7 @@ oid-registry = "0.8"
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 x509-parser = { version = "0.18", default-features = false, features = ["verify"] }
 time = "0.3"
-ctor = "0.10"
+ctor = "0.11"
 
 [lints.clippy]
 # This rule makes code more confusing
