@@ -14,7 +14,8 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-set -ex
+set -e
+set +x
 
 WD=$(dirname "$0")
 WD=$(cd "$WD" || exit; pwd)
@@ -49,13 +50,3 @@ if [[ "$CI" == "" && "$DEST" == "gs://istio-build/ztunnel" ]]; then
   exit 1
 fi
 gsutil cp "${WD}/../out/rust/release/ztunnel" "${DEST}/${RELEASE_NAME}"
-
-R2_DEST="${DEST/gs:\/\//s3:\/\/}"
-ENDPOINT=$(echo "${CF_CREDENTIALS}" | jq -r '.endpoint')
-AWS_ACCESS_KEY_ID=$(echo "${CF_CREDENTIALS}" | jq -r '.access_key' | tr -d '\n') \
-  AWS_SECRET_ACCESS_KEY=$(echo "${CF_CREDENTIALS}" | jq -r '.secret_key' | tr -d '\n') \
-  AWS_SESSION_TOKEN=$(echo "${CF_CREDENTIALS}" | jq -r '.session_token' | tr -d '\n') \
-  AWS_REGION=$(echo "${CF_CREDENTIALS}" | jq -r '.region') \
-  aws s3 cp "${WD}/../out/rust/release/ztunnel" \
-  "${R2_DEST}/${RELEASE_NAME}" \
-  --endpoint-url "${ENDPOINT}"
