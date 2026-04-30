@@ -12,15 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use hickory_proto::ProtoErrorKind;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::rdata::{A, AAAA, CNAME};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::system_conf::read_system_conf;
-use hickory_server::ServerFuture;
-use hickory_server::authority::LookupError;
+use hickory_server::Server as HickoryServer;
 use hickory_server::server::Request;
+use hickory_server::zone_handler::LookupError;
 use once_cell::sync::Lazy;
 use rand::rng;
 use rand::seq::SliceRandom;
@@ -53,6 +52,7 @@ use crate::strng::Strng;
 use crate::{config, dns};
 
 const DEFAULT_TCP_REQUEST_TIMEOUT: u64 = 5;
+const DEFAULT_TCP_RESPONSE_BUFFER_SIZE: usize = 32;
 const DEFAULT_TTL_SECONDS: u32 = 30;
 
 static SVC: Lazy<Name> = Lazy::new(|| as_name("svc"));
@@ -63,7 +63,7 @@ pub struct Server {
     store: Arc<Store>,
     tcp_addr: SocketAddr,
     udp_addr: SocketAddr,
-    server: ServerFuture<dns::handler::Handler>,
+    server: HickoryServer<dns::handler::Handler>,
     drain: DrainWatcher,
 }
 
@@ -109,7 +109,7 @@ impl Server {
         );
         let store = Arc::new(store);
         let handler = dns::handler::Handler::new(store.clone());
-        let mut server = ServerFuture::new(handler);
+        let mut server = HickoryServer::new(handler);
         info!(
             address=%local_address,
             component="dns",
@@ -128,6 +128,7 @@ impl Server {
             server.register_listener(
                 tcp_listener.inner(),
                 Duration::from_secs(DEFAULT_TCP_REQUEST_TIMEOUT),
+                DEFAULT_TCP_RESPONSE_BUFFER_SIZE,
             );
 
             // Bind and register the UDP socket.
@@ -170,10 +171,7 @@ impl Server {
         tokio::select! {
             res = self.server.block_until_done() =>{
                 if let Err(e) = res {
-                    match e.kind() {
-                        ProtoErrorKind::NoError => (),
-                        _ => warn!("DNS server shutdown error: {e}"),
-                    }
+                    warn!("DNS server shutdown error: {e}");
                 }
             }
             res = self.drain.wait_for_drain() => {
@@ -931,7 +929,7 @@ mod tests {
     use std::net::{SocketAddrV4, SocketAddrV6};
 
     use bytes::Bytes;
-    use hickory_proto::xfer::Protocol;
+    use hickory_net::xfer::Protocol;
     use prometheus_client::registry::Registry;
 
     use super::*;
@@ -1438,11 +1436,14 @@ mod tests {
                 tasks.push(async move {
                     let name = format!("[{protocol}] {}", c.name);
                     let resp = send_request(&mut client, n(c.host), c.query_type).await;
-                    assert_eq!(c.expect_authoritative, resp.authoritative(), "{name}");
-                    assert_eq!(c.expect_code, resp.response_code(), "{name}");
+                    assert_eq!(
+                        c.expect_authoritative, resp.metadata.authoritative,
+                        "{name}"
+                    );
+                    assert_eq!(c.expect_code, resp.metadata.response_code, "{name}");
 
                     if c.expect_code == ResponseCode::NoError {
-                        let mut actual = resp.answers().to_vec();
+                        let mut actual = resp.answers.to_vec();
 
                         // The IP records in an authoritative response will be randomly sorted to
                         // accommodate DNS-based load balancing. If the response is authoritative,
@@ -1521,9 +1522,9 @@ mod tests {
             for (protocol, client) in [("tcp", &mut tcp_client), ("udp", &mut udp_client)] {
                 let name = format!("[{protocol}] {}", c.name);
                 let resp = send_request(client, n(c.host), RecordType::A).await;
-                assert_eq!(c.expect_code, resp.response_code(), "{name}");
+                assert_eq!(c.expect_code, resp.metadata.response_code, "{name}");
                 if c.expect_code == ResponseCode::NoError {
-                    assert!(!resp.answers().is_empty());
+                    assert!(!resp.answers.is_empty());
                 }
             }
         }
@@ -1604,13 +1605,13 @@ mod tests {
         let mut udp_client = new_udp_client(udp_addr).await;
 
         let resp = send_request(&mut tcp_client, n("large.com."), RecordType::A).await;
-        assert!(!resp.truncated(), "TCP should not truncate");
-        assert_eq!(256, resp.answers().len());
+        assert!(!resp.metadata.truncation, "TCP should not truncate");
+        assert_eq!(256, resp.answers.len());
 
         let resp = send_request(&mut udp_client, n("large.com."), RecordType::A).await;
         // UDP is truncated
-        assert!(resp.truncated());
-        assert_eq!(74, resp.answers().len(), "expected UDP to be truncated");
+        assert!(resp.metadata.truncation);
+        assert_eq!(74, resp.answers.len(), "expected UDP to be truncated");
     }
 
     #[test]

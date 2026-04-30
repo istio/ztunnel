@@ -36,7 +36,7 @@ use educe::Educe;
 use futures_util::FutureExt;
 use hickory_resolver::TokioResolver;
 use hickory_resolver::config::*;
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use itertools::Itertools;
 use rand::prelude::IteratorRandom;
 use rand::seq::IndexedRandom;
@@ -528,10 +528,10 @@ impl DemandProxyState {
     ) -> Self {
         let mut rb = hickory_resolver::Resolver::builder_with_config(
             dns_resolver_cfg,
-            TokioConnectionProvider::default(),
+            TokioRuntimeProvider::default(),
         );
         *rb.options_mut() = dns_resolver_opts;
-        let dns_resolver = rb.build();
+        let dns_resolver = rb.build().expect("dns resolver config should be valid");
         Self {
             state,
             demand,
@@ -728,9 +728,7 @@ impl DemandProxyState {
         trace!(%hostname, "dns lookup complete {resp:?}");
 
         let (matching, unmatching): (Vec<_>, Vec<_>) = resp
-            .as_lookup()
-            .record_iter()
-            .filter_map(|record| record.data().ip_addr())
+            .iter()
             .partition(|record| record.is_ipv6() == original_target_address.is_ipv6());
         // Randomly pick an IP, prefer to match the IP family of the downstream request.
         // Without this, we run into trouble in pure v4 or pure v6 environments.

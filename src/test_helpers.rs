@@ -138,7 +138,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
     };
     // Do not let tests use system defaults!
     cfg.dns_resolver_opts = Default::default();
-    cfg.dns_resolver_cfg = ResolverConfig::new();
+    cfg.dns_resolver_cfg = ResolverConfig::from_parts(None, vec![], vec![]);
     cfg
 }
 
