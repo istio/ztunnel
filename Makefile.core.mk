@@ -12,6 +12,14 @@ endif
 test:
 	RUST_BACKTRACE=1 cargo test --benches --tests --bins $(FEATURES)
 
+# The throughput bench needs netns privileges, which BUILD_WITH_CONTAINER=1 (default)
+# already provides via Makefile.overrides.mk (--privileged + /var/run/netns mount).
+#   make bench BENCH_ARGS="-F jemalloc -- --save-baseline master"
+#   make bench BENCH_ARGS="-F jemalloc --bench basic -- --baseline master"
+BENCH_ARGS ?=
+bench:
+	RUST_BACKTRACE=1 cargo bench $(FEATURES) $(BENCH_ARGS)
+
 coverage:
 	FEATURES=$(FEATURES) ./scripts/test-with-coverage.sh 
 
