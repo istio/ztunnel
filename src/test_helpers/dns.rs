@@ -22,32 +22,27 @@ use crate::state::workload::Workload;
 use crate::test_helpers::new_proxy_state;
 use crate::xds::istio::workload::Workload as XdsWorkload;
 use crate::{dns, drain, metrics};
-use futures_util::ready;
-use futures_util::stream::{Stream, StreamExt};
-use hickory_client::ClientError;
-use hickory_client::client::{Client, ClientHandle};
-use hickory_proto::DnsHandle;
-use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
+use futures_util::StreamExt;
+use hickory_net::DnsHandle;
+use hickory_net::client::{Client, ClientHandle};
+use hickory_net::runtime::TokioRuntimeProvider;
+use hickory_net::runtime::iocompat::AsyncIoTokioAsStd;
+use hickory_net::tcp::TcpClientStream;
+use hickory_net::udp::UdpClientStream;
+use hickory_net::xfer::Protocol;
+use hickory_proto::op::{
+    DnsRequest, DnsRequestOptions, DnsResponse, Edns, Message, MessageType, OpCode, Query,
+    ResponseCode,
+};
 use hickory_proto::rr::rdata::{A, AAAA, CNAME};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
-use hickory_proto::runtime::TokioRuntimeProvider;
-use hickory_proto::runtime::iocompat::AsyncIoTokioAsStd;
-use hickory_proto::serialize::binary::BinDecodable;
-use hickory_proto::tcp::TcpClientStream;
-use hickory_proto::udp::UdpClientStream;
-use hickory_proto::xfer::Protocol;
-use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsResponse};
-use hickory_proto::{ProtoError, ProtoErrorKind};
-use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
-use hickory_server::authority::{LookupError, MessageRequest};
+use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_server::server::Request;
+use hickory_server::zone_handler::LookupError;
 use prometheus_client::registry::Registry;
 use std::collections::HashMap;
-use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use tokio::net::TcpStream;
 
 const TTL: u32 = 5;
@@ -74,14 +69,14 @@ pub fn cname(name: Name, canonical_name: Name) -> Record {
 
 /// Creates a new DNS client that establishes a TCP connection to the nameserver at the given
 /// address.
-pub async fn new_tcp_client(addr: SocketAddr) -> Client {
+pub async fn new_tcp_client(addr: SocketAddr) -> Client<TokioRuntimeProvider> {
     let (stream, sender) = TcpClientStream::<AsyncIoTokioAsStd<TcpStream>>::new(
         addr,
         None,
         None,
         TokioRuntimeProvider::new(),
     );
-    let (client, bg) = Client::new(Box::new(stream), sender, None).await.unwrap();
+    let (client, bg) = Client::new(stream.await.unwrap(), sender);
 
     // Run the client exchange in the background.
     tokio::spawn(bg);
@@ -90,10 +85,10 @@ pub async fn new_tcp_client(addr: SocketAddr) -> Client {
 }
 
 /// Creates a new DNS client that establishes a UDP connection to the nameserver at the given address.
-pub async fn new_udp_client(addr: SocketAddr) -> Client {
+pub async fn new_udp_client(addr: SocketAddr) -> Client<TokioRuntimeProvider> {
     let stream =
         UdpClientStream::<TokioRuntimeProvider>::builder(addr, TokioRuntimeProvider::new()).build();
-    let (client, bg) = Client::connect(stream).await.unwrap();
+    let (client, bg) = Client::from_sender(stream);
 
     // Run the client exchange in the background.
     tokio::spawn(bg);
@@ -112,66 +107,36 @@ pub async fn send_request<C: ClientHandle>(
 
 /// Sends a request with the given maximum response payload size.
 pub async fn send_with_max_size(
-    client: &mut Client,
+    client: &mut Client<TokioRuntimeProvider>,
     name: Name,
     rr_type: RecordType,
     max_payload: u16,
 ) -> DnsResponse {
     // Build the request message.
-    let mut message: Message = Message::new();
-    message
-        .add_query({
-            let mut query = Query::query(name, rr_type);
-            query.set_query_class(DNSClass::IN);
-            query
-        })
-        .set_id(rand::random::<u16>())
-        .set_message_type(MessageType::Query)
-        .set_op_code(OpCode::Query)
-        .set_recursion_desired(true)
-        .set_edns({
-            let mut edns = Edns::new();
-            edns.set_max_payload(max_payload).set_version(0);
-            edns
-        });
-
-    // client.send(message).first_answer().await.unwrap()
+    let mut message: Message =
+        Message::new(rand::random::<u16>(), MessageType::Query, OpCode::Query);
+    let mut query = Query::query(name, rr_type);
+    query.set_query_class(DNSClass::IN);
+    message.add_query(query);
+    message.metadata.recursion_desired = true;
+    let mut edns = Edns::new();
+    edns.set_max_payload(max_payload).set_version(0);
+    message.set_edns(edns);
 
     let mut options = DnsRequestOptions::default();
     options.use_edns = true;
-    ClientResponse(client.send(DnsRequest::new(message, options)))
+    client
+        .send(DnsRequest::new(message, options))
+        .next()
         .await
+        .expect("dns response stream ended unexpectedly")
         .unwrap()
-}
-
-/// Copied from Trust-DNS async_client code to allow construction here.
-struct ClientResponse<R>(pub(crate) R)
-where
-    R: Stream<Item = Result<DnsResponse, ProtoError>> + Send + Unpin + 'static;
-
-impl<R> Future for ClientResponse<R>
-where
-    R: Stream<Item = Result<DnsResponse, ProtoError>> + Send + Unpin + 'static,
-{
-    type Output = Result<DnsResponse, ClientError>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Poll::Ready(
-            match ready!(self.0.poll_next_unpin(cx)) {
-                Some(r) => r,
-                None => Err(ProtoError::from(ProtoErrorKind::Timeout)),
-            }
-            .map_err(ClientError::from),
-        )
-    }
 }
 
 /// Constructs a new [Message] of type [MessageType::Query];
 pub fn new_message(name: Name, rr_type: RecordType) -> Message {
-    let mut msg = Message::new();
-    msg.set_id(123);
-    msg.set_message_type(MessageType::Query);
-    msg.set_recursion_desired(true);
+    let mut msg = Message::new(123, MessageType::Query, OpCode::Query);
+    msg.metadata.recursion_desired = true;
     msg.add_query(Query::query(name, rr_type));
     msg
 }
@@ -183,9 +148,7 @@ pub fn server_request(msg: &Message, client_addr: SocketAddr, protocol: Protocol
     let wire_bytes = msg.to_vec().unwrap();
 
     // Deserialize into a server-side request.
-    let msg_request = MessageRequest::from_bytes(&wire_bytes).unwrap();
-
-    Request::new(msg_request, client_addr, protocol)
+    Request::from_bytes(wire_bytes, client_addr, protocol).unwrap()
 }
 
 /// Creates a A-record [Request] for the given name.
@@ -233,24 +196,18 @@ impl TestDnsServer {
 }
 
 fn internal_resolver_config(tcp: SocketAddr, udp: SocketAddr) -> ResolverConfig {
-    let mut rc = ResolverConfig::new();
-    rc.add_name_server(NameServerConfig {
-        socket_addr: udp,
-        protocol: Protocol::Udp,
-        tls_dns_name: None,
-        http_endpoint: None,
-        trust_negative_responses: false,
-        bind_addr: None,
-    });
-    rc.add_name_server(NameServerConfig {
-        socket_addr: tcp,
-        protocol: Protocol::Tcp,
-        tls_dns_name: None,
-        http_endpoint: None,
-        trust_negative_responses: false,
-        bind_addr: None,
-    });
-    rc
+    let mut udp_conn = ConnectionConfig::udp();
+    udp_conn.port = udp.port();
+    let mut tcp_conn = ConnectionConfig::tcp();
+    tcp_conn.port = tcp.port();
+    ResolverConfig::from_parts(
+        None,
+        vec![],
+        vec![
+            NameServerConfig::new(udp.ip(), true, vec![udp_conn]),
+            NameServerConfig::new(tcp.ip(), true, vec![tcp_conn]),
+        ],
+    )
 }
 
 // run_dns sets up a test DNS server. We happen to have a DNS server implementation, so we abuse that here.
