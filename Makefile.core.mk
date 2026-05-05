@@ -58,6 +58,7 @@ release:
 	./scripts/release.sh
 
 gen: format
+	(cd fuzz; cargo update ztunnel 2>/dev/null || true)
 
 gen-check: gen check-clean-repo
 
