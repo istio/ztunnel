@@ -1105,6 +1105,10 @@ pub struct ProxyStateManager {
 
     #[serde(skip_serializing)]
     xds_client: Option<AdsClient>,
+
+    /// Tracks the current xDS connection state for readiness re-arming.
+    #[serde(skip_serializing)]
+    xds_connection_state: Option<tokio::sync::watch::Receiver<xds::XdsConnectionState>>,
 }
 
 impl ProxyStateManager {
@@ -1119,19 +1123,19 @@ impl ProxyStateManager {
         let state: Arc<RwLock<ProxyState>> = Arc::new(RwLock::new(ProxyState::new(
             config.local_node.as_ref().map(strng::new),
         )));
-        let xds_client = if config.xds_address.is_some() {
+        let (xds_client, xds_connection_state) = if config.xds_address.is_some() {
             let updater = ProxyStateUpdater::new(state.clone(), cert_fetcher.clone());
             let tls_client_fetcher = Box::new(tls::ControlPlaneAuthentication::RootCert(
                 config.xds_root_cert.clone(),
             ));
-            Some(
-                xds::Config::new(config.clone(), tls_client_fetcher)
-                    .with_watched_handler::<XdsAddress>(xds::ADDRESS_TYPE, updater.clone())
-                    .with_watched_handler::<XdsAuthorization>(xds::AUTHORIZATION_TYPE, updater)
-                    .build(xds_metrics, awaiting_ready),
-            )
+            let client = xds::Config::new(config.clone(), tls_client_fetcher)
+                .with_watched_handler::<XdsAddress>(xds::ADDRESS_TYPE, updater.clone())
+                .with_watched_handler::<XdsAuthorization>(xds::AUTHORIZATION_TYPE, updater)
+                .build(xds_metrics, awaiting_ready);
+            let conn_state = client.connection_state_receiver();
+            (Some(client), Some(conn_state))
         } else {
-            None
+            (None, None)
         };
         if let Some(cfg) = &config.local_xds_config {
             let local_client = LocalClient {
@@ -1145,6 +1149,7 @@ impl ProxyStateManager {
         let demand = xds_client.as_ref().and_then(AdsClient::demander);
         Ok(ProxyStateManager {
             xds_client,
+            xds_connection_state,
             state: DemandProxyState::new(
                 state,
                 demand,
@@ -1157,6 +1162,13 @@ impl ProxyStateManager {
 
     pub fn state(&self) -> DemandProxyState {
         self.state.clone()
+    }
+
+    /// Returns an xDS connection state receiver, if an xDS client is configured.
+    pub(crate) fn xds_connection_state(
+        &self,
+    ) -> Option<tokio::sync::watch::Receiver<xds::XdsConnectionState>> {
+        self.xds_connection_state.clone()
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
@@ -1182,6 +1194,40 @@ mod tests {
 
     use crate::{strng, test_helpers};
     use test_case::test_case;
+
+    #[test]
+    fn xds_connection_state_receiver_can_be_requested_multiple_times() {
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
+        let state = DemandProxyState::new(
+            Arc::new(RwLock::new(ProxyState::new(None))),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+            metrics,
+        );
+        let (state_tx, state_rx) =
+            tokio::sync::watch::channel(xds::XdsConnectionState::initializing());
+        let state_mgr = ProxyStateManager {
+            state,
+            xds_client: None,
+            xds_connection_state: Some(state_rx),
+        };
+
+        let mut first = state_mgr.xds_connection_state().unwrap();
+        state_tx.send_replace(xds::XdsConnectionState::connected(0));
+        let second = state_mgr.xds_connection_state().unwrap();
+
+        assert_eq!(
+            *first.borrow_and_update(),
+            xds::XdsConnectionState::connected(0)
+        );
+        assert_eq!(*second.borrow(), xds::XdsConnectionState::connected(0));
+        assert!(
+            state_mgr.xds_connection_state().is_some(),
+            "requesting a receiver must not consume future subscribers"
+        );
+    }
 
     #[tokio::test]
     async fn test_wait_for_workload() {

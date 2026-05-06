@@ -122,9 +122,10 @@ impl DefaultSocketFactory {
         if cfg.user_timeout_enabled {
             // https://blog.cloudflare.com/when-tcp-sockets-refuse-to-die/
             // TCP_USER_TIMEOUT = TCP_KEEPIDLE + TCP_KEEPINTVL * TCP_KEEPCNT.
-            let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
-            let res = socket2::SockRef::from(&s).set_tcp_user_timeout(Some(ut));
-            tracing::trace!("set user timeout: {:?}", res);
+            if let Some(ut) = cfg.tcp_user_timeout() {
+                let res = socket2::SockRef::from(&s).set_tcp_user_timeout(Some(ut));
+                tracing::trace!("set user timeout: {:?}", res);
+            }
         }
         Ok(())
     }

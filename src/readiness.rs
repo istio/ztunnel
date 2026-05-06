@@ -52,6 +52,20 @@ impl BlockReady {
     pub fn subtask(&self, name: &str) -> BlockReady {
         self.parent.register_task(name)
     }
+
+    /// Atomically replaces this readiness blocker with another blocker.
+    pub(crate) fn replace_with(mut self, name: &str) -> BlockReady {
+        let new_name = name.to_string();
+
+        let mut pending = self.parent.0.lock().unwrap();
+        let removed = pending.remove(&self.name);
+        debug_assert!(removed); // It is a bug to somehow remove something twice
+        pending.insert(new_name.clone());
+        drop(pending);
+
+        self.name = new_name;
+        self
+    }
 }
 
 impl Drop for BlockReady {
@@ -72,5 +86,52 @@ impl Drop for BlockReady {
                 self.name
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacing_task_holds_replacement_until_replacement_is_dropped() {
+        let ready = Ready::new();
+        let task = ready.register_task("state manager");
+
+        let replacement = task.replace_with("xds monitor dead");
+
+        let pending = ready.pending();
+        assert!(
+            !pending.contains("state manager"),
+            "old readiness blocker should be removed by replacement"
+        );
+        assert!(
+            pending.contains("xds monitor dead"),
+            "replacement readiness blocker should remain registered"
+        );
+
+        drop(replacement);
+        assert!(
+            ready.pending().is_empty(),
+            "replacement blocker should drop normally"
+        );
+    }
+
+    #[test]
+    fn replacing_task_does_not_leak_original_guard_fields() {
+        let ready = Ready::new();
+        let task = ready.register_task("state manager");
+        assert_eq!(std::sync::Arc::strong_count(&ready.0), 2);
+
+        let replacement = task.replace_with("xds monitor dead");
+
+        assert_eq!(
+            std::sync::Arc::strong_count(&ready.0),
+            2,
+            "replacement should transfer the original guard without leaking its Ready clone"
+        );
+
+        drop(replacement);
+        assert_eq!(std::sync::Arc::strong_count(&ready.0), 1);
     }
 }

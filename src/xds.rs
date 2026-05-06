@@ -49,6 +49,7 @@ use self::service::discovery::v3::DeltaDiscoveryRequest;
 
 mod client;
 pub mod metrics;
+pub(crate) mod readiness_monitor;
 mod types;
 
 struct DisplayStatus<'a>(&'a tonic::Status);

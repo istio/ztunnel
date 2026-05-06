@@ -74,6 +74,87 @@ impl From<(&Bound, Arc<SecretManager>)> for TestApp {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
+pub struct XdsTestSignals {
+    state: tokio::sync::watch::Receiver<xds::XdsConnectionState>,
+    startup: tokio::sync::watch::Receiver<()>,
+    readiness_monitor_exited: tokio::sync::watch::Receiver<bool>,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl XdsTestSignals {
+    pub fn from_bound(app: &Bound) -> Option<Self> {
+        Some(Self {
+            state: app.xds_connection_state.clone()?,
+            startup: app.xds_startup.clone(),
+            readiness_monitor_exited: app.xds_readiness_monitor_exited.clone(),
+        })
+    }
+
+    pub async fn wait_for_startup_sync(&mut self) {
+        tokio::time::timeout(Duration::from_secs(2), self.startup.changed())
+            .await
+            .expect("timed out waiting for app startup xDS sync")
+            .expect("xDS startup sender dropped");
+    }
+
+    pub async fn wait_for_readiness_monitor_exit(&mut self) {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            self.readiness_monitor_exited.wait_for(|exited| *exited),
+        )
+        .await
+        .expect("timed out waiting for xDS readiness monitor to exit")
+        .expect("xDS readiness monitor exit sender dropped");
+    }
+
+    pub async fn wait_for_synced(&mut self, reason: &str) -> u64 {
+        self.wait_for_state(
+            |state| state.kind() == xds::XdsConnectionStateKind::Synced,
+            reason,
+        )
+        .await
+        .freshness_epoch()
+    }
+
+    pub async fn wait_for_synced_after(&mut self, previous_epoch: u64, reason: &str) -> u64 {
+        self.wait_for_state(
+            |state| {
+                state.kind() == xds::XdsConnectionStateKind::Synced
+                    && state.freshness_epoch() != previous_epoch
+            },
+            reason,
+        )
+        .await
+        .freshness_epoch()
+    }
+
+    pub async fn wait_for_connected_at_epoch(&mut self, epoch: u64, reason: &str) {
+        self.wait_for_state(
+            |state| {
+                state.kind() == xds::XdsConnectionStateKind::Connected
+                    && state.freshness_epoch() == epoch
+            },
+            reason,
+        )
+        .await;
+    }
+
+    async fn wait_for_state(
+        &mut self,
+        mut predicate: impl FnMut(xds::XdsConnectionState) -> bool,
+        reason: &str,
+    ) -> xds::XdsConnectionState {
+        *tokio::time::timeout(
+            Duration::from_secs(2),
+            self.state.wait_for(|state| predicate(*state)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {reason}"))
+        .expect("xDS connection state sender dropped")
+    }
+}
+
 pub async fn with_app<F, FO>(cfg: config::Config, f: F)
 where
     F: AsyncFn(TestApp) -> FO,
