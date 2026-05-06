@@ -54,7 +54,7 @@ const N_RULES: usize = 10;
 const N_POLICIES: usize = 10_000;
 const DUMMY_NETWORK: &str = "198.51.100.0/24";
 
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn initialize_namespace_tests() {
     ztunnel::test_helpers::namespaced::initialize_namespace_tests();
 }
