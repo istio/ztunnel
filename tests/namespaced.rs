@@ -56,7 +56,7 @@ mod namespaced {
     const WAYPOINT_MESSAGE: &[u8] = b"waypoint\n";
 
     /// initialize_namespace_tests sets up the namespace tests.
-    #[ctor::ctor]
+    #[ctor::ctor(unsafe)]
     fn initialize_namespace_tests() {
         ztunnel::test_helpers::namespaced::initialize_namespace_tests();
     }
