@@ -388,7 +388,7 @@ impl ServiceStore {
         vip: &NetworkAddress,
         ns: Option<&Strng>,
     ) -> Option<Arc<Service>> {
-        if let Some(services) = self.get_by_vip(vip) {
+        if let Some(services) = self.by_vip.get(vip) {
             return Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone());
         }
         self.get_best_by_cidr_vip(vip, ns)
@@ -434,7 +434,7 @@ impl ServiceStore {
     // If a namespace is provided, a Service from that namespace is preferred.
     // Next, a Service marked `canonical` is prerferred.
     pub fn get_best_by_host(&self, hostname: &Strng, ns: Option<&Strng>) -> Option<Arc<Service>> {
-        let services = self.get_by_host(hostname)?;
+        let services = self.by_host.get(hostname)?;
         Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone())
     }
 
