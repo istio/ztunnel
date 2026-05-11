@@ -261,7 +261,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1806,15 +1806,6 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
@@ -3201,9 +3192,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-openssl"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "346f161084062dd5a443adfb0de9bbfab62699333e2d8424ca91da5f22ec88d1"
+checksum = "bce63aeefbba181bc32fe7519a3d7edcdfa9fc2aa1f5e7f152493a25275ec14a"
 dependencies = [
  "foreign-types 0.3.2",
  "once_cell",
