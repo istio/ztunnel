@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+mod profiler;
 
 use std::cmp::Ordering::{Equal, Greater, Less};
 use std::future::Future;
@@ -27,7 +28,7 @@ use criterion::{
     BenchmarkGroup, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use pprof::criterion::{Output, PProfProfiler};
+use profiler::{Output, PProfProfiler};
 use prometheus_client::registry::Registry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;

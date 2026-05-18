@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod profiler;
+
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -19,7 +21,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use pprof::criterion::{Output, PProfProfiler};
+use profiler::{Output, PProfProfiler};
 use prometheus_client::registry::Registry;
 use tokio::runtime::Runtime;
 use ztunnel::state::workload::{NetworkAddress, Workload};
