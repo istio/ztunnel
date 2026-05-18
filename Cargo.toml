@@ -122,7 +122,7 @@ tempfile = { version = "3.27", optional = true}
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.2"
-pprof = { version = "0.15", features = ["protobuf", "protobuf-codec", "criterion"] }
+pprof = { version = "0.15", features = ["protobuf", "protobuf-codec"] }
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14", default-features = false }
@@ -152,8 +152,7 @@ incremental = true
 # Enable testing utils on this crate.
 ztunnel = { version = "0.0.0", path = ".", default-features = false, features = ["testing"] }
 
-# presently pprof-rs is pinned to this old version of criterion
-criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
+criterion = { version = "0.8", features = ["async_tokio", "html_reports"] }
 diff = "0.1"
 local-ip-address = "0.6"
 matches = "0.1"
