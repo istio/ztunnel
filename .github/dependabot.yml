@@ -19,6 +19,20 @@ updates:
     ignore:
       - dependency-name: "criterion"
         versions: [">= 0.6"]
+    target-branch: "release-1.30"
+    groups:
+      all-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    rebase-strategy: "disabled"
+    ignore:
+      - dependency-name: "criterion"
+        versions: [">= 0.6"]
     target-branch: "release-1.29"
     groups:
       all-dependencies:
