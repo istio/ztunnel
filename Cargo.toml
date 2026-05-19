@@ -3,6 +3,7 @@ name = "ztunnel"
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.90"
+autobenches = false # benches must be explicitly declared
 
 [features]
 default = ["tls-aws-lc"]
