@@ -59,8 +59,8 @@ futures-util = "0.3"
 jemalloc_pprof = { version = "0.8", optional = true, features = ["symbolize"] }
 tikv-jemallocator = { version = "0.6.0", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 hashbrown = "0.17"
-hickory-net = "0.26.0"
-hickory-proto = "0.26.0"
+hickory-net = "0.26.1"
+hickory-proto = "0.26.1"
 hickory-resolver = { version = "0.26.0", features = ["serde"] }
 hickory-server = { version = "0.26.0", features = [ "resolver" ]}
 http-body = { version = "1" }
