@@ -731,6 +731,8 @@ pub struct WorkloadStore {
     pub(super) by_uid: HashMap<Strng, Arc<Workload>>,
     // Identity->Set of UIDs. Only stores local nodes
     node_local_by_identity: HashMap<WorkloadIdentity, HashSet<Strng>>,
+    /// by_name maps workload names to workload UIDs.
+    by_name: HashMap<Strng, HashSet<Strng>>,
 }
 
 #[derive(Debug)]
@@ -810,6 +812,7 @@ impl WorkloadStore {
             by_addr: Default::default(),
             node_local_by_identity: Default::default(),
             by_uid: Default::default(),
+            by_name: Default::default(),
         }
     }
 
@@ -842,6 +845,11 @@ impl WorkloadStore {
                 .insert(w.uid.clone());
         }
 
+        self.by_name
+            .entry(w.name.clone())
+            .or_default()
+            .insert(w.uid.clone());
+
         // We have stored a newly inserted workload, notify watchers
         // (if any) to wake.
         self.insert_notifier.send_replace(());
@@ -869,6 +877,13 @@ impl WorkloadStore {
                     set.remove(&prev.uid);
                     if set.is_empty() {
                         self.node_local_by_identity.remove(&id);
+                    }
+                }
+
+                if let Some(set) = self.by_name.get_mut(&prev.name) {
+                    set.remove(&prev.uid);
+                    if set.is_empty() {
+                        self.by_name.remove(&prev.name);
                     }
                 }
 
@@ -1077,6 +1092,7 @@ mod tests {
             .unwrap();
         assert_eq!(state.read().unwrap().workloads.by_addr.len(), 1);
         assert_eq!(state.read().unwrap().workloads.by_uid.len(), 1);
+        assert_eq!(state.read().unwrap().workloads.by_name.len(), 1);
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
             Some(Arc::new(Workload {
@@ -1119,6 +1135,7 @@ mod tests {
         );
         assert_eq!(state.read().unwrap().workloads.by_addr.len(), 0);
         assert_eq!(state.read().unwrap().workloads.by_uid.len(), 0);
+        assert_eq!(state.read().unwrap().workloads.by_name.len(), 0);
 
         // Add two workloads into the VIP. Add out of order to further test
         updater
@@ -1459,6 +1476,7 @@ mod tests {
             .unwrap();
         assert_eq!(state.read().unwrap().workloads.by_addr.len(), 1);
         assert_eq!(state.read().unwrap().workloads.by_uid.len(), 2);
+        assert_eq!(state.read().unwrap().workloads.by_name.len(), 2);
         {
             let read = state.read().unwrap();
             let WorkloadByAddr::Many(wls) = read.workloads.by_addr.get(&nw_addr1).unwrap() else {
@@ -1481,6 +1499,7 @@ mod tests {
         updater.remove(&mut state.write().unwrap(), &uid1.as_str().into());
         assert_eq!(state.read().unwrap().workloads.by_addr.len(), 1);
         assert_eq!(state.read().unwrap().workloads.by_uid.len(), 1);
+        assert_eq!(state.read().unwrap().workloads.by_name.len(), 1);
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
             Some(Arc::new(Workload {
@@ -1500,6 +1519,7 @@ mod tests {
 
         assert_eq!(state.read().unwrap().workloads.by_addr.len(), 0);
         assert_eq!(state.read().unwrap().workloads.by_uid.len(), 0);
+        assert_eq!(state.read().unwrap().workloads.by_name.len(), 0);
     }
 
     #[test]
@@ -1785,6 +1805,7 @@ mod tests {
         let (state, demand, updater) = setup_test();
         assert_eq!((state.read().unwrap().workloads.by_addr.len()), 0);
         assert_eq!((state.read().unwrap().workloads.by_uid.len()), 0);
+        assert_eq!((state.read().unwrap().workloads.by_name.len()), 0);
         assert_eq!((state.read().unwrap().services.num_vips()), 0);
         assert_eq!((state.read().unwrap().services.num_services()), 0);
         assert_eq!((state.read().unwrap().services.num_staged_services()), 0);
