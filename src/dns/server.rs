@@ -238,15 +238,17 @@ impl Store {
         add_alias(Alias {
             name: name.clone(),
             stripped: None,
+            is_pod_host: false,
         });
 
         let namespaced_domain = append_name(as_name(&client.namespace), &self.svc_domain);
 
         // If the name can be expanded to a k8s FQDN, add that as well.
-        for kube_fqdn in self.to_kube_fqdns(name, &namespaced_domain) {
+        for (kube_fqdn, pod_host) in self.to_kube_fqdns(name, &namespaced_domain) {
             add_alias(Alias {
                 name: kube_fqdn,
                 stripped: None,
+                is_pod_host: pod_host,
             });
         }
 
@@ -257,13 +259,16 @@ impl Store {
                 add_alias(Alias {
                     name: stripped_name.clone(),
                     stripped: Some(stripped_name.clone()),
+                    is_pod_host: false,
                 });
 
                 // If the name can be expanded to a k8s FQDN, add that as well.
-                for kube_fqdn in self.to_kube_fqdns(&stripped_name, &namespaced_domain) {
+                for (kube_fqdn, pod_host) in self.to_kube_fqdns(&stripped_name, &namespaced_domain)
+                {
                     add_alias(Alias {
                         name: kube_fqdn,
                         stripped: Some(stripped_name.clone()),
+                        is_pod_host: pod_host,
                     });
                 }
             }
@@ -284,7 +289,7 @@ impl Store {
     ///
     /// Everything else will not be handled directly by Ambient and will instead
     /// just be forwarded to k8s.
-    fn to_kube_fqdns(&self, name: &Name, namespaced_domain: &Name) -> Vec<Name> {
+    fn to_kube_fqdns(&self, name: &Name, namespaced_domain: &Name) -> Vec<(Name, bool)> {
         let mut out = Vec::new();
 
         // Rather than just blindly adding every possible extension, only add the extensions
@@ -294,32 +299,32 @@ impl Store {
             1 => {
                 // Only one label in the name. Assume the client is calling a service by name
                 // within the same namespace. Append "<ns>.svc.cluster.local".
-                out.push(append_name(name.clone(), namespaced_domain));
+                out.push((append_name(name.clone(), namespaced_domain), false));
             }
             2 => {
                 // Expand <service-name>.<namespace> to
                 // <service-name>.<namespace>.svc.<cluster-domain>.
-                out.push(append_name(name.clone(), &self.svc_domain));
+                out.push((append_name(name.clone(), &self.svc_domain), false));
                 // Expand <pod-hostname>.<pod-sub-domain> to
                 // <pod-hostname>.<pod-sub-domain>.<namespace>.svc.<cluster-domain>.
-                out.push(append_name(name.clone(), namespaced_domain));
+                out.push((append_name(name.clone(), namespaced_domain), true));
             }
             3 => {
                 if has_domain(name, SVC.deref()) {
                     // Expand <service-name>.<namespace>.svc to
                     // <service-name>.<namespace>.svc.<cluster-domain>.
-                    out.push(append_name(name.clone(), &self.domain));
+                    out.push((append_name(name.clone(), &self.domain), false));
                 }
 
                 // Expand <pod-hostname>.<pod-sub-domain>.<namespace> to
                 // <pod-hostname>.<pod-sub-domain>.<namespace>.svc.<cluster-domain>.
-                out.push(append_name(name.clone(), &self.svc_domain));
+                out.push((append_name(name.clone(), &self.svc_domain), true));
             }
             4 => {
                 if has_domain(name, SVC.deref()) {
                     // Expand <pod-hostname>.<pod-sub-domain>.<namespace>.svc to
                     // <pod-hostname>.<pod-sub-domain>.<namespace>.svc.<cluster-domain>.
-                    out.push(append_name(name.clone(), &self.domain));
+                    out.push((append_name(name.clone(), &self.domain), true));
                 }
             }
             _ => {
@@ -405,6 +410,8 @@ impl Store {
                         alias,
                     });
                 }
+
+                //let workloads: Vec<Arc<Workload>> = state.workloads.
                 // TODO(): add support for workload lookups for headless pods
             }
         }
@@ -720,6 +727,10 @@ struct Alias {
     /// If `Some`, indicates that this alias was generated from the requested host that
     /// was stripped of
     stripped: Option<Name>,
+
+    /// True if this alias represents a Pod host (i.e. a host from a headless service).
+    /// False if we don't know / not relevant because the alias is not for a k8s FQDN.
+    is_pod_host: bool,
 }
 
 impl Display for Alias {
@@ -972,7 +983,7 @@ mod tests {
         struct Case {
             host: &'static str,
             client_namespace: &'static str,
-            expected: Vec<Name>,
+            expected: Vec<(Name, bool)>,
         }
 
         let cases: &[Case] = &[
@@ -982,7 +993,7 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <service-name>
-                    n("name.ns1.svc.cluster.local."),
+                    (n("name.ns1.svc.cluster.local."), false),
                 ],
             },
             Case {
@@ -990,7 +1001,7 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <service-name>
-                    n("name.ns1.svc.cluster.local."),
+                    (n("name.ns1.svc.cluster.local."), false),
                 ],
             },
             Case {
@@ -998,9 +1009,9 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <service-name>.<namespace>
-                    n("name.ns2.svc.cluster.local."),
+                    (n("name.ns2.svc.cluster.local."), false),
                     // Generated based on form: <pod-hostname>.<pod-sub-domain>
-                    n("name.ns2.ns1.svc.cluster.local."),
+                    (n("name.ns2.ns1.svc.cluster.local."), true),
                 ],
             },
             Case {
@@ -1008,9 +1019,9 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <service-name>.<namespace>.svc
-                    n("name.ns2.svc.cluster.local."),
+                    (n("name.ns2.svc.cluster.local."), false),
                     // Generated based on form: <pod-hostname>.<pod-sub-domain>.<namespace>
-                    n("name.ns2.svc.svc.cluster.local."),
+                    (n("name.ns2.svc.svc.cluster.local."), true),
                 ],
             },
             Case {
@@ -1018,7 +1029,7 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <pod-hostname>.<pod-sub-domain>.<namespace>
-                    n("name.ns2.not-svc.svc.cluster.local."),
+                    (n("name.ns2.not-svc.svc.cluster.local."), true),
                 ],
             },
             Case {
@@ -1026,7 +1037,7 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <pod-hostname>.<pod-sub-domain>.<namespace>.svc
-                    n("pod.sub-domain.ns.svc.cluster.local."),
+                    (n("pod.sub-domain.ns.svc.cluster.local."), true),
                 ],
             },
             Case {
@@ -1052,7 +1063,7 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <pod-hostname>.<pod-sub-domain>.<namespace>.
-                    n("www.google.com.svc.cluster.local."),
+                    (n("www.google.com.svc.cluster.local."), true),
                 ],
             },
         ];
