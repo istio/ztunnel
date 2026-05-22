@@ -234,25 +234,32 @@ impl Store {
             }
         };
 
-        // TODO(): this assumes pod FQDN, how to support partially qualified domains
-        // (<pod>.<subdomain>.<ns>, <pod>.<subdomain>.<ns>.svc) as well?
-        let is_pod_host = name.iter().len() == 6;
+        let name_len = name.iter().len();
+        let svc_domain_len = self.svc_domain.iter().len();
+        // Check if name maybe headless pod hostname, i.e. either one of
+        // 1) <pod>.<subdomain>.<ns>.svc.<cluster-domain> : pod FQDN
+        // 3) <pod>.<subdomain>.<ns>.svc                  : partially qualified domain
+        // 2) <pod>.<subdomain>.<ns>                      : partially qualified domain
+        let maybe_pod_host = (name_len.wrapping_sub(svc_domain_len) == 3
+            && name.trim_to(svc_domain_len) == self.svc_domain)
+            || (name_len == 4 && name.trim_to(1).to_utf8() == "svc.".to_string())
+            || name_len == 3;
 
         // Insert the requested name.
         add_alias(Alias {
             name: name.clone(),
             stripped: None,
-            is_pod_host,
+            maybe_pod_host,
         });
 
         let namespaced_domain = append_name(as_name(&client.namespace), &self.svc_domain);
 
         // If the name can be expanded to a k8s FQDN, add that as well.
-        for (kube_fqdn, is_pod_host) in self.to_kube_fqdns(name, &namespaced_domain) {
+        for (kube_fqdn, maybe_pod_host) in self.to_kube_fqdns(name, &namespaced_domain) {
             add_alias(Alias {
                 name: kube_fqdn,
                 stripped: None,
-                is_pod_host,
+                maybe_pod_host,
             });
         }
 
@@ -263,17 +270,17 @@ impl Store {
                 add_alias(Alias {
                     name: stripped_name.clone(),
                     stripped: Some(stripped_name.clone()),
-                    is_pod_host,
+                    maybe_pod_host,
                 });
 
                 // If the name can be expanded to a k8s FQDN, add that as well.
-                for (kube_fqdn, is_pod_host) in
+                for (kube_fqdn, maybe_pod_host) in
                     self.to_kube_fqdns(&stripped_name, &namespaced_domain)
                 {
                     add_alias(Alias {
                         name: kube_fqdn,
                         stripped: Some(stripped_name.clone()),
-                        is_pod_host,
+                        maybe_pod_host,
                     });
                 }
             }
@@ -417,9 +424,8 @@ impl Store {
                 }
             }
 
-            if alias.is_pod_host {
+            if alias.maybe_pod_host && alias.name.num_labels() > 1 {
                 trace!("checking headless svc {:#?}", alias);
-                assert!(alias.name.num_labels() > 1);
 
                 let mut name = alias.name.into_iter();
                 let pod_name = str::from_utf8(name.next().unwrap()).unwrap();
@@ -760,9 +766,9 @@ struct Alias {
     /// was stripped of
     stripped: Option<Name>,
 
-    /// True if this alias represents a Pod host (i.e. a host from a headless service).
-    /// False if we don't know / not relevant because the alias is not for a k8s FQDN.
-    is_pod_host: bool,
+    /// True if this alias may represent a pod host (i.e. a host from a headless service).
+    /// False if it's definitely not a pod host.
+    maybe_pod_host: bool,
 }
 
 impl Display for Alias {
@@ -1142,6 +1148,74 @@ mod tests {
         assert_eq!(expected, actual);
     }
 
+    #[test]
+    fn test_get_aliases_maybe_pod_host() {
+        let mut wl = test_default_workload();
+        wl.namespace = NS1.into();
+
+        let (state, local_workload) = state();
+        let store = Store {
+            domain: as_name("cluster.local"),
+            svc_domain: as_name("svc.cluster.local."),
+            state,
+            forwarder: forwarder(),
+            metrics: test_metrics(),
+            local_workload,
+            prefered_service_namespace: None,
+            ipv6_enabled: true,
+        };
+
+        struct Case {
+            host: &'static str,
+            expect_maybe_pod_host: bool,
+            expect_expanded_fqdn: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                host: "pod-0.headless.ns1.svc.cluster.local.",
+                expect_maybe_pod_host: true,
+                expect_expanded_fqdn: None,
+            },
+            Case {
+                host: "pod-0.headless.ns1.svc.",
+                expect_maybe_pod_host: true,
+                expect_expanded_fqdn: Some("pod-0.headless.ns1.svc.cluster.local."),
+            },
+            Case {
+                host: "pod-0.headless.ns1.",
+                expect_maybe_pod_host: true,
+                expect_expanded_fqdn: Some("pod-0.headless.ns1.svc.cluster.local."),
+            },
+            Case {
+                host: "headless.ns1.svc.cluster.local.",
+                expect_maybe_pod_host: false,
+                expect_expanded_fqdn: None,
+            },
+        ];
+
+        for c in cases {
+            let aliases = store.get_aliases(&wl, &n(c.host));
+            assert_eq!(
+                c.expect_maybe_pod_host,
+                aliases
+                    .iter()
+                    .any(|a| a.name == n(c.host) && a.maybe_pod_host),
+                "requested host: {}",
+                c.host
+            );
+            if let Some(fqdn) = c.expect_expanded_fqdn {
+                assert!(
+                    aliases
+                        .iter()
+                        .any(|a| a.name == n(fqdn) && a.maybe_pod_host),
+                    "expected expanded FQDN alias {fqdn} for host {}",
+                    c.host
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn lookup() {
         initialize_telemetry();
@@ -1398,20 +1472,35 @@ mod tests {
                 expect_answers: vec![],
                 ..Default::default()
             },
-            // TODO(https://github.com/istio/ztunnel/issues/1119)
             Case {
-                name: "todo: k8s pod - fqdn",
-                host: "headless.pod0.ns1.svc.cluster.local.",
-                expect_authoritative: false, // forwarded.
-                expect_code: ResponseCode::NXDomain,
+                name: "success: headless pod FQDN",
+                host: "pod-0.headless.ns1.svc.cluster.local.",
+                expect_answers: vec![a(
+                    n("pod-0.headless.ns1.svc.cluster.local."),
+                    ipv4("30.30.30.30"),
+                )],
                 ..Default::default()
             },
-            // TODO(https://github.com/istio/ztunnel/issues/1119)
             Case {
-                name: "todo: k8s pod - name.domain.ns",
-                host: "headless.pod0.ns1.",
-                expect_authoritative: false, // forwarded.
-                expect_code: ResponseCode::NXDomain,
+                name: "success: headless pod FQDN AAAA",
+                host: "pod-0.headless.ns1.svc.cluster.local.",
+                query_type: RecordType::AAAA,
+                expect_answers: vec![aaaa(
+                    n("pod-0.headless.ns1.svc.cluster.local."),
+                    ipv6("2001:db8::30"),
+                )],
+                ..Default::default()
+            },
+            Case {
+                name: "success: headless pod partial pod.subdomain.ns.svc",
+                host: "pod-0.headless.ns1.svc.",
+                expect_answers: vec![a(n("pod-0.headless.ns1.svc."), ipv4("30.30.30.30"))],
+                ..Default::default()
+            },
+            Case {
+                name: "success: headless pod partial pod.subdomain.ns",
+                host: "pod-0.headless.ns1.",
+                expect_answers: vec![a(n("pod-0.headless.ns1."), ipv4("30.30.30.30"))],
                 ..Default::default()
             },
             Case {
