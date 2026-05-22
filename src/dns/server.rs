@@ -242,17 +242,17 @@ impl Store {
         add_alias(Alias {
             name: name.clone(),
             stripped: None,
-            is_pod_host: is_pod_host,
+            is_pod_host,
         });
 
         let namespaced_domain = append_name(as_name(&client.namespace), &self.svc_domain);
 
         // If the name can be expanded to a k8s FQDN, add that as well.
-        for (kube_fqdn, pod_host) in self.to_kube_fqdns(name, &namespaced_domain) {
+        for (kube_fqdn, is_pod_host) in self.to_kube_fqdns(name, &namespaced_domain) {
             add_alias(Alias {
                 name: kube_fqdn,
                 stripped: None,
-                is_pod_host: pod_host,
+                is_pod_host,
             });
         }
 
@@ -263,16 +263,17 @@ impl Store {
                 add_alias(Alias {
                     name: stripped_name.clone(),
                     stripped: Some(stripped_name.clone()),
-                    is_pod_host: is_pod_host,
+                    is_pod_host,
                 });
 
                 // If the name can be expanded to a k8s FQDN, add that as well.
-                for (kube_fqdn, pod_host) in self.to_kube_fqdns(&stripped_name, &namespaced_domain)
+                for (kube_fqdn, is_pod_host) in
+                    self.to_kube_fqdns(&stripped_name, &namespaced_domain)
                 {
                     add_alias(Alias {
                         name: kube_fqdn,
                         stripped: Some(stripped_name.clone()),
-                        is_pod_host: pod_host,
+                        is_pod_host,
                     });
                 }
             }
