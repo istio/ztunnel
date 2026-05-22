@@ -46,8 +46,8 @@ use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
 use crate::state::DemandProxyState;
 use crate::state::service::{IpFamily, Service, ServiceMatch};
-use crate::state::workload::Workload;
 use crate::state::workload::address::Address;
+use crate::state::workload::{HeadlessServiceMatch, Workload};
 use crate::strng::Strng;
 use crate::{config, dns};
 
@@ -234,11 +234,15 @@ impl Store {
             }
         };
 
+        // TODO(): this assumes pod FQDN, how to support partially qualified domains
+        // (<pod>.<subdomain>.<ns>, <pod>.<subdomain>.<ns>.svc) as well?
+        let is_pod_host = name.iter().len() == 6;
+
         // Insert the requested name.
         add_alias(Alias {
             name: name.clone(),
             stripped: None,
-            is_pod_host: false,
+            is_pod_host: is_pod_host,
         });
 
         let namespaced_domain = append_name(as_name(&client.namespace), &self.svc_domain);
@@ -259,7 +263,7 @@ impl Store {
                 add_alias(Alias {
                     name: stripped_name.clone(),
                     stripped: Some(stripped_name.clone()),
-                    is_pod_host: false,
+                    is_pod_host: is_pod_host,
                 });
 
                 // If the name can be expanded to a k8s FQDN, add that as well.
@@ -334,6 +338,16 @@ impl Store {
         out
     }
 
+    /// Returns the cluster-local domain suffix used to identify Kubernetes headless services,
+    /// e.g. `.svc.cluster.local` (no trailing dot).
+    fn kubernetes_cluster_local_domain(&self) -> String {
+        let domain = ".".to_string() + &self.svc_domain.to_utf8();
+        domain
+            .strip_suffix('.')
+            .expect("the svc domain must have a trailing '.'")
+            .to_string()
+    }
+
     fn find_server(&self, client: &Workload, requested_name: &Name) -> Option<ServerMatch> {
         // Lock the workload store for the duration of this function, since we're calling it
         // in a loop.
@@ -371,19 +385,9 @@ impl Store {
                     .flatten()
                     // Remove things without a VIP, unless they are Kubernetes headless services.
                     // This will trigger us to forward upstream.
-                    // TODO: we should have a reliable way to distinguish these. In sidecars, we use
-                    // `svc.Attributes.ServiceRegistry`, but we don't pass anything similar over WDS.
-                    // For now, checking the domain is good enough.
-                    // This does mean a `.svc.cluster.local` ServiceEntry will use these semantics, but
-                    // its better than *ALL* ServiceEntry doing this
                     .filter(|service| {
-                        // Domain will be like `.svc.cluster.local.` (trailing .), so ignore the last character.
-                        let domain = ".".to_string() + &self.svc_domain.to_utf8();
-
-                        let domain = domain
-                            .strip_suffix('.')
-                            .expect("the svc domain must have a trailing '.'");
-                        !service.vips.is_empty() || service.hostname.ends_with(domain)
+                        let domain = self.kubernetes_cluster_local_domain();
+                        !service.vips.is_empty() || service.is_kubernetes_headless(&domain)
                     })
                     // Get the service matching the client namespace. If no match exists, just
                     // return the first service.
@@ -408,9 +412,36 @@ impl Store {
                         alias,
                     });
                 }
+            }
 
-                //let workloads: Vec<Arc<Workload>> = state.workloads.
-                // TODO(): add support for workload lookups for headless pods
+            if alias.is_pod_host {
+                trace!("checking headless svc {:#?}", alias);
+                assert!(alias.name.num_labels() > 1);
+
+                let mut name = alias.name.into_iter();
+                let pod_name = str::from_utf8(name.next().unwrap()).unwrap();
+                let service_suffix = Name::from_labels(name).unwrap().to_utf8();
+                let service_suffix = service_suffix
+                    .strip_suffix('.')
+                    .expect("the svc domain must have a trailing '.'");
+
+                let cluster_local_domain = self.kubernetes_cluster_local_domain();
+                if let Some(wl) = HeadlessServiceMatch::find_best_match(
+                    state.workloads.find_headless_pod_workloads(
+                        pod_name,
+                        service_suffix,
+                        &state.services,
+                        &cluster_local_domain,
+                    ),
+                    &client.namespace,
+                    &client.cluster_id,
+                ) {
+                    return Some(ServerMatch {
+                        server: Address::Workload(wl),
+                        name: alias.name.clone(),
+                        alias,
+                    });
+                }
             }
         }
 
@@ -1805,7 +1836,7 @@ mod tests {
             local_workload(),
             // Workloads backing headless service.
             xds_workload(
-                "headless0",
+                "pod-0",
                 NS1,
                 "headless.pod0.ns1.svc.cluster.local",
                 &NW1,
