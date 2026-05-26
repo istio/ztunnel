@@ -242,7 +242,7 @@ impl Store {
         // 2) <pod>.<subdomain>.<ns>                      : partially qualified domain
         let maybe_pod_host = (name_len.wrapping_sub(svc_domain_len) == 3
             && name.trim_to(svc_domain_len) == self.svc_domain)
-            || (name_len == 4 && name.trim_to(1).to_utf8() == "svc.".to_string())
+            || (name_len == 4 && name.trim_to(1).to_utf8() == "svc.")
             || name_len == 3;
 
         // Insert the requested name.
