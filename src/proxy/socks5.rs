@@ -74,6 +74,8 @@ impl Socks5 {
             self.pi.cfg.clone(),
             self.pi.socket_factory.clone(),
             self.pi.local_workload_information.clone(),
+            self.pi.crl_manager.clone(),
+            self.pi.metrics.clone(),
         );
         let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             loop {

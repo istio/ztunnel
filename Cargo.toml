@@ -12,7 +12,7 @@ tls-boring = ["dep:boring", "dep:boring-sys", "boring-rustls-provider/fips-only"
 tls-ring = ["dep:ring", "rustls/ring", "tokio-rustls/ring", "hyper-rustls/ring", "dep:rcgen"]
 tls-aws-lc = ["dep:ring", "rustls/aws_lc_rs", "tokio-rustls/aws_lc_rs", "hyper-rustls/aws-lc-rs", "dep:rcgen", "rcgen/aws_lc_rs"]
 tls-openssl = ["dep:rustls-openssl", "dep:openssl", "dep:openssl-sys"]
-testing = ["dep:rcgen", "rcgen/x509-parser", "dep:tempfile"] # Enables utilities supporting tests.
+testing = ["dep:rcgen", "rcgen/x509-parser", "dep:tempfile", "dep:time"] # Enables utilities supporting tests.
 
 [lib]
 path = "src/lib.rs"
@@ -120,6 +120,7 @@ tracing-appender = "0.2"
 tokio-util = { version = "0.7", features = ["io-util"] }
 educe = "0.6"
 tempfile = { version = "3.27", optional = true}
+time = { version = "0.3", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.2"
@@ -163,6 +164,7 @@ rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 x509-parser = { version = "0.18", default-features = false, features = ["verify"] }
 time = "0.3"
 ctor = "1.0"
+tempfile = "3.27"
 
 [lints.clippy]
 # This rule makes code more confusing

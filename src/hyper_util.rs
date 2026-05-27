@@ -42,6 +42,20 @@ pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
     cert_provider: T,
     listener: TcpListener,
 ) -> impl Stream<Item = tokio_rustls::server::TlsStream<TcpStream>> {
+    tls_server_with_error_handler(cert_provider, listener, |_| {})
+}
+
+pub fn tls_server_with_error_handler<T, F>(
+    cert_provider: T,
+    listener: TcpListener,
+    on_handshake_error: F,
+) -> impl Stream<Item = tokio_rustls::server::TlsStream<TcpStream>>
+where
+    T: ServerCertProvider + Clone + 'static,
+    F: Fn(&tls_listener::Error<std::io::Error, crate::tls::TlsError, std::net::SocketAddr>)
+        + Clone
+        + 'static,
+{
     use tokio_stream::StreamExt;
 
     tls_listener::builder(crate::tls::InboundAcceptor::new(cert_provider))
@@ -49,10 +63,11 @@ pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
         .take_while(|item| {
             !matches!(item, Err(tls_listener::Error::ListenerError(e)) if proxy::util::is_runtime_shutdown(e))
         })
-        .filter_map(|conn| {
+        .filter_map(move |conn| {
             // Avoid 'By default, if a client fails the TLS handshake, that is treated as an error, and the TlsListener will return an Err'
             match conn {
                 Err(err) => {
+                    on_handshake_error(&err);
                     warn!("TLS handshake error: {}", err);
                     None
                 }

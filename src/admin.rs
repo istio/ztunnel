@@ -498,10 +498,18 @@ mod tests {
     // Not really much to test, mostly to make sure things format as expected.
     #[tokio::test(start_paused = true)]
     async fn test_dump_certs() {
+        use super::dump_cert;
+        use crate::tls::mock::TEST_ROOT;
+        use crate::tls::parse_cert;
+
         fn identity(s: impl AsRef<str>) -> identity::Identity {
             use std::str::FromStr;
             identity::Identity::from_str(s.as_ref()).unwrap()
         }
+
+        // Derive root cert expectations dynamically so this test doesn't break when TEST_ROOT is regenerated (mock ca uses this root cert)
+        let root_cert_dump =
+            serde_json::to_value(dump_cert(&parse_cert(TEST_ROOT.to_vec()).unwrap())).unwrap();
 
         let manager = identity::mock::new_secret_manager_cfg(identity::mock::SecretManagerConfig {
             cert_lifetime: Duration::from_secs(7 * 60 * 60),
@@ -564,14 +572,7 @@ mod tests {
                 "validFrom": "2023-03-11T05:57:26Z"
               },
             ],
-            "rootCerts": [
-              {
-                "expirationTime": "2299-01-17T23:35:46Z",
-                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURJRENDQWdpZ0F3SUJBZ0lVUmxsdFV1bTJRbTE1dFQ5end1MmtwaDR2ZWRjd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlOVEEwTURNeU16TTEKTkRaYUdBOHlNams1TURFeE56SXpNelUwTmxvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oCmJEQ0NBU0l3RFFZSktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0NnZ0VCQUxxVHVwVXlMK2pvd3FOZQpMQUxFbnlXYS9VNmgyaktCYzFYWUFtekR1MDN4S0VhM3JhU1ZzU05BYjFnN1hybmgxaTViNEg0enBtY3gKdStsZURlMDh4OEdOOFJRVjBoUlE0bkkvb0lseHhmc2NOWDZoNGwyVlRRSGNLcnFaYUFRQ2NDTVJuc2EzCk9tUFNPQmRPdTR2ZkFxeVVxMS9ici82TEczRWFQMDYxQ09lMzVWUTFhbkZJYXQrVWJ6bEcrZmpGbXZXbwpxZFdFMVFaekV4UWdXV3VKNjh6RjJBN25MTXVxc0k5cG8wR2FKcHhwajZnc0tIZ3NRZ1JoYWR4UlR3ejAKc0hrVE0rS216SkY0aTJ1NDJ3VHc5YWpzME5NZmQ5WjdBbWlvRXpnS0J3bURBdGQra04zUFdyby8vaHAxClRtOUVqTVFac2s3QmV6NVVyUDA4Y09yTXNOTUNBd0VBQWFOZ01GNHdIUVlEVlIwT0JCWUVGRzlmWGRqQgo0THN2RUpxWUxZNllQc2xWMWxXVU1COEdBMVVkSXdRWU1CYUFGRzlmWGRqQjRMc3ZFSnFZTFk2WVBzbFYKMWxXVU1BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0N3WURWUjBQQkFRREFnSUVNQTBHQ1NxR1NJYjNEUUVCCkN3VUFBNElCQVFDaXVMUzljZkNjRDNDblNGbUpOays5MkNhRXEyUmxTMXF1dmdTa3Z5ckhZNTV4cUxrYQpCbUVDU3VCT2FCT3lHNlZMaFlPMy9OeDBwRERJbUJYak1GZTRJRVJER3QvQTA0am41S2RFTGRiK1laOWUKdUZvY09xdWpucnFVYkxXT2Zra21rd3E5TDFWNjNsKzAxdGRFUlhYa0ZuWHM4QTFhUnh6U2RCSVUrZEtKCmpyRHNtUzdnK1B5dWNEZzJ2WWtTcExoMTdhTm1RdndrOWRPMlpvVHdMcW1JSEZYcHhlNW1PdmlyRVE1RQpYL1JzRW9IY0hURTNGUk0xaDBVdUI1SjN4ekVoOXpHUFRwNWljS2d1TC9vUElmUXVJdWhaRCtWNWg3ZzcKS3k1RHlNVWNLT0l1T0c2SStLdDJYaWpHMld5UHRwWEJBTXJoU2ZaM2ViQWd0WjZJdjZxdgotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
-                "serialNumber": "401623643733315109898464329860171355725264550359",
-                "validFrom": "2025-04-03T23:35:46Z"
-              }
-            ],
+            "rootCerts": [root_cert_dump.clone()],
             "identity": "spiffe://trust_domain/ns/namespace/sa/sa-0",
             "state": "Available"
           },
@@ -584,14 +585,7 @@ mod tests {
                 "validFrom": "2023-03-11T06:57:26Z"
               },
             ],
-            "rootCerts": [
-              {
-                "expirationTime": "2299-01-17T23:35:46Z",
-                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURJRENDQWdpZ0F3SUJBZ0lVUmxsdFV1bTJRbTE1dFQ5end1MmtwaDR2ZWRjd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlOVEEwTURNeU16TTEKTkRaYUdBOHlNams1TURFeE56SXpNelUwTmxvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oCmJEQ0NBU0l3RFFZSktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0NnZ0VCQUxxVHVwVXlMK2pvd3FOZQpMQUxFbnlXYS9VNmgyaktCYzFYWUFtekR1MDN4S0VhM3JhU1ZzU05BYjFnN1hybmgxaTViNEg0enBtY3gKdStsZURlMDh4OEdOOFJRVjBoUlE0bkkvb0lseHhmc2NOWDZoNGwyVlRRSGNLcnFaYUFRQ2NDTVJuc2EzCk9tUFNPQmRPdTR2ZkFxeVVxMS9ici82TEczRWFQMDYxQ09lMzVWUTFhbkZJYXQrVWJ6bEcrZmpGbXZXbwpxZFdFMVFaekV4UWdXV3VKNjh6RjJBN25MTXVxc0k5cG8wR2FKcHhwajZnc0tIZ3NRZ1JoYWR4UlR3ejAKc0hrVE0rS216SkY0aTJ1NDJ3VHc5YWpzME5NZmQ5WjdBbWlvRXpnS0J3bURBdGQra04zUFdyby8vaHAxClRtOUVqTVFac2s3QmV6NVVyUDA4Y09yTXNOTUNBd0VBQWFOZ01GNHdIUVlEVlIwT0JCWUVGRzlmWGRqQgo0THN2RUpxWUxZNllQc2xWMWxXVU1COEdBMVVkSXdRWU1CYUFGRzlmWGRqQjRMc3ZFSnFZTFk2WVBzbFYKMWxXVU1BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0N3WURWUjBQQkFRREFnSUVNQTBHQ1NxR1NJYjNEUUVCCkN3VUFBNElCQVFDaXVMUzljZkNjRDNDblNGbUpOays5MkNhRXEyUmxTMXF1dmdTa3Z5ckhZNTV4cUxrYQpCbUVDU3VCT2FCT3lHNlZMaFlPMy9OeDBwRERJbUJYak1GZTRJRVJER3QvQTA0am41S2RFTGRiK1laOWUKdUZvY09xdWpucnFVYkxXT2Zra21rd3E5TDFWNjNsKzAxdGRFUlhYa0ZuWHM4QTFhUnh6U2RCSVUrZEtKCmpyRHNtUzdnK1B5dWNEZzJ2WWtTcExoMTdhTm1RdndrOWRPMlpvVHdMcW1JSEZYcHhlNW1PdmlyRVE1RQpYL1JzRW9IY0hURTNGUk0xaDBVdUI1SjN4ekVoOXpHUFRwNWljS2d1TC9vUElmUXVJdWhaRCtWNWg3ZzcKS3k1RHlNVWNLT0l1T0c2SStLdDJYaWpHMld5UHRwWEJBTXJoU2ZaM2ViQWd0WjZJdjZxdgotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
-                "serialNumber": "401623643733315109898464329860171355725264550359",
-                "validFrom": "2025-04-03T23:35:46Z"
-              }
-            ],
+            "rootCerts": [root_cert_dump.clone()],
             "identity": "spiffe://trust_domain/ns/namespace/sa/sa-1",
             "state": "Available"
           }

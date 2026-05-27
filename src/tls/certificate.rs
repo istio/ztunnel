@@ -165,6 +165,11 @@ impl Certificate {
         self.parsed().serial.to_string()
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    pub fn serial_bytes(&self) -> Vec<u8> {
+        self.parsed().tbs_certificate.raw_serial().to_vec()
+    }
+
     pub fn expiration(&self) -> Expiration {
         self.expiry.clone()
     }
@@ -191,7 +196,7 @@ fn expiration(cert: X509Certificate) -> Expiration {
     }
 }
 
-fn parse_cert(mut cert: Vec<u8>) -> Result<Certificate, Error> {
+pub fn parse_cert(mut cert: Vec<u8>) -> Result<Certificate, Error> {
     let mut reader = std::io::BufReader::new(Cursor::new(&mut cert));
     let parsed = rustls_pemfile::read_one(&mut reader)
         .map_err(|e| Error::CertificateParseError(e.to_string()))?
@@ -337,11 +342,17 @@ impl WorkloadCertificate {
         Ok(sc)
     }
 
-    // TODO: add CRL support for outbound connections (client verifying server certs)
-    // this requires a separate design due to complexity - deferred for follow-up
-    pub fn client_config(&self, identity: Vec<Identity>) -> Result<ClientConfig, rustls::Error> {
+    pub fn client_config(
+        &self,
+        identity: Vec<Identity>,
+        crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
+    ) -> Result<ClientConfig, rustls::Error> {
         let roots = self.root_store.clone();
-        let verifier = IdentityVerifier { roots, identity };
+        let verifier = IdentityVerifier {
+            roots,
+            identity,
+            crl_manager,
+        };
         let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
             .with_protocol_versions(tls::tls_versions())
             .expect("client config must be valid")
@@ -357,8 +368,12 @@ impl WorkloadCertificate {
         Ok(cc)
     }
 
-    pub fn outbound_connector(&self, identity: Vec<Identity>) -> Result<OutboundConnector, Error> {
-        let cc = self.client_config(identity)?;
+    pub fn outbound_connector(
+        &self,
+        identity: Vec<Identity>,
+        crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
+    ) -> Result<OutboundConnector, Error> {
+        let cc = self.client_config(identity, crl_manager)?;
         Ok(OutboundConnector {
             client_config: Arc::new(cc),
         })
@@ -421,13 +436,18 @@ fn der_to_pem(der: &[u8], label: &str) -> String {
 mod test {
     use crate::identity::Identity;
     use crate::test_helpers::helpers;
-    use crate::tls::WorkloadCertificate;
-    use crate::tls::mock::{TEST_ROOT, TEST_ROOT_KEY, TEST_ROOT2, TEST_ROOT2_KEY, TestIdentity};
+    use crate::tls::mock::{
+        TEST_ROOT, TEST_ROOT_KEY, TEST_ROOT2, TEST_ROOT2_KEY, TestIdentity, crl_pem_revoking_cert,
+        generate_intermediate_ca,
+    };
+    use crate::tls::{WorkloadCertificate, io_error_is_cert_revoked};
 
+    use std::io::Write;
     use std::str::FromStr;
     use std::sync::Arc;
     use std::time::Duration;
     use std::time::SystemTime;
+    use tempfile::NamedTempFile;
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
@@ -477,12 +497,151 @@ mod test {
         });
 
         let stream = TcpStream::connect(addr).await.unwrap();
-        let client = cert2.outbound_connector(vec![id]).unwrap();
+        let client = cert2.outbound_connector(vec![id], None).unwrap();
         let mut tls = client.connect(stream).await.unwrap();
 
         let _ = tls.write(b"hi").await.unwrap();
         let mut buf = [0u8; 4];
         tls.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"serv");
+    }
+
+    /// Outbound client must abort TLS when the peer's leaf cert appears in the loaded CRL (i.e. is revoked).
+    #[tokio::test]
+    async fn outbound_rejects_revoked_server_cert() {
+        helpers::initialize_telemetry();
+
+        let id = Identity::from_str("spiffe://td/ns/n/sa/a").unwrap();
+
+        // Generate server key+cert signed by root
+        let (server_key, server_cert) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(id.clone()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(3600),
+            None,
+            TEST_ROOT_KEY,
+        );
+        let server_wl = WorkloadCertificate::new(
+            server_key.as_bytes(),
+            server_cert.as_bytes(),
+            vec![TEST_ROOT],
+        )
+        .unwrap();
+
+        // Generate client key+cert signed by root
+        let (client_key, client_cert) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(id.clone()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(3600),
+            None,
+            TEST_ROOT_KEY,
+        );
+        let client_wl = WorkloadCertificate::new(
+            client_key.as_bytes(),
+            client_cert.as_bytes(),
+            vec![TEST_ROOT],
+        )
+        .unwrap();
+
+        // Generate CRL that revokes the server cert
+        let crl_pem = crl_pem_revoking_cert(&server_wl.cert.serial_bytes());
+
+        let mut crl_file = NamedTempFile::new().unwrap();
+        crl_file.write_all(crl_pem.as_bytes()).unwrap();
+        crl_file.flush().unwrap();
+
+        // Create CRL manager to load the CRL from file path
+        let crl_mgr =
+            Arc::new(crate::tls::crl::CrlManager::new(crl_file.path().to_path_buf()).unwrap());
+
+        // Create TLS server to listen for incoming connections
+        let server_tls = TlsAcceptor::from(Arc::new(server_wl.server_config(None).unwrap()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::task::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ = server_tls.accept(stream).await;
+        });
+
+        // Create outbound connector to connect to the TLS server
+        // we expect the connection to fail because the CRL is enforced and the server cert is revoked
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let connector = client_wl
+            .outbound_connector(vec![id.clone()], Some(crl_mgr))
+            .unwrap();
+        let err = connector
+            .connect(stream)
+            .await
+            .expect_err("connection should fail: server cert is revoked");
+        assert!(io_error_is_cert_revoked(&err));
+    }
+
+    /// Outbound client must abort TLS when the peer's IA cert appears in the loaded CRL (i.e. is revoked).
+    /// Validates that full cert chain is checked, not just the EE cert.
+    #[tokio::test]
+    async fn outbound_rejects_revoked_intermediate_cert() {
+        helpers::initialize_telemetry();
+
+        let id = Identity::from_str("spiffe://td/ns/n/sa/a").unwrap();
+
+        // Generate IA signed by TEST_ROOT and a leaf signed by the IA
+        let (ia_key, ia_cert, ia_serial_bytes) = generate_intermediate_ca(TEST_ROOT_KEY);
+        let (server_key, server_cert) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(id.clone()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(3600),
+            None,
+            ia_key.as_bytes(),
+        );
+        // Generate server workload certificate with the full chain: leaf cert signed by IA, IA cert, TEST_ROOT as trust anchor
+        let server_wl = WorkloadCertificate::new(
+            server_key.as_bytes(),
+            server_cert.as_bytes(),
+            vec![ia_cert.as_bytes(), TEST_ROOT],
+        )
+        .unwrap();
+
+        // Client uses a direct root-signed cert — not revoked by the CRL
+        let (client_key, client_cert) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(id.clone()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(3600),
+            None,
+            TEST_ROOT_KEY,
+        );
+        let client_wl = WorkloadCertificate::new(
+            client_key.as_bytes(),
+            client_cert.as_bytes(),
+            vec![TEST_ROOT],
+        )
+        .unwrap();
+
+        // CRL signed by TEST_ROOT that revokes the IA — not the leaf cert
+        let crl_pem = crl_pem_revoking_cert(&ia_serial_bytes);
+
+        let mut crl_file = NamedTempFile::new().unwrap();
+        crl_file.write_all(crl_pem.as_bytes()).unwrap();
+        crl_file.flush().unwrap();
+
+        let crl_mgr =
+            Arc::new(crate::tls::crl::CrlManager::new(crl_file.path().to_path_buf()).unwrap());
+
+        let server_tls = TlsAcceptor::from(Arc::new(server_wl.server_config(None).unwrap()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::task::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ = server_tls.accept(stream).await;
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let connector = client_wl
+            .outbound_connector(vec![id.clone()], Some(crl_mgr))
+            .unwrap();
+        let err = connector
+            .connect(stream)
+            .await
+            .expect_err("connection should fail: intermediate cert is revoked");
+        assert!(io_error_is_cert_revoked(&err));
     }
 }
