@@ -64,7 +64,7 @@ hickory-resolver = { version = "0.26.0", features = ["serde"] }
 hickory-server = { version = "0.26.0", features = [ "resolver" ]}
 http-body = { version = "1" }
 http-body-util = "0.1"
-hyper = { version = "1.9", features = ["full"] }
+hyper = { version = "1.10", features = ["full"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["logging", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["full"] }
 ipnet = { version = "2.12", features = ["serde"] }
