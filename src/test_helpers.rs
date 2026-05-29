@@ -16,9 +16,7 @@ use crate::config::ConfigSource;
 use crate::config::{self, RootCert};
 use crate::state::service::{Endpoint, EndpointSet, Service};
 use crate::state::workload::InboundProtocol::{HBONE, TCP};
-use crate::state::workload::{
-    GatewayAddress, NamespacedHostname, NetworkAddress, Workload, gatewayaddress,
-};
+use crate::state::workload::{GatewayAddress, NetworkAddress, Workload, gatewayaddress};
 use crate::state::workload::{HealthStatus, InboundProtocol};
 use crate::state::{DemandProxyState, ProxyState};
 use crate::xds::istio::security::Authorization as XdsAuthorization;
@@ -30,6 +28,7 @@ use crate::xds::{Handler, LocalConfig, LocalWorkload, ProxyStateUpdater, XdsReso
 use anyhow::anyhow;
 use bytes::{BufMut, Bytes};
 use hickory_resolver::config::*;
+use std::ffi::OsString;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -43,7 +42,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::Add;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc::error::SendError;
 use tokio::time::timeout;
@@ -89,6 +88,17 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
     xds_root_cert: Option<RootCert>,
     xds_config: Option<ConfigSource>,
 ) -> config::Config {
+    let _env_guard = lock_test_env();
+    test_config_with_port_xds_addr_and_root_cert_locked(port, xds_addr, xds_root_cert, xds_config)
+}
+
+fn test_config_with_port_xds_addr_and_root_cert_locked(
+    port: u16,
+    xds_addr: Option<String>,
+    xds_root_cert: Option<RootCert>,
+    xds_config: Option<ConfigSource>,
+) -> config::Config {
+    let _xds_unhealthy_threshold = EnvVarRestore::remove("XDS_UNHEALTHY_THRESHOLD");
     // We use an incrementing atomic here because
     // 1. We aren't running inside a unique per-test netns like some tests (slow)
     // 2. We don't want to risk test flakes from two listeners using the same port
@@ -139,7 +149,49 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
     // Do not let tests use system defaults!
     cfg.dns_resolver_opts = Default::default();
     cfg.dns_resolver_cfg = ResolverConfig::from_parts(None, vec![], vec![]);
+    cfg.xds_unhealthy_threshold = None;
     cfg
+}
+
+static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) fn lock_test_env() -> MutexGuard<'static, ()> {
+    TEST_ENV_LOCK.lock().unwrap()
+}
+
+pub(crate) struct EnvVarRestore {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarRestore {
+    pub(crate) fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, previous }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn set(key: &'static str, value: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarRestore {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 }
 
 pub fn test_config_with_port(port: u16) -> config::Config {
@@ -564,4 +616,22 @@ pub fn temp_file_with_content(content: &str) -> std::io::Result<NamedTempFile> {
     file.write_all(content.as_bytes())?;
     file.flush()?;
     Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_ignores_xds_unhealthy_threshold_env() {
+        let _guard = lock_test_env();
+        let _env = EnvVarRestore::set("XDS_UNHEALTHY_THRESHOLD", "5m");
+
+        let cfg = test_config_with_port_xds_addr_and_root_cert_locked(80, None, None, None);
+
+        assert_eq!(
+            cfg.xds_unhealthy_threshold, None,
+            "test configs should not inherit process XDS_UNHEALTHY_THRESHOLD"
+        );
+    }
 }

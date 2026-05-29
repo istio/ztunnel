@@ -470,19 +470,24 @@ mod test {
         let tls = TlsAcceptor::from(Arc::new(server));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::task::spawn(async move {
+        let server = tokio::task::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut tls = tls.accept(stream).await.unwrap();
-            let _ = tls.write(b"serv").await.unwrap();
+            tls.write_all(b"serv").await.unwrap();
+
+            let mut buf = [0u8; 2];
+            tls.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"hi");
         });
 
         let stream = TcpStream::connect(addr).await.unwrap();
         let client = cert2.outbound_connector(vec![id]).unwrap();
         let mut tls = client.connect(stream).await.unwrap();
 
-        let _ = tls.write(b"hi").await.unwrap();
+        tls.write_all(b"hi").await.unwrap();
         let mut buf = [0u8; 4];
         tls.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"serv");
+        server.await.unwrap();
     }
 }

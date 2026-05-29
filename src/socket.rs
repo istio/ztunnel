@@ -179,9 +179,13 @@ impl Listener {
                 tracing::trace!("set keepalive: {:?}", res);
             }
             if cfg.user_timeout_enabled {
-                let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
-                let res = SockRef::from(&stream).set_tcp_user_timeout(Some(ut));
-                tracing::trace!("set user timeout: {:?}", res);
+                #[cfg(target_os = "linux")]
+                {
+                    if let Some(ut) = cfg.tcp_user_timeout() {
+                        let res = SockRef::from(&stream).set_tcp_user_timeout(Some(ut));
+                        tracing::trace!("set user timeout: {:?}", res);
+                    }
+                }
             }
         }
         Ok((stream, remote))
@@ -238,7 +242,31 @@ pub mod socket_tests {
             sock.tcp_keepalive_interval().unwrap(),
             cfg.keepalive_interval
         );
-        let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
-        assert_eq!(sock.tcp_user_timeout().unwrap(), Some(ut));
+        let ut = cfg.tcp_user_timeout();
+        #[cfg(target_os = "linux")]
+        assert_eq!(sock.tcp_user_timeout().unwrap(), ut);
+        #[cfg(not(target_os = "linux"))]
+        let _ = ut;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn test_user_timeout_disabled_without_non_linux_duration_arithmetic() {
+        let cfg = SocketConfig {
+            keepalive_enabled: false,
+            keepalive_time: std::time::Duration::MAX,
+            keepalive_retries: u32::MAX,
+            keepalive_interval: std::time::Duration::MAX,
+            user_timeout_enabled: true,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut socklistener = Listener::new(listener);
+        socklistener.set_socket_options(Some(cfg));
+
+        let (accepted, connected) = tokio::join!(socklistener.accept(), TcpStream::connect(addr));
+        accepted.expect("accept should ignore unsupported user timeout on non-Linux");
+        connected.expect("client should connect to test listener");
     }
 }

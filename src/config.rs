@@ -54,6 +54,8 @@ const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
 const LOCAL_XDS: &str = "LOCAL_XDS";
 const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
 const XDS_ADDRESS: &str = "XDS_ADDRESS";
+const XDS_UNHEALTHY_THRESHOLD: &str = "XDS_UNHEALTHY_THRESHOLD";
+
 const PREFERED_SERVICE_NAMESPACE: &str = "PREFERED_SERVICE_NAMESPACE";
 const CA_ADDRESS: &str = "CA_ADDRESS";
 const SECRET_TTL: &str = "SECRET_TTL";
@@ -266,6 +268,18 @@ pub struct Config {
     /// If true, on-demand XDS will be used
     pub xds_on_demand: bool,
 
+    /// Duration after xDS becomes non-fresh before the readiness probe reports unhealthy.
+    /// If unset, the feature is disabled and readiness is never re-armed after initial sync.
+    /// A typical production value is around 5 minutes: long enough to ride out routine
+    /// reconnects and rolling control-plane restarts, short enough to flag a control
+    /// plane that has actually stopped responding. Values approaching the xDS reconnect
+    /// backoff ceiling can report unhealthy during normal retries.
+    /// Must be greater than zero when set; unset XDS_UNHEALTHY_THRESHOLD to disable
+    /// this feature. Very small nonzero values are accepted but will warn at startup
+    /// because routine reconnects can exceed them.
+    /// Accepts human-readable durations (e.g. "5m", "300s", "1h").
+    pub xds_unhealthy_threshold: Option<Duration>,
+
     /// If true, then use builtin fake CA with self-signed certificates.
     pub fake_ca: bool,
     // If true, then force config to use the linux-assigned listener address:port instead
@@ -349,6 +363,19 @@ impl Default for SocketConfig {
     }
 }
 
+impl SocketConfig {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn tcp_user_timeout(self) -> Option<Duration> {
+        if !self.user_timeout_enabled {
+            return None;
+        }
+
+        self.keepalive_interval
+            .checked_mul(self.keepalive_retries)
+            .and_then(|retry_window| self.keepalive_time.checked_add(retry_window))
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("invalid env var {0}={1} ({2})")]
@@ -392,7 +419,11 @@ where
 }
 
 fn parse_duration(env: &str) -> Result<Option<Duration>, Error> {
-    parse::<String>(env)?
+    parse_duration_value(env, parse::<String>(env)?)
+}
+
+fn parse_duration_value(env: &str, value: Option<String>) -> Result<Option<Duration>, Error> {
+    value
         .map(|ds| {
             duration_str::parse(&ds).map_err(|e| Error::EnvVar(env.to_string(), ds, e.to_string()))
         })
@@ -401,6 +432,19 @@ fn parse_duration(env: &str) -> Result<Option<Duration>, Error> {
 
 fn parse_duration_default(env: &str, default: Duration) -> Result<Duration, Error> {
     parse_duration(env).map(|v| v.unwrap_or(default))
+}
+
+fn parse_xds_unhealthy_threshold(value: Option<String>) -> Result<Option<Duration>, Error> {
+    let raw_value = value.clone().unwrap_or_default();
+    let threshold = parse_duration_value(XDS_UNHEALTHY_THRESHOLD, value)?;
+    if threshold == Some(Duration::ZERO) {
+        return Err(Error::EnvVar(
+            XDS_UNHEALTHY_THRESHOLD.to_string(),
+            raw_value,
+            "must be greater than 0 when set; unset XDS_UNHEALTHY_THRESHOLD to disable xDS readiness re-arming".to_string(),
+        ));
+    }
+    Ok(threshold)
 }
 
 fn parse_args() -> String {
@@ -716,6 +760,9 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         _ => (None, None),
     };
 
+    let xds_unhealthy_threshold =
+        parse_xds_unhealthy_threshold(parse::<String>(XDS_UNHEALTHY_THRESHOLD)?)?;
+
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
         // Enable by default; running the server is not an issue, clients still need to opt-in to sending their
@@ -806,6 +853,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         secret_ttl: parse_duration_default(SECRET_TTL, DEFAULT_TTL)?,
         local_xds_config,
         xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
+        xds_unhealthy_threshold,
         proxy_metadata: pc.proxy_metadata,
 
         fake_ca,
@@ -898,6 +946,13 @@ fn validate_config(cfg: Config) -> Result<Config, Error> {
         return Err(Error::ProxyConfig(anyhow!(
             "ztunnel run without any servers enabled"
         )));
+    }
+
+    #[cfg(target_os = "linux")]
+    if cfg.socket_config.user_timeout_enabled && cfg.socket_config.tcp_user_timeout().is_none() {
+        return Err(Error::InvalidState(
+            "TCP user timeout overflows Duration; reduce KEEPALIVE_TIME, KEEPALIVE_INTERVAL, or KEEPALIVE_RETRIES".to_string(),
+        ));
     }
 
     Ok(cfg)
@@ -1091,8 +1146,11 @@ pub mod tests {
 
     #[test]
     fn config_from_proxyconfig() {
+        let _guard = crate::test_helpers::lock_test_env();
         use crate::test_helpers::{MESH_CONFIG_YAML, temp_file_with_content};
 
+        let _xds_unhealthy_threshold =
+            crate::test_helpers::EnvVarRestore::remove(XDS_UNHEALTHY_THRESHOLD);
         let default_config = construct_config(ProxyConfig::default())
             .expect("could not build Config without ProxyConfig");
 
@@ -1191,7 +1249,89 @@ pub mod tests {
     }
 
     #[test]
+    fn test_xds_unhealthy_threshold_rejects_zero() {
+        let err = parse_xds_unhealthy_threshold(Some("0s".to_string())).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::EnvVar(ref name, ref value, ref msg)
+                    if name == XDS_UNHEALTHY_THRESHOLD
+                        && value == "0s"
+                        && msg.contains("greater than 0")
+            ),
+            "expected XDS_UNHEALTHY_THRESHOLD greater-than-zero error, got {err}"
+        );
+    }
+
+    #[test]
+    fn test_xds_unhealthy_threshold_accepts_low_nonzero() {
+        let threshold = parse_xds_unhealthy_threshold(Some("1ms".to_string())).unwrap();
+        assert_eq!(threshold, Some(std::time::Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn test_socket_config_tcp_user_timeout_detects_overflow() {
+        let cfg = SocketConfig {
+            keepalive_time: std::time::Duration::MAX,
+            keepalive_interval: std::time::Duration::from_secs(1),
+            keepalive_retries: 1,
+            keepalive_enabled: false,
+            user_timeout_enabled: true,
+        };
+
+        assert_eq!(cfg.tcp_user_timeout(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_validate_config_rejects_overflowing_user_timeout() {
+        let mut cfg = crate::test_helpers::test_config();
+        cfg.socket_config.keepalive_time = std::time::Duration::MAX;
+        cfg.socket_config.keepalive_interval = std::time::Duration::from_secs(1);
+        cfg.socket_config.keepalive_retries = 1;
+        cfg.socket_config.user_timeout_enabled = true;
+
+        let err = validate_config(cfg).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::InvalidState(ref msg) if msg.contains("TCP user timeout")
+            ),
+            "expected TCP user timeout validation error, got {err}"
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_validate_config_allows_overflowing_user_timeout_when_unsupported() {
+        let mut cfg = crate::test_helpers::test_config();
+        cfg.socket_config.keepalive_time = std::time::Duration::MAX;
+        cfg.socket_config.keepalive_interval = std::time::Duration::from_secs(1);
+        cfg.socket_config.keepalive_retries = 1;
+        cfg.socket_config.user_timeout_enabled = true;
+
+        validate_config(cfg)
+            .expect("unsupported TCP user timeout should remain inert on non-Linux");
+    }
+
+    #[test]
+    fn test_parse_config_reads_xds_unhealthy_threshold_env() {
+        let _guard = crate::test_helpers::lock_test_env();
+        let _proxy_config = crate::test_helpers::EnvVarRestore::remove(PROXY_CONFIG);
+        let _xds_unhealthy_threshold =
+            crate::test_helpers::EnvVarRestore::set(XDS_UNHEALTHY_THRESHOLD, "5m");
+
+        let cfg = parse_config().expect("parse_config should read XDS_UNHEALTHY_THRESHOLD");
+
+        assert_eq!(
+            cfg.xds_unhealthy_threshold,
+            Some(std::time::Duration::from_secs(300))
+        );
+    }
+
+    #[test]
     fn test_parse_worker_threads() {
+        let _guard = crate::test_helpers::lock_test_env();
         unsafe {
             // Test fixed number
             env::set_var(ZTUNNEL_WORKER_THREADS, "4");

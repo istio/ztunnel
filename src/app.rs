@@ -25,17 +25,46 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use tokio::task::JoinSet;
-use tracing::{Instrument, warn};
+use tracing::{Instrument, debug, info, warn};
 
 use crate::identity::SecretManager;
 use crate::state::ProxyStateManager;
 use crate::{admin, config, metrics, proxy, readiness, signal};
 use crate::{dns, xds};
 
+const XDS_LOW_UNHEALTHY_THRESHOLD_WARNING: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub async fn build_with_cert(
     config: Arc<config::Config>,
     cert_manager: Arc<SecretManager>,
 ) -> anyhow::Result<Bound> {
+    // Startup orchestration overview:
+    //
+    //  ┌─────────────────────────────────────────────────────────────────┐
+    //  │ 1. Bootstrap                                                    │
+    //  │    data plane pool, drain channel, readiness tasks, metrics     │
+    //  └──────────────────────────┬──────────────────────────────────────┘
+    //                             │
+    //  ┌──────────────────────────▼──────────────────────────────────────┐
+    //  │ 2. ProxyStateManager (creates xDS client)                       │
+    //  └──────────────────────────┬──────────────────────────────────────┘
+    //                             │
+    //  ┌──────────────────────────▼──────────────────────────────────────┐
+    //  │ 3. xDS monitoring task                                          │
+    //  │    Phase 1: wait for initial xDS sync → drop "state manager"    │
+    //  │    Phase 2: if XDS_UNHEALTHY_THRESHOLD set:                     │
+    //  │             non-Synced ──► grace period ──► block readiness      │
+    //  │             Synced ACK ──► reset/restore readiness               │
+    //  └──────────────────────────┬──────────────────────────────────────┘
+    //                             │
+    //  ┌──────────────────────────▼──────────────────────────────────────┐
+    //  │ 4. Proxy / DNS listeners (wait for xDS sync before accepting)   │
+    //  └──────────────────────────┬──────────────────────────────────────┘
+    //                             │
+    //  ┌──────────────────────────▼──────────────────────────────────────┐
+    //  │ 5. Admin + metrics servers                                      │
+    //  └─────────────────────────────────────────────────────────────────┘
+    //
     // Start the data plane worker pool.
     let (data_plane_pool, data_plane_handle) = new_data_plane_pool(config.num_worker_threads);
 
@@ -81,13 +110,20 @@ pub async fn build_with_cert(
     metrics::tokio_runtime::TokioRuntimeCollector::register(&mut registry, &data_plane_handle);
     let istio_registry = metrics::sub_registry(&mut registry);
     let _ = metrics::meta::Metrics::new(istio_registry);
-    let xds_metrics = xds::Metrics::new(istio_registry);
+    let xds_metrics =
+        xds::Metrics::new_with_remote_xds(istio_registry, config.xds_address.is_some());
+    let xds_monitor_metrics = xds::XdsConnectionMonitorMetrics::new(istio_registry);
     let proxy_metrics = Arc::new(proxy::Metrics::new(istio_registry));
     let dns_metrics = if config.dns_proxy {
         Some(dns::Metrics::new(istio_registry))
     } else {
         None
     };
+
+    #[cfg(not(target_os = "linux"))]
+    if config.socket_config.user_timeout_enabled {
+        warn!("TCP user timeout is configured but unsupported on non-Linux; setting is disabled");
+    }
 
     let (xds_tx, xds_rx) = tokio::sync::watch::channel(());
     // Create the manager that updates proxy state from XDS.
@@ -99,10 +135,61 @@ pub async fn build_with_cert(
         cert_manager.clone(),
     )
     .await?;
-    let mut xds_rx_for_task = xds_rx.clone();
+    let xds_connection_state_rx = state_mgr.xds_connection_state();
+    #[cfg(any(test, feature = "testing"))]
+    let xds_connection_state_for_test = xds_connection_state_rx.clone();
+    #[cfg(any(test, feature = "testing"))]
+    let xds_startup_for_test = xds_rx.clone();
+    #[cfg(any(test, feature = "testing"))]
+    let (xds_readiness_monitor_exited_tx, xds_readiness_monitor_exited_for_test) =
+        tokio::sync::watch::channel(false);
+    let xds_rx_for_task = xds_rx.clone();
+    let xds_unhealthy_threshold = config.xds_unhealthy_threshold;
+    let remote_xds_configured = xds_connection_state_rx.is_some();
+    match (remote_xds_configured, xds_unhealthy_threshold) {
+        (true, Some(threshold)) => {
+            info!(
+                threshold_ms = threshold.as_millis() as u64,
+                "xDS readiness re-arm monitor enabled"
+            );
+            if warn_for_low_xds_unhealthy_threshold(threshold) {
+                warn!(
+                    threshold_ms = threshold.as_millis() as u64,
+                    recommended_minimum_ms = XDS_LOW_UNHEALTHY_THRESHOLD_WARNING.as_millis() as u64,
+                    "XDS_UNHEALTHY_THRESHOLD is below the xDS reconnect backoff ceiling; routine reconnects may mark readiness unhealthy"
+                );
+            }
+        }
+        (false, Some(_)) => {
+            warn!(
+                "XDS_UNHEALTHY_THRESHOLD is set but no remote xDS is configured; readiness rearm is inert"
+            );
+        }
+        (_, None) => {
+            debug!("xDS readiness re-arm monitor disabled (XDS_UNHEALTHY_THRESHOLD not set)")
+        }
+    }
+    let ready_for_rearm = ready.clone();
+    let readiness_gate =
+        xds::readiness_monitor::XdsReadinessGate::new(ready_for_rearm, state_mgr_task);
+    let readiness_gate_for_panic = readiness_gate.clone();
     tokio::spawn(async move {
-        let _ = xds_rx_for_task.changed().await;
-        std::mem::drop(state_mgr_task);
+        let task = std::panic::AssertUnwindSafe(xds::readiness_monitor::run_readiness_task(
+            xds_connection_state_rx,
+            xds_rx_for_task,
+            readiness_gate,
+            xds_unhealthy_threshold,
+            xds_monitor_metrics,
+        ));
+        if futures::FutureExt::catch_unwind(task).await.is_err() {
+            // The gate used for panic recovery is owned outside the unwinding
+            // future, so any existing blocker is replaced with
+            // `xds monitor dead` if the monitor panics.
+            xds::readiness_monitor::park_monitor_dead_after_panic(readiness_gate_for_panic)
+                .await;
+        }
+        #[cfg(any(test, feature = "testing"))]
+        xds_readiness_monitor_exited_tx.send_replace(true);
     });
     let state = state_mgr.state();
 
@@ -147,7 +234,15 @@ pub async fn build_with_cert(
                 block_shutdown: true,
                 fut: Box::pin(async move {
                     tracing::info!("Starting ztunnel inbound listener task");
-                    let _ = xds_rx_for_inbound.changed().await;
+                    if !wait_for_initial_xds_sync(
+                        &mut xds_rx_for_inbound,
+                        remote_xds_configured,
+                        "ztunnel inbound listener",
+                    )
+                    .await
+                    {
+                        return Ok(());
+                    }
                     tokio::task::spawn(async move {
                         inbound.run().in_current_span().await;
                     })
@@ -170,7 +265,15 @@ pub async fn build_with_cert(
         data_plane_pool.send(DataPlaneTask {
             block_shutdown: true,
             fut: Box::pin(async move {
-                let _ = xds_rx_for_proxy.changed().await;
+                if !wait_for_initial_xds_sync(
+                    &mut xds_rx_for_proxy,
+                    remote_xds_configured,
+                    "in-pod proxy manager",
+                )
+                .await
+                {
+                    return Ok(());
+                }
                 run_future.in_current_span().await;
                 Ok(())
             }),
@@ -191,7 +294,15 @@ pub async fn build_with_cert(
                 data_plane_pool.send(DataPlaneTask {
                     block_shutdown: true,
                     fut: Box::pin(async move {
-                        let _ = xds_rx_for_proxy.changed().await;
+                        if !wait_for_initial_xds_sync(
+                            &mut xds_rx_for_proxy,
+                            remote_xds_configured,
+                            "dedicated proxy listener",
+                        )
+                        .await
+                        {
+                            return Ok(());
+                        }
                         proxy.run().in_current_span().await;
                         Ok(())
                     }),
@@ -215,7 +326,15 @@ pub async fn build_with_cert(
                 data_plane_pool.send(DataPlaneTask {
                     block_shutdown: true,
                     fut: Box::pin(async move {
-                        let _ = xds_rx_for_dns_proxy.changed().await;
+                        if !wait_for_initial_xds_sync(
+                            &mut xds_rx_for_dns_proxy,
+                            remote_xds_configured,
+                            "DNS proxy listener",
+                        )
+                        .await
+                        {
+                            return Ok(());
+                        }
                         dns_proxy.run().in_current_span().await;
                         Ok(())
                     }),
@@ -249,12 +368,71 @@ pub async fn build_with_cert(
         proxy_addresses,
         tcp_dns_proxy_address,
         udp_dns_proxy_address,
+        #[cfg(any(test, feature = "testing"))]
+        xds_connection_state: xds_connection_state_for_test,
+        #[cfg(any(test, feature = "testing"))]
+        xds_startup: xds_startup_for_test,
+        #[cfg(any(test, feature = "testing"))]
+        xds_readiness_monitor_exited: xds_readiness_monitor_exited_for_test,
     })
 }
 
 fn register_process_metrics(registry: &mut Registry) {
     #[cfg(unix)]
     registry.register_collector(Box::new(metrics::process::ProcessMetrics::new()));
+}
+
+fn warn_for_low_xds_unhealthy_threshold(threshold: std::time::Duration) -> bool {
+    threshold <= XDS_LOW_UNHEALTHY_THRESHOLD_WARNING
+}
+
+async fn wait_for_initial_xds_sync(
+    xds_rx: &mut tokio::sync::watch::Receiver<()>,
+    remote_xds_configured: bool,
+    component: &'static str,
+) -> bool {
+    match xds_rx.changed().await {
+        Ok(()) => true,
+        Err(_) if remote_xds_configured => {
+            tracing::error!(
+                component,
+                "xDS startup signal sender dropped before initial sync; not starting listener"
+            );
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn low_xds_unhealthy_threshold_warning_includes_backoff_ceiling() {
+        assert!(warn_for_low_xds_unhealthy_threshold(
+            std::time::Duration::from_secs(15)
+        ));
+        assert!(!warn_for_low_xds_unhealthy_threshold(
+            std::time::Duration::from_secs(16)
+        ));
+    }
+
+    #[tokio::test]
+    async fn remote_xds_startup_wait_fails_closed_when_sender_drops() {
+        let (tx, mut rx) = tokio::sync::watch::channel(());
+        drop(tx);
+
+        assert!(!wait_for_initial_xds_sync(&mut rx, true, "test proxy").await);
+    }
+
+    #[tokio::test]
+    async fn local_xds_startup_wait_allows_sender_drop() {
+        let (tx, mut rx) = tokio::sync::watch::channel(());
+        drop(tx);
+
+        assert!(wait_for_initial_xds_sync(&mut rx, false, "test proxy").await);
+    }
 }
 
 struct DataPlaneTask {
@@ -385,6 +563,13 @@ pub struct Bound {
 
     pub shutdown: signal::Shutdown,
     drain_tx: drain::DrainTrigger,
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) xds_connection_state: Option<tokio::sync::watch::Receiver<xds::XdsConnectionState>>,
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) xds_startup: tokio::sync::watch::Receiver<()>,
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) xds_readiness_monitor_exited: tokio::sync::watch::Receiver<bool>,
 }
 
 impl Bound {
