@@ -46,8 +46,8 @@ use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
 use crate::state::DemandProxyState;
 use crate::state::service::{IpFamily, Service, ServiceMatch};
-use crate::state::workload::Workload;
 use crate::state::workload::address::Address;
+use crate::state::workload::{HeadlessServiceMatch, Workload};
 use crate::strng::Strng;
 use crate::{config, dns};
 
@@ -234,19 +234,32 @@ impl Store {
             }
         };
 
+        let name_len = name.iter().len();
+        let svc_domain_len = self.svc_domain.iter().len();
+        // Check if name maybe headless pod hostname, i.e. either one of
+        // 1) <pod>.<subdomain>.<ns>.svc.<cluster-domain> : pod FQDN
+        // 3) <pod>.<subdomain>.<ns>.svc                  : partially qualified domain
+        // 2) <pod>.<subdomain>.<ns>                      : partially qualified domain
+        let maybe_pod_host = (name_len.wrapping_sub(svc_domain_len) == 3
+            && name.trim_to(svc_domain_len) == self.svc_domain)
+            || (name_len == 4 && name.trim_to(1).to_utf8() == "svc.")
+            || name_len == 3;
+
         // Insert the requested name.
         add_alias(Alias {
             name: name.clone(),
             stripped: None,
+            maybe_pod_host,
         });
 
         let namespaced_domain = append_name(as_name(&client.namespace), &self.svc_domain);
 
         // If the name can be expanded to a k8s FQDN, add that as well.
-        for kube_fqdn in self.to_kube_fqdns(name, &namespaced_domain) {
+        for (kube_fqdn, maybe_pod_host) in self.to_kube_fqdns(name, &namespaced_domain) {
             add_alias(Alias {
                 name: kube_fqdn,
                 stripped: None,
+                maybe_pod_host,
             });
         }
 
@@ -257,13 +270,17 @@ impl Store {
                 add_alias(Alias {
                     name: stripped_name.clone(),
                     stripped: Some(stripped_name.clone()),
+                    maybe_pod_host,
                 });
 
                 // If the name can be expanded to a k8s FQDN, add that as well.
-                for kube_fqdn in self.to_kube_fqdns(&stripped_name, &namespaced_domain) {
+                for (kube_fqdn, maybe_pod_host) in
+                    self.to_kube_fqdns(&stripped_name, &namespaced_domain)
+                {
                     add_alias(Alias {
                         name: kube_fqdn,
                         stripped: Some(stripped_name.clone()),
+                        maybe_pod_host,
                     });
                 }
             }
@@ -284,7 +301,7 @@ impl Store {
     ///
     /// Everything else will not be handled directly by Ambient and will instead
     /// just be forwarded to k8s.
-    fn to_kube_fqdns(&self, name: &Name, namespaced_domain: &Name) -> Vec<Name> {
+    fn to_kube_fqdns(&self, name: &Name, namespaced_domain: &Name) -> Vec<(Name, bool)> {
         let mut out = Vec::new();
 
         // Rather than just blindly adding every possible extension, only add the extensions
@@ -294,32 +311,32 @@ impl Store {
             1 => {
                 // Only one label in the name. Assume the client is calling a service by name
                 // within the same namespace. Append "<ns>.svc.cluster.local".
-                out.push(append_name(name.clone(), namespaced_domain));
+                out.push((append_name(name.clone(), namespaced_domain), false));
             }
             2 => {
                 // Expand <service-name>.<namespace> to
                 // <service-name>.<namespace>.svc.<cluster-domain>.
-                out.push(append_name(name.clone(), &self.svc_domain));
+                out.push((append_name(name.clone(), &self.svc_domain), false));
                 // Expand <pod-hostname>.<pod-sub-domain> to
                 // <pod-hostname>.<pod-sub-domain>.<namespace>.svc.<cluster-domain>.
-                out.push(append_name(name.clone(), namespaced_domain));
+                out.push((append_name(name.clone(), namespaced_domain), true));
             }
             3 => {
                 if has_domain(name, SVC.deref()) {
                     // Expand <service-name>.<namespace>.svc to
                     // <service-name>.<namespace>.svc.<cluster-domain>.
-                    out.push(append_name(name.clone(), &self.domain));
+                    out.push((append_name(name.clone(), &self.domain), false));
                 }
 
                 // Expand <pod-hostname>.<pod-sub-domain>.<namespace> to
                 // <pod-hostname>.<pod-sub-domain>.<namespace>.svc.<cluster-domain>.
-                out.push(append_name(name.clone(), &self.svc_domain));
+                out.push((append_name(name.clone(), &self.svc_domain), true));
             }
             4 => {
                 if has_domain(name, SVC.deref()) {
                     // Expand <pod-hostname>.<pod-sub-domain>.<namespace>.svc to
                     // <pod-hostname>.<pod-sub-domain>.<namespace>.svc.<cluster-domain>.
-                    out.push(append_name(name.clone(), &self.domain));
+                    out.push((append_name(name.clone(), &self.domain), true));
                 }
             }
             _ => {
@@ -329,6 +346,16 @@ impl Store {
         }
 
         out
+    }
+
+    /// Returns the cluster-local domain suffix used to identify Kubernetes headless services,
+    /// e.g. `.svc.cluster.local` (no trailing dot).
+    fn kubernetes_cluster_local_domain(&self) -> String {
+        let domain = ".".to_string() + &self.svc_domain.to_utf8();
+        domain
+            .strip_suffix('.')
+            .expect("the svc domain must have a trailing '.'")
+            .to_string()
     }
 
     fn find_server(&self, client: &Workload, requested_name: &Name) -> Option<ServerMatch> {
@@ -368,19 +395,9 @@ impl Store {
                     .flatten()
                     // Remove things without a VIP, unless they are Kubernetes headless services.
                     // This will trigger us to forward upstream.
-                    // TODO: we should have a reliable way to distinguish these. In sidecars, we use
-                    // `svc.Attributes.ServiceRegistry`, but we don't pass anything similar over WDS.
-                    // For now, checking the domain is good enough.
-                    // This does mean a `.svc.cluster.local` ServiceEntry will use these semantics, but
-                    // its better than *ALL* ServiceEntry doing this
                     .filter(|service| {
-                        // Domain will be like `.svc.cluster.local.` (trailing .), so ignore the last character.
-                        let domain = ".".to_string() + &self.svc_domain.to_utf8();
-
-                        let domain = domain
-                            .strip_suffix('.')
-                            .expect("the svc domain must have a trailing '.'");
-                        !service.vips.is_empty() || service.hostname.ends_with(domain)
+                        let domain = self.kubernetes_cluster_local_domain();
+                        !service.vips.is_empty() || service.is_kubernetes_headless(&domain)
                     })
                     // Get the service matching the client namespace. If no match exists, just
                     // return the first service.
@@ -405,7 +422,35 @@ impl Store {
                         alias,
                     });
                 }
-                // TODO(): add support for workload lookups for headless pods
+            }
+
+            if alias.maybe_pod_host && alias.name.num_labels() > 1 {
+                trace!("checking headless svc {:#?}", alias);
+
+                let mut name = alias.name.into_iter();
+                let pod_name = str::from_utf8(name.next().unwrap()).unwrap();
+                let service_suffix = Name::from_labels(name).unwrap().to_utf8();
+                let service_suffix = service_suffix
+                    .strip_suffix('.')
+                    .expect("the svc domain must have a trailing '.'");
+
+                let cluster_local_domain = self.kubernetes_cluster_local_domain();
+                if let Some(wl) = HeadlessServiceMatch::find_best_match(
+                    state.workloads.find_headless_pod_workloads(
+                        pod_name,
+                        service_suffix,
+                        &state.services,
+                        &cluster_local_domain,
+                    ),
+                    &client.namespace,
+                    &client.cluster_id,
+                ) {
+                    return Some(ServerMatch {
+                        server: Address::Workload(wl),
+                        name: alias.name.clone(),
+                        alias,
+                    });
+                }
             }
         }
 
@@ -720,6 +765,10 @@ struct Alias {
     /// If `Some`, indicates that this alias was generated from the requested host that
     /// was stripped of
     stripped: Option<Name>,
+
+    /// True if this alias may represent a pod host (i.e. a host from a headless service).
+    /// False if it's definitely not a pod host.
+    maybe_pod_host: bool,
 }
 
 impl Display for Alias {
@@ -972,7 +1021,7 @@ mod tests {
         struct Case {
             host: &'static str,
             client_namespace: &'static str,
-            expected: Vec<Name>,
+            expected: Vec<(Name, bool)>,
         }
 
         let cases: &[Case] = &[
@@ -982,7 +1031,7 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <service-name>
-                    n("name.ns1.svc.cluster.local."),
+                    (n("name.ns1.svc.cluster.local."), false),
                 ],
             },
             Case {
@@ -990,7 +1039,7 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <service-name>
-                    n("name.ns1.svc.cluster.local."),
+                    (n("name.ns1.svc.cluster.local."), false),
                 ],
             },
             Case {
@@ -998,9 +1047,9 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <service-name>.<namespace>
-                    n("name.ns2.svc.cluster.local."),
+                    (n("name.ns2.svc.cluster.local."), false),
                     // Generated based on form: <pod-hostname>.<pod-sub-domain>
-                    n("name.ns2.ns1.svc.cluster.local."),
+                    (n("name.ns2.ns1.svc.cluster.local."), true),
                 ],
             },
             Case {
@@ -1008,9 +1057,9 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <service-name>.<namespace>.svc
-                    n("name.ns2.svc.cluster.local."),
+                    (n("name.ns2.svc.cluster.local."), false),
                     // Generated based on form: <pod-hostname>.<pod-sub-domain>.<namespace>
-                    n("name.ns2.svc.svc.cluster.local."),
+                    (n("name.ns2.svc.svc.cluster.local."), true),
                 ],
             },
             Case {
@@ -1018,7 +1067,7 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <pod-hostname>.<pod-sub-domain>.<namespace>
-                    n("name.ns2.not-svc.svc.cluster.local."),
+                    (n("name.ns2.not-svc.svc.cluster.local."), true),
                 ],
             },
             Case {
@@ -1026,7 +1075,7 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <pod-hostname>.<pod-sub-domain>.<namespace>.svc
-                    n("pod.sub-domain.ns.svc.cluster.local."),
+                    (n("pod.sub-domain.ns.svc.cluster.local."), true),
                 ],
             },
             Case {
@@ -1052,7 +1101,7 @@ mod tests {
                 client_namespace: "ns1",
                 expected: vec![
                     // Generated based on form: <pod-hostname>.<pod-sub-domain>.<namespace>.
-                    n("www.google.com.svc.cluster.local."),
+                    (n("www.google.com.svc.cluster.local."), true),
                 ],
             },
         ];
@@ -1097,6 +1146,74 @@ mod tests {
             n("*.local."),
         ];
         assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn test_get_aliases_maybe_pod_host() {
+        let mut wl = test_default_workload();
+        wl.namespace = NS1.into();
+
+        let (state, local_workload) = state();
+        let store = Store {
+            domain: as_name("cluster.local"),
+            svc_domain: as_name("svc.cluster.local."),
+            state,
+            forwarder: forwarder(),
+            metrics: test_metrics(),
+            local_workload,
+            prefered_service_namespace: None,
+            ipv6_enabled: true,
+        };
+
+        struct Case {
+            host: &'static str,
+            expect_maybe_pod_host: bool,
+            expect_expanded_fqdn: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                host: "pod-0.headless.ns1.svc.cluster.local.",
+                expect_maybe_pod_host: true,
+                expect_expanded_fqdn: None,
+            },
+            Case {
+                host: "pod-0.headless.ns1.svc.",
+                expect_maybe_pod_host: true,
+                expect_expanded_fqdn: Some("pod-0.headless.ns1.svc.cluster.local."),
+            },
+            Case {
+                host: "pod-0.headless.ns1.",
+                expect_maybe_pod_host: true,
+                expect_expanded_fqdn: Some("pod-0.headless.ns1.svc.cluster.local."),
+            },
+            Case {
+                host: "headless.ns1.svc.cluster.local.",
+                expect_maybe_pod_host: false,
+                expect_expanded_fqdn: None,
+            },
+        ];
+
+        for c in cases {
+            let aliases = store.get_aliases(&wl, &n(c.host));
+            assert_eq!(
+                c.expect_maybe_pod_host,
+                aliases
+                    .iter()
+                    .any(|a| a.name == n(c.host) && a.maybe_pod_host),
+                "requested host: {}",
+                c.host
+            );
+            if let Some(fqdn) = c.expect_expanded_fqdn {
+                assert!(
+                    aliases
+                        .iter()
+                        .any(|a| a.name == n(fqdn) && a.maybe_pod_host),
+                    "expected expanded FQDN alias {fqdn} for host {}",
+                    c.host
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -1355,20 +1472,35 @@ mod tests {
                 expect_answers: vec![],
                 ..Default::default()
             },
-            // TODO(https://github.com/istio/ztunnel/issues/1119)
             Case {
-                name: "todo: k8s pod - fqdn",
-                host: "headless.pod0.ns1.svc.cluster.local.",
-                expect_authoritative: false, // forwarded.
-                expect_code: ResponseCode::NXDomain,
+                name: "success: headless pod FQDN",
+                host: "pod-0.headless.ns1.svc.cluster.local.",
+                expect_answers: vec![a(
+                    n("pod-0.headless.ns1.svc.cluster.local."),
+                    ipv4("30.30.30.30"),
+                )],
                 ..Default::default()
             },
-            // TODO(https://github.com/istio/ztunnel/issues/1119)
             Case {
-                name: "todo: k8s pod - name.domain.ns",
-                host: "headless.pod0.ns1.",
-                expect_authoritative: false, // forwarded.
-                expect_code: ResponseCode::NXDomain,
+                name: "success: headless pod FQDN AAAA",
+                host: "pod-0.headless.ns1.svc.cluster.local.",
+                query_type: RecordType::AAAA,
+                expect_answers: vec![aaaa(
+                    n("pod-0.headless.ns1.svc.cluster.local."),
+                    ipv6("2001:db8::30"),
+                )],
+                ..Default::default()
+            },
+            Case {
+                name: "success: headless pod partial pod.subdomain.ns.svc",
+                host: "pod-0.headless.ns1.svc.",
+                expect_answers: vec![a(n("pod-0.headless.ns1.svc."), ipv4("30.30.30.30"))],
+                ..Default::default()
+            },
+            Case {
+                name: "success: headless pod partial pod.subdomain.ns",
+                host: "pod-0.headless.ns1.",
+                expect_answers: vec![a(n("pod-0.headless.ns1."), ipv4("30.30.30.30"))],
                 ..Default::default()
             },
             Case {
@@ -1796,7 +1928,7 @@ mod tests {
             local_workload(),
             // Workloads backing headless service.
             xds_workload(
-                "headless0",
+                "pod-0",
                 NS1,
                 "headless.pod0.ns1.svc.cluster.local",
                 &NW1,
