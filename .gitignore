@@ -2,3 +2,4 @@ out/
 var/
 .idea/
 .vscode/
+hack/spire-test/.cache/

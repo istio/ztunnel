@@ -1,0 +1,72 @@
+# Strategic-merge patch applied to istio-system/ztunnel after the ambient
+# install. Switches ztunnel to the SPIFFE Broker provider and mounts both the
+# Workload API socket (for ztunnel's own SVID bootstrap) and the Broker
+# socket (mTLS-gated, used for per-workload SVIDs). The KubernetesObject
+# attestor resolves workloads via the Kubernetes API, so no `hostPID` or
+# `/proc` access is required.
+#
+# Apply with:
+#   kubectl -n istio-system patch ds ztunnel --patch-file ztunnel-patch.yaml
+spec:
+  template:
+    spec:
+      containers:
+        - name: istio-proxy
+          # The SPIRE agent's broker UDS is created mode 0770 owned by
+          # uid 1000:gid 1000 (the agent's own identity). ztunnel's
+          # default `drop: ALL` strips CAP_DAC_OVERRIDE, so even though
+          # the process is root it cannot connect to a socket whose
+          # owner+group don't match. Add DAC_OVERRIDE so root can
+          # traverse the socket. Authn is still gated end-to-end by
+          # mTLS, so this does not weaken the broker's auth model.
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - SYS_ADMIN
+                - NET_RAW
+                - DAC_OVERRIDE
+              drop:
+                - ALL
+          env:
+            - name: CA_PROVIDER
+              value: spiffe_broker
+            # mTLS-gated SPIFFE Broker endpoint exposed by the SPIRE agent
+            # (configured via experimental.broker in agent.conf).
+            - name: SPIFFE_BROKER_SOCKET
+              value: /run/spire/broker-sockets/broker.sock
+            # SPIFFE Workload API socket. Used by ztunnel to bootstrap
+            # its own SVID before dialling the broker; the agent
+            # authenticates this caller via SO_PEERCRED.
+            - name: SPIFFE_BROKER_WORKLOAD_API_SOCKET
+              value: /run/spire/agent-sockets/spire-agent.sock
+            # SPIFFE ID that the Workload API is expected to issue for
+            # ztunnel itself. Matches the SPIRE registration entry the
+            # umbrella chart creates for the istio-system/ztunnel SA.
+            - name: SPIFFE_BROKER_WORKLOAD_API_SPIFFE_ID
+              value: spiffe://cluster.local/ns/istio-system/sa/ztunnel
+            - name: SPIFFE_BROKER_ATTESTATION
+              # Use the KubernetesObjectReference attestor — ztunnel sends
+              # the pod's (namespace,name,uid) directly to the broker and
+              # the broker server resolves the workload via the
+              # Kubernetes API. This is the only attestor ztunnel ships
+              # today; it needs no `hostPID`/`/proc` access.
+              value: k8s_object
+            - name: SPIFFE_BROKER_TIMEOUT
+              value: 10s
+          volumeMounts:
+            - name: spire-agent-sockets
+              mountPath: /run/spire/agent-sockets
+              readOnly: true
+            - name: spire-broker-sockets
+              mountPath: /run/spire/broker-sockets
+              readOnly: true
+      volumes:
+        - name: spire-agent-sockets
+          hostPath:
+            path: /run/spire/agent-sockets
+            type: DirectoryOrCreate
+        - name: spire-broker-sockets
+          hostPath:
+            path: /run/spire/broker-sockets
+            type: DirectoryOrCreate

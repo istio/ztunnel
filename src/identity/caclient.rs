@@ -199,8 +199,13 @@ impl CaClient {
 
 #[async_trait]
 impl crate::identity::CaClientTrait for CaClient {
-    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
-        self.fetch_certificate(id).await
+    async fn fetch_certificate(
+        &self,
+        req: &crate::identity::manager::CertRequest,
+    ) -> Result<tls::WorkloadCertificate, Error> {
+        // The Istio CA only uses the SPIFFE identity; `req.workload` is
+        // intentionally ignored here.
+        self.fetch_certificate(&req.identity).await
     }
 }
 
@@ -219,6 +224,10 @@ pub mod mock {
     #[derive(Default)]
     struct ClientState {
         fetches: Vec<Identity>,
+        // For each fetch (in order), whether `req.workload` was supplied. Lets
+        // tests assert that the workload-keyed (SPIFFE Broker) path carries
+        // WorkloadInfo on every fetch, including background refreshes.
+        workload_present: Vec<bool>,
         error: bool,
         cert_gen: tls::mock::CertGenerator,
     }
@@ -272,6 +281,13 @@ pub mod mock {
             self.state.write().await.fetches.clear();
         }
 
+        // Returns, in order, whether each fetch carried per-workload attestation
+        // context (`req.workload`). Used to verify the SPIFFE Broker path keeps
+        // supplying WorkloadInfo across background refreshes.
+        pub async fn workload_present(&self) -> Vec<bool> {
+            self.state.read().await.workload_present.clone()
+        }
+
         async fn fetch_certificate(
             &self,
             id: &Identity,
@@ -321,9 +337,18 @@ pub mod mock {
     impl crate::identity::CaClientTrait for CaClient {
         async fn fetch_certificate(
             &self,
-            id: &Identity,
+            req: &crate::identity::manager::CertRequest,
         ) -> Result<tls::WorkloadCertificate, Error> {
-            self.fetch_certificate(id).await
+            // Record whether the caller supplied per-workload context. The Istio
+            // CA path leaves it None; the SPIFFE Broker (workload-keyed) path
+            // must supply it on every fetch, including background refreshes.
+            self.state
+                .write()
+                .await
+                .workload_present
+                .push(req.workload.is_some());
+            // Mock matches the real Istio CA shape otherwise: ignore `req.workload`.
+            self.fetch_certificate(&req.identity).await
         }
     }
 }

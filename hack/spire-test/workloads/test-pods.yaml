@@ -1,0 +1,50 @@
+# Two test pods sharing one ServiceAccount, used by verify.sh to assert
+# that ztunnel mints a distinct SVID per pod (the whole point of running
+# the broker provider with per-pod attestation).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ztunnel-broker-test
+  labels:
+    # Enable ambient mesh for this namespace so traffic flows through ztunnel
+    # and SVIDs get minted.
+    istio.io/dataplane-mode: ambient
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: probe
+  namespace: ztunnel-broker-test
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-a
+  namespace: ztunnel-broker-test
+  labels:
+    app: ztunnel-broker-test
+    probe: a
+spec:
+  serviceAccountName: probe
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: probe
+      image: docker.io/fortio/fortio:latest
+      args: ["server", "-http-port", "8080"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-b
+  namespace: ztunnel-broker-test
+  labels:
+    app: ztunnel-broker-test
+    probe: b
+spec:
+  serviceAccountName: probe
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: probe
+      image: docker.io/fortio/fortio:latest
+      args: ["server", "-http-port", "8080"]

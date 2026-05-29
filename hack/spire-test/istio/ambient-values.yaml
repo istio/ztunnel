@@ -1,0 +1,22 @@
+# Istio ambient profile overrides for the SPIFFE Broker testbed.
+#
+# We install ambient as usual; the broker-specific ztunnel daemonset
+# overrides live in `ztunnel-patch.yaml` and are applied after install.
+#
+# The image override here keeps `make build && kind load docker-image`
+# in the loop; setup.sh fills `image.tag` from $ZTUNNEL_IMAGE.
+
+profile: ambient
+
+values:
+  global:
+    proxy_init:
+      image: proxyv2
+  pilot:
+    enabled: true
+  ztunnel:
+    enabled: true
+    # Image is interpolated by setup.sh from $ZTUNNEL_IMAGE.
+    image: ""
+    # Pull from the kind-loaded local store; no registry round-trip.
+    imagePullPolicy: IfNotPresent
