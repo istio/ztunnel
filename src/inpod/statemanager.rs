@@ -296,6 +296,10 @@ impl WorkloadProxyManagerState {
             .new_proxies_from_factory(
                 Some(drain_rx),
                 workload_info.clone(),
+                // Forward the pod UID to the proxy factory; only used when
+                // the SPIFFE Broker provider is active, but we always supply
+                // it so the call site is unconditional.
+                Some(workload_uid.clone().into_string().into()),
                 Arc::from(self.inpod_config.socket_factory(netns)),
             )
             .await?;
