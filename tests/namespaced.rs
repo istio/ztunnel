@@ -48,7 +48,7 @@ mod namespaced {
     use ztunnel::test_helpers::netns::{Namespace, Resolver};
     use ztunnel::test_helpers::*;
 
-    use ztunnel::{identity, strng, telemetry};
+    use ztunnel::{config, identity, strng, telemetry};
 
     use crate::namespaced::WorkloadMode::Captured;
     use ztunnel::setup_netns_test;
@@ -1025,7 +1025,7 @@ mod namespaced {
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
                 let cert = zt.cert_manager.fetch_certificate(id).await?;
-                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
+                let connector = cert.outbound_connector(vec![dst_id], None).unwrap();
                 let hbone = SocketAddr::new(srv.ip(), 15008);
                 let tcp_stream = TcpStream::connect(hbone).await.unwrap();
                 let tls_stream = connector.connect(tcp_stream).await.unwrap();
@@ -1087,7 +1087,7 @@ mod namespaced {
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
                 let cert = zt.cert_manager.fetch_certificate(id).await?;
-                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
+                let connector = cert.outbound_connector(vec![dst_id], None).unwrap();
                 let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
                     .await
                     .unwrap();
@@ -1169,7 +1169,7 @@ mod namespaced {
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
                 let cert = zt.cert_manager.fetch_certificate(id).await?;
-                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
+                let connector = cert.outbound_connector(vec![dst_id], None).unwrap();
                 let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
                     .await
                     .unwrap();
@@ -1507,6 +1507,186 @@ mod namespaced {
         Ok(())
     }
 
+    /// Inbound connections must be terminated when CRL revokes cert in chain presented.
+    #[tokio::test]
+    async fn crl_inbound_rejects_revoked_cert() -> anyhow::Result<()> {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+        use ztunnel::tls::mock::crl_pem_revoking_cert;
+
+        let mut manager = setup_netns_test!(Shared);
+
+        // Deploy the local (client-side) ztunnel first so we can access its cert_manager.
+        let local_zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+
+        // The cert the client ztunnel presents to the server during HBONE mTLS is the client
+        // workload's cert.
+        let revoked_cert = local_zt
+            .cert_manager
+            .fetch_certificate(&identity::Identity::from_parts(
+                identity::DEFAULT_TRUST_DOMAIN.into(),
+                "default".into(),
+                "client".into(),
+            ))
+            .await?;
+
+        // Generate a CRL that revokes the client workload's cert by its serial.
+        let crl_pem = crl_pem_revoking_cert(&revoked_cert.cert.serial_bytes());
+        let mut crl_file = NamedTempFile::new()?;
+        crl_file.write_all(crl_pem.as_bytes())?;
+        crl_file.flush()?;
+
+        // Deploy the remote/server-side ztunnel with CRL enforcement enabled so it rejects
+        // the revoked client cert on inbound.
+        let remote_zt = manager
+            .deploy_dedicated_ztunnel(
+                REMOTE_NODE,
+                Some(config::Config {
+                    crl_path: Some(crl_file.path().to_path_buf()),
+                    ..config::parse_config().unwrap()
+                }),
+                None,
+            )
+            .await?;
+
+        run_tcp_server(
+            manager
+                .workload_builder("server", REMOTE_NODE)
+                .hbone()
+                .register()
+                .await?,
+        )?;
+
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+        let srv = resolve_target(manager.resolver(), "server");
+
+        // Run a TCP client expecting the connection to be terminated because the server ztunnel's
+        // inbound CRL check rejects the client cert.
+        client
+            .run(move || async move {
+                info!("Running client (expecting failure) to {srv}");
+                let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(srv))
+                    .await
+                    .context("connect timeout")?
+                    .context("connect failed")?;
+                let mut buf = [0u8; 128];
+                let result = timeout(Duration::from_secs(5), stream.read(&mut buf))
+                    .await
+                    .context("read timeout")?;
+                match result {
+                    Ok(0) | Err(_) => Ok(()), // EOF or IO error: rejected as expected
+                    Ok(n) => anyhow::bail!(
+                        "expected connection failure but received {n} bytes: {:?}",
+                        &buf[..n]
+                    ),
+                }
+            })?
+            .join()
+            .unwrap()?;
+
+        // Verify the server-side ztunnel incremented the CRL rejection counter (reporter=destination).
+        verify_metric_exists(
+            &remote_zt,
+            "istio_crl_policy_rejections_total",
+            &destination_labels(),
+        )
+        .await;
+
+        Ok(())
+    }
+
+    /// Outbound connections to a workload whose cert is revoked by the CRL must be rejected.
+    #[tokio::test]
+    async fn crl_outbound_rejects_revoked_cert() -> anyhow::Result<()> {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+        use ztunnel::tls::mock::crl_pem_revoking_cert;
+
+        let mut manager = setup_netns_test!(Shared);
+
+        // Deploy the remote (server-side) ztunnel first so we can access its cert_manager.
+        let remote_zt = manager.deploy_ztunnel(REMOTE_NODE).await?;
+
+        // cert the server ztunnel presents to the client ztunnel is the server workload's cert
+        let revoked_cert = remote_zt
+            .cert_manager
+            .fetch_certificate(&identity::Identity::from_parts(
+                identity::DEFAULT_TRUST_DOMAIN.into(),
+                "default".into(),
+                "server".into(),
+            ))
+            .await?;
+
+        // Generate a CRL that revokes the server workload's cert by its serial.
+        let crl_pem = crl_pem_revoking_cert(&revoked_cert.cert.serial_bytes());
+        let mut crl_file = NamedTempFile::new()?;
+        crl_file.write_all(crl_pem.as_bytes())?;
+        crl_file.flush()?;
+
+        // deploy the local/client-side ztunnel with CRL enforcement enabled
+        let local_zt = manager
+            .deploy_dedicated_ztunnel(
+                DEFAULT_NODE,
+                Some(config::Config {
+                    crl_path: Some(crl_file.path().to_path_buf()),
+                    ..config::parse_config().unwrap()
+                }),
+                None,
+            )
+            .await?;
+        run_tcp_server(
+            manager
+                .workload_builder("server", REMOTE_NODE)
+                .hbone()
+                .register()
+                .await?,
+        )?;
+
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+        let srv = resolve_target(manager.resolver(), "server");
+
+        // run a TCP client expecting the connection to be terminated due to the CRL revoking the server workload's cert
+        client
+            .run(move || async move {
+                info!("Running client (expecting failure) to {srv}");
+                // TCP connect to ztunnel's outbound listener succeeds.
+                // ztunnel attempts HBONE/TLS connection upstream.
+                // CRL check should fail the HBONE connection, causing downstream application connection.
+                let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(srv))
+                    .await
+                    .context("connect timeout")?
+                    .context("connect failed")?;
+                let mut buf = [0u8; 128];
+                let result = timeout(Duration::from_secs(5), stream.read(&mut buf))
+                    .await
+                    .context("read timeout")?;
+                match result {
+                    Ok(0) | Err(_) => Ok(()), // EOF or IO error: rejected as expected
+                    Ok(n) => anyhow::bail!(
+                        "expected connection failure but received {n} bytes: {:?}",
+                        &buf[..n]
+                    ),
+                }
+            })?
+            .join()
+            .unwrap()?;
+
+        // Verify the client-side ztunnel incremented the CRL rejection counter.
+        verify_metric_exists(
+            &local_zt,
+            "istio_crl_policy_rejections_total",
+            &source_labels(),
+        )
+        .await;
+
+        Ok(())
+    }
     const TEST_VIP: &str = "10.10.0.1";
     const TEST_VIP2: &str = "10.10.0.2";
     const TEST_VIP3: &str = "10.10.0.3";
@@ -1553,6 +1733,7 @@ mod namespaced {
                 manager
                     .deploy_dedicated_ztunnel(
                         node,
+                        None,
                         Some(WorkloadInfo {
                             name: "client".to_string(),
                             namespace: "default".to_string(),
@@ -1573,6 +1754,7 @@ mod namespaced {
                         manager
                             .deploy_dedicated_ztunnel(
                                 node,
+                                None,
                                 Some(WorkloadInfo {
                                     name: "server".to_string(),
                                     namespace: "default".to_string(),

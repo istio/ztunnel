@@ -130,6 +130,9 @@ impl Inbound {
                     let tls = match acceptor.accept(raw_socket).await {
                         Ok(tls) => tls,
                         Err(e) => {
+                            if crate::tls::tls_error_is_cert_revoked(&e) {
+                                pi.metrics.record_crl_rejection(Reporter::destination);
+                            }
                             metrics::log_early_deny(src, dst, Reporter::destination, e);
 
                             return Err::<(), _>(proxy::Error::SelfCall);

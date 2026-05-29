@@ -196,3 +196,74 @@ impl ServerCertProvider for MockServerCertProvider {
         Ok(Arc::new(sc))
     }
 }
+
+/// Sign a PEM CRL with `ca_key` that revokes the given serial number.
+/// Requires the CA cert (whose key is `ca_key`) to have been issued with the `cRLSign` key usage.
+/// The CRL issuer DN is set to `O=cluster.local` to match what `generate_test_certs_with_root`
+/// embeds as the issuer field in issued leaf certs and what `TEST_ROOT` sets for its subject.
+#[cfg(any(test, feature = "testing"))]
+pub fn crl_pem_revoking_cert(revoked_serial: &[u8]) -> String {
+    use rcgen::*;
+
+    let ca_kp = KeyPair::from_pem(std::str::from_utf8(TEST_ROOT_KEY).unwrap()).unwrap();
+    let mut ca_params = rcgen::CertificateParams::default();
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::OrganizationName, "cluster.local");
+    ca_params.distinguished_name = dn;
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let now = time::OffsetDateTime::now_utc();
+    let crl_params = CertificateRevocationListParams {
+        this_update: now,
+        next_update: now + time::Duration::days(30),
+        crl_number: SerialNumber::from(1u64),
+        issuing_distribution_point: None,
+        revoked_certs: vec![RevokedCertParams {
+            serial_number: SerialNumber::from_slice(revoked_serial),
+            revocation_time: now,
+            reason_code: Some(RevocationReason::KeyCompromise),
+            invalidity_date: None,
+        }],
+        key_identifier_method: KeyIdMethod::Sha256,
+    };
+    let issuer = Issuer::from_params(&ca_params, &ca_kp);
+    crl_params
+        .signed_by(&issuer)
+        .expect("sign CRL")
+        .pem()
+        .expect("CRL PEM")
+}
+
+/// Generate an intermediate CA certificate signed by `root_ca_key`, using the same `O=cluster.local` DN as `TEST_ROOT`.
+/// Returns the IA key (PEM), cert (PEM), and serial number (bytes).
+#[cfg(test)]
+pub fn generate_intermediate_ca(root_ca_key: &[u8]) -> (String, String, Vec<u8>) {
+    use rcgen::*;
+
+    let ia_kp = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("generate IA key");
+    let root_kp = KeyPair::from_pem(std::str::from_utf8(root_ca_key).unwrap()).unwrap();
+
+    let ia_serial = SerialNumber::from(12345u64);
+
+    let mut ia_params = CertificateParams::default();
+    ia_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ia_params.serial_number = Some(ia_serial.clone());
+    ia_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::OrganizationName, "cluster.local");
+    ia_params.distinguished_name = dn;
+
+    let mut root_params = CertificateParams::default();
+    let mut root_dn = DistinguishedName::new();
+    root_dn.push(DnType::OrganizationName, "cluster.local");
+    root_params.distinguished_name = root_dn;
+    root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let root_issuer = Issuer::from_params(&root_params, &root_kp);
+
+    let ia_cert_pem = ia_params
+        .signed_by(&ia_kp, &root_issuer)
+        .expect("IA cert sign by root failed")
+        .pem();
+    let ia_key_pem = ia_kp.serialize_pem();
+    (ia_key_pem, ia_cert_pem, ia_serial.to_bytes())
+}
