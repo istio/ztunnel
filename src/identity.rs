@@ -26,6 +26,8 @@ mod auth;
 use crate::state::WorkloadInfo;
 pub use auth::*;
 
+pub mod metrics;
+
 #[cfg(any(test, feature = "testing"))]
 pub mod mock {
     pub use super::caclient::mock::CaClient;

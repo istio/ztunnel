@@ -148,6 +148,10 @@ Metrics for the data plane worker pool Tokio runtime.
 - Worker park count (`tokio_worker_park_count`): Per-worker counter with `worker` label
 - Worker park/unpark count (`tokio_worker_park_unpark_count`): Per-worker counter with `worker` label
 
+#### Identity metrics
+
+- Workload certificate expiry (`istio_cert_expiry_seconds`): Unix timestamp when the workload certificate expires, labeled by `identity` (SPIFFE URI)
+
 ## Logging
 
 Ztunnel exposes a variety of logs, both operational and "access logs".
