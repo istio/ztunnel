@@ -1025,7 +1025,9 @@ mod namespaced {
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
                 let cert = zt.cert_manager.fetch_certificate(id).await?;
-                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
+                let connector = cert
+                    .outbound_connector(vec![dst_id], &ztunnel::tls::resolve_mesh_config(None))
+                    .unwrap();
                 let hbone = SocketAddr::new(srv.ip(), 15008);
                 let tcp_stream = TcpStream::connect(hbone).await.unwrap();
                 let tls_stream = connector.connect(tcp_stream).await.unwrap();
@@ -1087,7 +1089,9 @@ mod namespaced {
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
                 let cert = zt.cert_manager.fetch_certificate(id).await?;
-                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
+                let connector = cert
+                    .outbound_connector(vec![dst_id], &ztunnel::tls::resolve_mesh_config(None))
+                    .unwrap();
                 let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
                     .await
                     .unwrap();
@@ -1169,7 +1173,9 @@ mod namespaced {
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
                 let cert = zt.cert_manager.fetch_certificate(id).await?;
-                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
+                let connector = cert
+                    .outbound_connector(vec![dst_id], &ztunnel::tls::resolve_mesh_config(None))
+                    .unwrap();
                 let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
                     .await
                     .unwrap();

@@ -14,7 +14,7 @@
 
 use crate::config::RootCert;
 use crate::identity::AuthSource;
-use crate::tls::lib::provider;
+use crate::tls::mesh_config::default_mesh_config;
 use crate::tls::{ControlPlaneClientCertProvider, Error, WorkloadCertificate};
 use hyper::Uri;
 use hyper::body::Incoming;
@@ -117,7 +117,10 @@ impl ServerCertVerifier for AltHostnameVerifier {
     ) -> Result<ServerCertVerified, rustls::Error> {
         let cert = rustls::server::ParsedCertificate::try_from(end_entity)?;
 
-        let algs = provider().signature_verification_algorithms;
+        let algs = default_mesh_config()
+            .provider
+            .clone()
+            .signature_verification_algorithms;
         rustls::client::verify_server_cert_signed_by_trust_anchor(
             &cert,
             &self.roots,
@@ -155,7 +158,10 @@ impl ServerCertVerifier for AltHostnameVerifier {
             message,
             cert,
             dss,
-            &provider().signature_verification_algorithms,
+            &default_mesh_config()
+                .provider
+                .clone()
+                .signature_verification_algorithms,
         )
     }
 
@@ -169,12 +175,17 @@ impl ServerCertVerifier for AltHostnameVerifier {
             message,
             cert,
             dss,
-            &provider().signature_verification_algorithms,
+            &default_mesh_config()
+                .provider
+                .clone()
+                .signature_verification_algorithms,
         )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        provider()
+        default_mesh_config()
+            .provider
+            .clone()
             .signature_verification_algorithms
             .supported_schemes()
     }
@@ -185,8 +196,9 @@ pub(crate) async fn control_plane_client_config(
     alt_hostname: Option<String>,
 ) -> Result<ClientConfig, Error> {
     let roots = root_to_store(root_cert).await?;
-    let c = ClientConfig::builder_with_provider(provider())
-        .with_protocol_versions(crate::tls::tls_versions())?;
+    let defaults = default_mesh_config();
+    let c = ClientConfig::builder_with_provider(defaults.provider.clone())
+        .with_protocol_versions(defaults.tls_versions())?;
     if let Some(alt_hostname) = alt_hostname {
         debug!("using alternate hostname {alt_hostname} for TLS verification");
         Ok(c.dangerous()

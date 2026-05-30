@@ -82,6 +82,7 @@ impl Outbound {
     pub(super) async fn run(self) {
         let pool = proxy::pool::WorkloadHBONEPool::new(
             self.pi.cfg.clone(),
+            &self.pi.state,
             self.pi.socket_factory.clone(),
             self.pi.local_workload_information.clone(),
         );
@@ -273,7 +274,8 @@ impl OutboundConnection {
                 .local_workload_information
                 .fetch_certificate()
                 .await?;
-            let connector = cert.outbound_connector(wl_key.dst_id.clone())?;
+            let resolved = self.pi.state.resolved_mesh_config();
+            let connector = cert.outbound_connector(wl_key.dst_id.clone(), &resolved)?;
             let tls_stream = connector.connect(upgraded).await?;
             let (_, ssl) = tls_stream.get_ref();
             let peer_identity = identity_from_connection(ssl);
@@ -887,6 +889,7 @@ mod tests {
             id: TraceParent::new(),
             pool: WorkloadHBONEPool::new(
                 cfg.clone(),
+                &state,
                 sock_fact,
                 local_workload_information.clone(),
             ),
@@ -2019,6 +2022,7 @@ mod tests {
             id: TraceParent::new(),
             pool: WorkloadHBONEPool::new(
                 cfg.clone(),
+                &state,
                 sock_fact,
                 local_workload_information.clone(),
             ),

@@ -29,6 +29,7 @@ use crate::strng::Strng;
 use crate::tls;
 use crate::xds::istio::security::Authorization as XdsAuthorization;
 use crate::xds::istio::workload::Address as XdsAddress;
+use crate::xds::istio::workload::MeshSettings as XdsMeshSettings;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, xds};
 use crate::{proxy, strng};
@@ -179,6 +180,10 @@ pub struct ProxyState {
     pub services: ServiceStore,
 
     pub policies: PolicyStore,
+
+    /// Pre-resolved mesh configuration (TLS, trust domain) from xDS + env var defaults.
+    /// Recomputed whenever MeshSettings arrives or is removed via xDS.
+    pub resolved_mesh_config: Arc<crate::tls::ResolvedMeshConfig>,
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -188,6 +193,7 @@ struct ProxyStateSerialization<'a> {
     services: Vec<Arc<Service>>,
     policies: Vec<Authorization>,
     staged_services: &'a HashMap<NamespacedHostname, HashMap<Strng, Endpoint>>,
+    resolved_mesh_config: &'a Arc<crate::tls::ResolvedMeshConfig>,
 }
 
 impl serde::Serialize for ProxyState {
@@ -226,6 +232,7 @@ impl serde::Serialize for ProxyState {
             services,
             policies,
             staged_services: &self.services.staged_services,
+            resolved_mesh_config: &self.resolved_mesh_config,
         };
         serializable.serialize(serializer)
     }
@@ -237,6 +244,7 @@ impl ProxyState {
             workloads: WorkloadStore::new(local_node),
             services: Default::default(),
             policies: Default::default(),
+            resolved_mesh_config: Arc::new(crate::tls::resolve_mesh_config(None)),
         }
     }
 
@@ -515,6 +523,37 @@ impl DemandProxyState {
             .expect("mutex")
             .services
             .get_by_workload(wl)
+    }
+
+    /// Get the resolved mesh configuration (pre-computed from xDS settings + env var defaults).
+    pub fn resolved_mesh_config(&self) -> Arc<crate::tls::ResolvedMeshConfig> {
+        self.state
+            .read()
+            .expect("mutex")
+            .resolved_mesh_config
+            .clone()
+    }
+
+    pub fn mesh_config_handle(&self) -> MeshConfigHandle {
+        MeshConfigHandle {
+            state: self.state.clone(),
+        }
+    }
+}
+
+/// Lightweight handle that reads the current resolved mesh config from ProxyState.
+#[derive(Clone)]
+pub struct MeshConfigHandle {
+    state: Arc<RwLock<ProxyState>>,
+}
+
+impl MeshConfigHandle {
+    pub fn resolved_mesh_config(&self) -> Arc<crate::tls::ResolvedMeshConfig> {
+        self.state
+            .read()
+            .expect("mutex")
+            .resolved_mesh_config
+            .clone()
     }
 }
 
@@ -1127,7 +1166,11 @@ impl ProxyStateManager {
             Some(
                 xds::Config::new(config.clone(), tls_client_fetcher)
                     .with_watched_handler::<XdsAddress>(xds::ADDRESS_TYPE, updater.clone())
-                    .with_watched_handler::<XdsAuthorization>(xds::AUTHORIZATION_TYPE, updater)
+                    .with_watched_handler::<XdsAuthorization>(
+                        xds::AUTHORIZATION_TYPE,
+                        updater.clone(),
+                    )
+                    .with_watched_handler::<XdsMeshSettings>(xds::MESH_SETTINGS_TYPE, updater)
                     .build(xds_metrics, awaiting_ready),
             )
         } else {
