@@ -69,6 +69,7 @@ const CONNECTION_TERMINATION_DEADLINE: &str = "CONNECTION_TERMINATION_DEADLINE";
 // (Our forceful shutdown is more graceful than a SIGKILL, as we can close connections cleanly).
 const TERMINATION_GRACE_PERIOD_SECONDS: &str = "TERMINATION_GRACE_PERIOD_SECONDS";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
+const ENABLE_OUTBOUND_ORIG_SRC: &str = "ENABLE_OUTBOUND_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
 const IPV6_ENABLED: &str = "IPV6_ENABLED";
 
@@ -285,6 +286,11 @@ pub struct Config {
     // If set, explicitly configure whether to use original source.
     // If unset (recommended), this is automatically detected based on permissions.
     pub require_original_source: Option<bool>,
+
+    // Enable source IP preservation for outbound connections.
+    // If set to true, outbound connections explicitly bind to the downstream peer address
+    // If false (default), the system determines the outbound address.
+    pub enable_outbound_original_source: bool,
 
     // CLI args passed to ztunnel at runtime
     pub proxy_args: String,
@@ -816,6 +822,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         )?,
 
         require_original_source: parse(ENABLE_ORIG_SRC)?,
+        enable_outbound_original_source: parse_default(ENABLE_OUTBOUND_ORIG_SRC, false)?,
         proxy_args: parse_args(),
         dns_resolver_cfg,
         dns_resolver_opts,
@@ -1228,6 +1235,26 @@ pub mod tests {
             // Clean up
             env::remove_var(ZTUNNEL_WORKER_THREADS);
             env::remove_var(ZTUNNEL_CPU_LIMIT);
+        }
+    }
+
+    #[test]
+    fn test_enable_outbound_original_source_parsing() {
+        unsafe {
+            // Test explicitly enabled
+            env::set_var(ENABLE_OUTBOUND_ORIG_SRC, "true");
+            let cfg = construct_config(ProxyConfig::default()).unwrap();
+            assert!(cfg.enable_outbound_original_source);
+
+            // Test explicitly disabled
+            env::set_var(ENABLE_OUTBOUND_ORIG_SRC, "false");
+            let cfg = construct_config(ProxyConfig::default()).unwrap();
+            assert!(!cfg.enable_outbound_original_source);
+
+            // Test unset (default is false)
+            env::remove_var(ENABLE_OUTBOUND_ORIG_SRC);
+            let cfg = construct_config(ProxyConfig::default()).unwrap();
+            assert!(!cfg.enable_outbound_original_source);
         }
     }
 }
