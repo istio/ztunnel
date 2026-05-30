@@ -1,0 +1,61 @@
+// Copyright Istio Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Minimal subset of the SPIFFE Workload API used by ztunnel to bootstrap
+// its own SVID before talking to the SPIFFE Broker (which requires mTLS).
+//
+// Only the message types are declared here; the gRPC service descriptor
+// is hand-rolled in `src/identity/broker/workload_api.rs` so we can hit
+// the canonical service path `/SpiffeWorkloadAPI/FetchX509SVID` (the
+// upstream proto uses `package _;`, which tonic-prost-build does not
+// model directly).
+
+syntax = "proto3";
+
+package spiffe.workloadapi;
+
+// FetchX509SVID request payload — intentionally empty per the SPIFFE
+// Workload API spec.
+message X509SVIDRequest {}
+
+// FetchX509SVID streaming response. The agent re-sends a full snapshot
+// every time the underlying SVID set changes.
+message X509SVIDResponse {
+  // SVIDs the calling workload is entitled to, in priority order.
+  repeated X509SVID svids = 1;
+  // PEM-encoded CRLs the workload should honour when validating peers
+  // (unused by ztunnel today).
+  repeated bytes crl = 2;
+  // ASN.1 DER trust bundles for federated trust domains keyed by
+  // trust-domain SPIFFE ID.
+  map<string, bytes> federated_bundles = 3;
+}
+
+// A single workload SVID. Materially identical to
+// `spiffe.broker.X509SVID` but kept separate so the bootstrap path does
+// not depend on the broker proto.
+message X509SVID {
+  // SPIFFE ID this SVID asserts, e.g.
+  // `spiffe://cluster.local/ns/istio-system/sa/ztunnel`.
+  string spiffe_id = 1;
+  // ASN.1 DER X.509 leaf + intermediate chain concatenated.
+  bytes x509_svid = 2;
+  // PKCS#8 DER private key matching `x509_svid[0]`.
+  bytes x509_svid_key = 3;
+  // ASN.1 DER trust-domain bundle for this SVID.
+  bytes bundle = 4;
+  // Optional hint(s) the workload may use to select among multiple
+  // SVIDs; ztunnel currently ignores these.
+  repeated string hint = 5;
+}

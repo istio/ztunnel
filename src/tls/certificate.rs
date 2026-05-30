@@ -226,6 +226,28 @@ fn parse_cert_multi(mut cert: &[u8]) -> Result<Vec<Certificate>, Error> {
         .collect()
 }
 
+/// Parse one or more concatenated ASN.1 DER X.509 certificates. Mirrors
+/// [`parse_cert_multi`] but operates on raw DER (no PEM framing).
+fn parse_cert_multi_der(bytes: &[u8]) -> Result<Vec<Certificate>, Error> {
+    let mut out = Vec::new();
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        // First parse to discover how many bytes belong to this cert.
+        let (rest, _) = x509_parser::parse_x509_certificate(remaining)?;
+        let consumed = remaining.len() - rest.len();
+        let der_bytes = remaining[..consumed].to_vec();
+        // Re-parse from the owned buffer so the resulting `Certificate` does
+        // not borrow `bytes`.
+        let (_, parsed) = x509_parser::parse_x509_certificate(&der_bytes)?;
+        out.push(Certificate {
+            der: CertificateDer::from(der_bytes.clone()),
+            expiry: expiration(parsed),
+        });
+        remaining = rest;
+    }
+    Ok(out)
+}
+
 fn parse_key(mut key: &[u8]) -> Result<PrivateKeyDer<'static>, Error> {
     let mut reader = std::io::BufReader::new(Cursor::new(&mut key));
     let parsed = rustls_pemfile::read_one(&mut reader)
@@ -265,6 +287,60 @@ impl WorkloadCertificate {
         }
         Ok(WorkloadCertificate {
             cert,
+            chain,
+            private_key: key,
+            roots,
+            root_store: Arc::new(roots_store),
+        })
+    }
+
+    /// Build a `WorkloadCertificate` from raw ASN.1 DER bytes as delivered
+    /// by the SPIFFE Broker API (`brokerapi.proto::X509SVID`).
+    ///
+    /// - `key_der`: PKCS#8 DER private key
+    /// - `svid_chain_der`: leaf + optional intermediates, concatenated DER
+    /// - `bundle_der`: trust-domain roots, concatenated DER
+    /// - `extra_bundles_der`: additional trust-domain bundles to trust on
+    ///   top of `bundle_der`, typically the federated bundles delivered out
+    ///   of band by `SubscribeToX509Bundles`. Each entry may itself be a
+    ///   concatenated DER bundle.
+    ///
+    /// Unlike [`WorkloadCertificate::new`], roots are taken from a separate
+    /// `bundle_der` argument (matching the broker wire shape) instead of
+    /// being conflated with the chain's last entry.
+    pub fn from_spiffe_svid(
+        key_der: &[u8],
+        svid_chain_der: &[u8],
+        bundle_der: &[u8],
+        extra_bundles_der: &[bytes::Bytes],
+    ) -> Result<WorkloadCertificate, Error> {
+        let svid_certs = parse_cert_multi_der(svid_chain_der)?;
+        let mut roots = parse_cert_multi_der(bundle_der)?;
+        for extra in extra_bundles_der {
+            roots.extend(parse_cert_multi_der(extra)?);
+        }
+        if roots.is_empty() {
+            return Err(Error::InvalidRootCert(
+                "no root certificate present".to_string(),
+            ));
+        }
+        let mut iter = svid_certs.into_iter();
+        let leaf = iter
+            .next()
+            .ok_or_else(|| Error::CertificateParseError("empty SVID chain".to_string()))?;
+        let chain: Vec<Certificate> = iter.collect();
+        let key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+            key_der.to_vec(),
+        ));
+
+        let mut roots_store = RootCertStore::empty();
+        let (_valid, invalid) =
+            roots_store.add_parsable_certificates(roots.iter().map(|c| c.der.clone()));
+        if invalid > 0 {
+            tracing::warn!("warning: found {invalid} invalid root certs");
+        }
+        Ok(WorkloadCertificate {
+            cert: leaf,
             chain,
             private_key: key,
             roots,

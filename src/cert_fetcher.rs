@@ -15,7 +15,7 @@
 use crate::config;
 use crate::config::ProxyMode;
 use crate::identity::Priority::Warmup;
-use crate::identity::{Identity, Request, SecretManager};
+use crate::identity::{CacheKey, Identity, Request, SecretManager};
 use crate::state::workload::{InboundProtocol, Workload};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -47,6 +47,11 @@ pub fn new(cfg: &config::Config, cert_manager: Arc<SecretManager>) -> Arc<dyn Ce
 struct CertFetcherImpl {
     proxy_mode: ProxyMode,
     local_node: Option<String>,
+    // When true the configured CA provider is the SPIFFE Broker, which attests each
+    // workload individually and therefore cannot service an identity-only prefetch.
+    // Prefetching is disabled in that case; certificates are fetched on demand via the
+    // proxy's workload-keyed path (which carries the required WorkloadInfo) instead.
+    ca_is_broker: bool,
     tx: mpsc::Sender<Request>,
 }
 
@@ -58,7 +63,11 @@ impl CertFetcherImpl {
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 match req {
-                    Request::Fetch(workload_identity, priority) => {
+                    Request::Fetch(key, priority) => {
+                        // The pre-fetch path always uses identity-scoped keys; per-workload
+                        // keys (used by the SPIFFE Broker provider) go through the proxy's
+                        // on-demand fetch path with the necessary WorkloadInfo attached.
+                        let workload_identity = key.identity().clone();
                         match cert_manager
                             .fetch_certificate_pri(&workload_identity, priority)
                             .await
@@ -73,8 +82,8 @@ impl CertFetcherImpl {
                             ),
                         }
                     }
-                    Request::Forget(workload_identity) => {
-                        cert_manager.forget_certificate(&workload_identity).await;
+                    Request::Forget(key) => {
+                        cert_manager.forget_certificate(key.identity()).await;
                     }
                 }
             }
@@ -83,6 +92,7 @@ impl CertFetcherImpl {
         Self {
             proxy_mode: cfg.proxy_mode,
             local_node: cfg.local_node.clone(),
+            ca_is_broker: matches!(cfg.ca_provider, config::CaProvider::SpiffeBroker(_)),
             tx,
         }
     }
@@ -91,8 +101,13 @@ impl CertFetcherImpl {
     // too bad; a missing cert will be fetched on-demand when we get a request, so will just
     // result in some extra latency.
     fn should_prefetch_certificate(&self, w: &Workload) -> bool {
-        // Only shared mode fetches other workloads's certs
-        self.proxy_mode == ProxyMode::Shared &&
+        // The SPIFFE Broker attests each workload from its WorkloadInfo, which the
+        // identity-only prefetch path cannot supply. Prefetching there would fail on
+        // every attempt and retry forever, so skip it and rely on the on-demand
+        // workload-keyed fetch instead.
+        !self.ca_is_broker &&
+            // Only shared mode fetches other workloads's certs
+            self.proxy_mode == ProxyMode::Shared &&
             // We only get certs for our own node
             Some(w.node.as_ref()) == self.local_node.as_deref() &&
             // If it doesn't support HBONE it *probably* doesn't need a cert.
@@ -103,14 +118,19 @@ impl CertFetcherImpl {
 impl CertFetcher for CertFetcherImpl {
     fn prefetch_cert(&self, w: &Workload) {
         if self.should_prefetch_certificate(w)
-            && let Err(e) = self.tx.try_send(Request::Fetch(w.identity(), Warmup))
+            && let Err(e) = self
+                .tx
+                .try_send(Request::Fetch(CacheKey::Identity(w.identity()), Warmup))
         {
             info!("couldn't prefetch: {:?}", e)
         }
     }
 
     fn clear_cert(&self, id: &Identity) {
-        if let Err(e) = self.tx.try_send(Request::Forget(id.clone())) {
+        if let Err(e) = self
+            .tx
+            .try_send(Request::Forget(CacheKey::Identity(id.clone())))
+        {
             info!("couldn't clear identity: {:?}", e)
         }
     }

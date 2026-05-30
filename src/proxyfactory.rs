@@ -15,6 +15,7 @@
 use crate::config;
 use crate::identity::SecretManager;
 use crate::state::{DemandProxyState, WorkloadInfo};
+use crate::strng::Strng;
 use crate::tls;
 use std::sync::Arc;
 use tracing::error;
@@ -109,7 +110,9 @@ impl ProxyFactory {
             } else {
                 Arc::new(base)
             };
-        self.new_proxies_from_factory(None, proxy_workload_info, factory)
+        // Dedicated mode never uses the SPIFFE Broker provider, so there is
+        // no per-pod uid/netns to thread through.
+        self.new_proxies_from_factory(None, proxy_workload_info, None, factory)
             .await
     }
 
@@ -117,6 +120,7 @@ impl ProxyFactory {
         &self,
         proxy_drain: Option<DrainWatcher>,
         proxy_workload_info: WorkloadInfo,
+        inpod_context: Option<Strng>,
         socket_factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync>,
     ) -> Result<ProxyResult, Error> {
         let mut result: ProxyResult = Default::default();
@@ -124,11 +128,26 @@ impl ProxyFactory {
 
         let mut resolver = None;
 
-        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
-            Arc::new(proxy_workload_info),
-            self.state.clone(),
-            self.cert_manager.clone(),
-        ));
+        // Only attach the inpod broker context to LocalWorkloadInformation
+        // when the configured CA provider actually needs it. The Istio CA
+        // path must continue to cache SVIDs by identity alone so multiple
+        // pods sharing a service account share a single SVID.
+        let local_workload_information = Arc::new(match (
+            inpod_context,
+            matches!(self.config.ca_provider, config::CaProvider::SpiffeBroker(_)),
+        ) {
+            (Some(uid), true) => LocalWorkloadInformation::new_with_inpod(
+                Arc::new(proxy_workload_info),
+                self.state.clone(),
+                self.cert_manager.clone(),
+                uid,
+            ),
+            _ => LocalWorkloadInformation::new(
+                Arc::new(proxy_workload_info),
+                self.state.clone(),
+                self.cert_manager.clone(),
+            ),
+        });
 
         // Optionally create the DNS proxy.
         if self.config.dns_proxy {

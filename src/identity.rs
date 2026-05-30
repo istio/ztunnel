@@ -26,6 +26,24 @@ mod auth;
 use crate::state::WorkloadInfo;
 pub use auth::*;
 
+// Generated protobuf bindings for the SPIFFE Broker API. The full Broker
+// client implementation is staged in follow-up steps; declaring the module
+// here ensures the build pipeline produces and links the generated code.
+#[allow(dead_code)]
+pub mod broker_proto;
+
+// Generated protobuf bindings for the (minimal) SPIFFE Workload API. Used
+// by the Broker provider to bootstrap ztunnel's own SVID before opening
+// the broker mTLS channel.
+#[allow(dead_code)]
+pub mod workload_api_proto;
+
+// SPIFFE Broker provider. Linux-only: depends on inpod-only data structures.
+// Broker mode is itself rejected outside inpod by `config::validate_config`.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub mod broker;
+
 #[cfg(any(test, feature = "testing"))]
 pub mod mock {
     pub use super::caclient::mock::CaClient;
@@ -54,6 +72,23 @@ pub enum Error {
     Forgotten,
     #[error("BUG: identity requested {0}, but only allowed {1:?}")]
     BugInvalidIdentityRequest(Identity, Arc<WorkloadInfo>),
+    // SPIFFE Broker provider errors.
+    #[error("SPIFFE Broker KubernetesObject attestor requires a workload pod UID")]
+    BrokerMissingUid,
+    #[error("SPIFFE Broker KubernetesObject attestor requires WorkloadInfo")]
+    BrokerMissingWorkload,
+    #[error("SPIFFE Broker transport error: {0}")]
+    BrokerTransport(Arc<str>),
+    #[error("SPIFFE Broker subscription stream ended without an SVID")]
+    BrokerStreamEmpty,
+    #[error("SPIFFE Broker returned no SVIDs in response")]
+    BrokerNoSvids,
+    #[error(
+        "SPIFFE Broker returned SVID for {actual}, expected {expected}"
+    )]
+    BrokerSpiffeIdMismatch { expected: Identity, actual: String },
+    #[error("SPIFFE Broker subscription timed out")]
+    BrokerTimeout,
 }
 
 impl From<tls::Error> for Error {

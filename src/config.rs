@@ -58,6 +58,26 @@ const PREFERED_SERVICE_NAMESPACE: &str = "PREFERED_SERVICE_NAMESPACE";
 const CA_ADDRESS: &str = "CA_ADDRESS";
 const SECRET_TTL: &str = "SECRET_TTL";
 const FAKE_CA: &str = "FAKE_CA";
+// Selects which CA / SVID-issuing provider is used. Valid values: "istio_ca" (default)
+// and "spiffe_broker". When unset or "istio_ca", behaviour is unchanged.
+const CA_PROVIDER: &str = "CA_PROVIDER";
+// UDS path of the SPIFFE Broker API socket. Required when CA_PROVIDER=spiffe_broker.
+const SPIFFE_BROKER_SOCKET: &str = "SPIFFE_BROKER_SOCKET";
+// UDS path of the SPIFFE Workload API socket. Required when CA_PROVIDER=spiffe_broker:
+// ztunnel bootstraps its own SVID from this socket so it can present client mTLS
+// credentials when dialling the broker (the broker rejects non-mTLS callers).
+const SPIFFE_BROKER_WORKLOAD_API_SOCKET: &str = "SPIFFE_BROKER_WORKLOAD_API_SOCKET";
+// SPIFFE ID that the Workload API is expected to issue for ztunnel itself. Used to
+// select the right SVID out of the Workload API response. Defaults to
+// `spiffe://<TRUST_DOMAIN>/ns/<POD_NAMESPACE>/sa/<SERVICE_ACCOUNT>` derived at runtime
+// (currently hard-coded to the ztunnel ServiceAccount in istio-system).
+const SPIFFE_BROKER_WORKLOAD_API_SPIFFE_ID: &str = "SPIFFE_BROKER_WORKLOAD_API_SPIFFE_ID";
+// Attestation mode used when constructing WorkloadReference for the Broker API.
+// Only "k8s_object" is supported today (also the default).
+const SPIFFE_BROKER_ATTESTATION: &str = "SPIFFE_BROKER_ATTESTATION";
+// Per-request timeout for Broker API SubscribeToX509SVID / SubscribeToX509Bundles initial
+// response. Defaults to 10s.
+const SPIFFE_BROKER_TIMEOUT: &str = "SPIFFE_BROKER_TIMEOUT";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const ZTUNNEL_CPU_LIMIT: &str = "ZTUNNEL_CPU_LIMIT";
 const POOL_MAX_STREAMS_PER_CONNECTION: &str = "POOL_MAX_STREAMS_PER_CONNECTION";
@@ -128,6 +148,51 @@ pub enum RootCert {
     File(PathBuf),
     Static(#[serde(skip)] Bytes),
     Default,
+}
+
+/// Selects which provider mints workload SVIDs.
+///
+/// `IstioCa` preserves the existing CSR-based flow against an Istio-compatible
+/// CA. `SpiffeBroker` proxies all per-pod requests through a local SPIFFE Broker
+/// API socket and is only valid in shared (inpod) mode, because per-pod
+/// attestation requires inpod metadata.
+#[derive(serde::Serialize, Default, Clone, Debug, PartialEq, Eq)]
+pub enum CaProvider {
+    #[default]
+    IstioCa,
+    SpiffeBroker(SpiffeBrokerConfig),
+}
+
+/// Configuration for the SPIFFE Broker API client. See
+/// <https://github.com/arndt-s/spiffe/blob/main/standards/brokerapi.proto>.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct SpiffeBrokerConfig {
+    /// Filesystem path to the Broker API Unix domain socket.
+    pub socket_path: PathBuf,
+    /// Filesystem path to the SPIFFE Workload API Unix domain socket.
+    /// Used to bootstrap ztunnel's own SVID for mTLS to the broker.
+    pub workload_api_socket: PathBuf,
+    /// SPIFFE ID the Workload API is expected to issue for ztunnel.
+    pub workload_api_spiffe_id: String,
+    /// How ztunnel identifies a workload to the broker.
+    pub attestation: BrokerAttestation,
+    /// Per-request timeout for the initial server-streamed response.
+    pub timeout: Duration,
+}
+
+/// Workload identifier shape sent to the broker.
+///
+/// This is an extension point: additional attestation modes (for example a
+/// PID-based reference) add a variant here plus a matching `WorkloadAttestor`
+/// implementation and dispatch arm in `SecretManager::new_spiffe_broker`.
+#[derive(serde::Serialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrokerAttestation {
+    /// Pass a `KubernetesObjectReference{kind=Pod, namespace, name, uid}`
+    /// derived from the workload's `WorkloadInfo`. The broker resolves the
+    /// pod via the Kubernetes API, needing no extra host privileges, so this
+    /// is the default for inpod ztunnel.
+    #[default]
+    KubernetesObject,
 }
 
 #[derive(Clone, Debug)]
@@ -245,6 +310,9 @@ pub struct Config {
     pub ca_root_cert: RootCert,
     // Allow custom alternative CA hostname verification
     pub alt_ca_hostname: Option<String>,
+    /// Which provider mints workload SVIDs. Defaults to `IstioCa` and is selected via the
+    /// `CA_PROVIDER` env var. `SpiffeBroker` requires shared (inpod) proxy mode.
+    pub ca_provider: CaProvider,
     /// XDS address to use. If unset, XDS will not be used.
     pub xds_address: Option<String>,
     /// Root cert for XDS TLS verification.
@@ -401,6 +469,79 @@ fn parse_duration(env: &str) -> Result<Option<Duration>, Error> {
 
 fn parse_duration_default(env: &str, default: Duration) -> Result<Duration, Error> {
     parse_duration(env).map(|v| v.unwrap_or(default))
+}
+
+/// Default initial-response timeout for the SPIFFE Broker API.
+const DEFAULT_SPIFFE_BROKER_TIMEOUT: Duration = Duration::from_secs(10);
+
+const CA_PROVIDER_ISTIO_CA: &str = "istio_ca";
+const CA_PROVIDER_SPIFFE_BROKER: &str = "spiffe_broker";
+const BROKER_ATTESTATION_K8S_OBJECT: &str = "k8s_object";
+
+fn parse_ca_provider() -> Result<CaProvider, Error> {
+    let raw = match parse::<String>(CA_PROVIDER)? {
+        None => return Ok(CaProvider::IstioCa),
+        Some(v) => v,
+    };
+    match raw.as_str() {
+        CA_PROVIDER_ISTIO_CA => Ok(CaProvider::IstioCa),
+        CA_PROVIDER_SPIFFE_BROKER => {
+            let socket_path = match parse::<PathBuf>(SPIFFE_BROKER_SOCKET)? {
+                Some(p) => p,
+                None => {
+                    return Err(Error::InvalidState(format!(
+                        "{CA_PROVIDER}={CA_PROVIDER_SPIFFE_BROKER} requires {SPIFFE_BROKER_SOCKET} to be set"
+                    )));
+                }
+            };
+            let workload_api_socket = match parse::<PathBuf>(SPIFFE_BROKER_WORKLOAD_API_SOCKET)? {
+                Some(p) => p,
+                None => {
+                    return Err(Error::InvalidState(format!(
+                        "{CA_PROVIDER}={CA_PROVIDER_SPIFFE_BROKER} requires \
+                         {SPIFFE_BROKER_WORKLOAD_API_SOCKET} to be set so ztunnel can \
+                         bootstrap its own SVID for mTLS to the broker"
+                    )));
+                }
+            };
+            let workload_api_spiffe_id =
+                match parse::<String>(SPIFFE_BROKER_WORKLOAD_API_SPIFFE_ID)? {
+                    Some(v) => v,
+                    None => "spiffe://cluster.local/ns/istio-system/sa/ztunnel".to_string(),
+                };
+            let attestation = match parse::<String>(SPIFFE_BROKER_ATTESTATION)? {
+                None => BrokerAttestation::default(),
+                Some(v) => match v.as_str() {
+                    BROKER_ATTESTATION_K8S_OBJECT => BrokerAttestation::KubernetesObject,
+                    _ => {
+                        return Err(Error::EnvVar(
+                            SPIFFE_BROKER_ATTESTATION.to_string(),
+                            v,
+                            format!(
+                                "{SPIFFE_BROKER_ATTESTATION} must be {BROKER_ATTESTATION_K8S_OBJECT}"
+                            ),
+                        ));
+                    }
+                },
+            };
+            let timeout =
+                parse_duration_default(SPIFFE_BROKER_TIMEOUT, DEFAULT_SPIFFE_BROKER_TIMEOUT)?;
+            Ok(CaProvider::SpiffeBroker(SpiffeBrokerConfig {
+                socket_path,
+                workload_api_socket,
+                workload_api_spiffe_id,
+                attestation,
+                timeout,
+            }))
+        }
+        _ => Err(Error::EnvVar(
+            CA_PROVIDER.to_string(),
+            raw,
+            format!(
+                "{CA_PROVIDER} must be one of {CA_PROVIDER_ISTIO_CA}, {CA_PROVIDER_SPIFFE_BROKER}"
+            ),
+        )),
+    }
 }
 
 fn parse_args() -> String {
@@ -716,6 +857,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         _ => (None, None),
     };
 
+    let ca_provider = parse_ca_provider()?;
+
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
         // Enable by default; running the server is not an issue, clients still need to opt-in to sending their
@@ -802,6 +945,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ca_root_cert,
         alt_xds_hostname: parse(ALT_XDS_HOSTNAME)?,
         alt_ca_hostname: parse(ALT_CA_HOSTNAME)?,
+        ca_provider,
 
         secret_ttl: parse_duration_default(SECRET_TTL, DEFAULT_TTL)?,
         local_xds_config,
@@ -897,6 +1041,21 @@ fn validate_config(cfg: Config) -> Result<Config, Error> {
     if !cfg.proxy && !cfg.dns_proxy {
         return Err(Error::ProxyConfig(anyhow!(
             "ztunnel run without any servers enabled"
+        )));
+    }
+
+    if matches!(cfg.ca_provider, CaProvider::SpiffeBroker(_))
+        && cfg.proxy_mode != ProxyMode::Shared
+    {
+        return Err(Error::InvalidState(format!(
+            "{CA_PROVIDER}={CA_PROVIDER_SPIFFE_BROKER} requires shared (inpod) {PROXY_MODE}, but {PROXY_MODE}={PROXY_MODE_DEDICATED} was configured"
+        )));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    if matches!(cfg.ca_provider, CaProvider::SpiffeBroker(_)) {
+        return Err(Error::InvalidState(format!(
+            "{CA_PROVIDER}={CA_PROVIDER_SPIFFE_BROKER} is only supported on Linux"
         )));
     }
 
@@ -1228,6 +1387,76 @@ pub mod tests {
             // Clean up
             env::remove_var(ZTUNNEL_WORKER_THREADS);
             env::remove_var(ZTUNNEL_CPU_LIMIT);
+        }
+    }
+
+    #[test]
+    fn test_parse_ca_provider() {
+        // Use unsafe block per the existing convention in this test module.
+        // Other tests do not touch CA_PROVIDER / SPIFFE_BROKER_* so this is safe.
+        unsafe {
+            // 1. Default (no env) -> IstioCa.
+            env::remove_var(CA_PROVIDER);
+            env::remove_var(SPIFFE_BROKER_SOCKET);
+            env::remove_var(SPIFFE_BROKER_WORKLOAD_API_SOCKET);
+            env::remove_var(SPIFFE_BROKER_WORKLOAD_API_SPIFFE_ID);
+            env::remove_var(SPIFFE_BROKER_ATTESTATION);
+            env::remove_var(SPIFFE_BROKER_TIMEOUT);
+            assert_eq!(parse_ca_provider().unwrap(), CaProvider::IstioCa);
+
+            // 2. Explicit "istio_ca" -> IstioCa.
+            env::set_var(CA_PROVIDER, CA_PROVIDER_ISTIO_CA);
+            assert_eq!(parse_ca_provider().unwrap(), CaProvider::IstioCa);
+
+            // 3. "spiffe_broker" without socket -> error.
+            env::set_var(CA_PROVIDER, CA_PROVIDER_SPIFFE_BROKER);
+            let err = parse_ca_provider().unwrap_err();
+            assert!(matches!(err, Error::InvalidState(_)), "got: {err:?}");
+
+            // 3b. "spiffe_broker" with broker socket but no workload-api socket -> error.
+            env::set_var(SPIFFE_BROKER_SOCKET, "/run/spire/agent.sock");
+            let err = parse_ca_provider().unwrap_err();
+            assert!(matches!(err, Error::InvalidState(_)), "got: {err:?}");
+
+            // 4. "spiffe_broker" with both sockets -> SpiffeBroker with defaults.
+            env::set_var(SPIFFE_BROKER_WORKLOAD_API_SOCKET, "/run/spire/api.sock");
+            let cfg = parse_ca_provider().unwrap();
+            let CaProvider::SpiffeBroker(b) = &cfg else {
+                panic!("expected SpiffeBroker, got {cfg:?}");
+            };
+            assert_eq!(b.socket_path, PathBuf::from("/run/spire/agent.sock"));
+            assert_eq!(
+                b.workload_api_socket,
+                PathBuf::from("/run/spire/api.sock")
+            );
+            assert_eq!(
+                b.workload_api_spiffe_id,
+                "spiffe://cluster.local/ns/istio-system/sa/ztunnel"
+            );
+            assert_eq!(b.attestation, BrokerAttestation::KubernetesObject);
+            assert_eq!(b.timeout, DEFAULT_SPIFFE_BROKER_TIMEOUT);
+
+            // 5. Invalid attestation -> error.
+            env::set_var(SPIFFE_BROKER_ATTESTATION, "bogus");
+            assert!(matches!(
+                parse_ca_provider().unwrap_err(),
+                Error::EnvVar(_, _, _)
+            ));
+
+            // 7. Invalid provider -> error.
+            env::set_var(CA_PROVIDER, "bogus");
+            assert!(matches!(
+                parse_ca_provider().unwrap_err(),
+                Error::EnvVar(_, _, _)
+            ));
+
+            // Clean up.
+            env::remove_var(CA_PROVIDER);
+            env::remove_var(SPIFFE_BROKER_SOCKET);
+            env::remove_var(SPIFFE_BROKER_WORKLOAD_API_SOCKET);
+            env::remove_var(SPIFFE_BROKER_WORKLOAD_API_SPIFFE_ID);
+            env::remove_var(SPIFFE_BROKER_ATTESTATION);
+            env::remove_var(SPIFFE_BROKER_TIMEOUT);
         }
     }
 }

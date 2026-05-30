@@ -1,0 +1,40 @@
+# SPIFFE registration entries for the ztunnel SPIFFE Broker testbed.
+#
+# We use ClusterSPIFFEID (from spire-controller-manager) instead of
+# `spire-server entry create` so the entries are declarative and re-applied
+# on cluster recreation.
+#
+# Two identities are issued:
+#   1. ztunnel itself — required so the background SubscribeToX509Bundles
+#      task can attest as a workload and receive the trust bundle.
+#   2. The test ServiceAccount shared by both probe pods.
+#
+# The K8s attestor selectors are inclusive of any pod in the SA; the
+# broker will mint a *distinct* SVID per matching pod (per-pod attestation
+# is what ztunnel's CacheKey::Workload depends on).
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: ztunnel
+spec:
+  spiffeIDTemplate: spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}
+  podSelector:
+    matchLabels:
+      app: ztunnel
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: istio-system
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: ztunnel-broker-test
+spec:
+  spiffeIDTemplate: spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}
+  podSelector:
+    matchLabels:
+      app: ztunnel-broker-test
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: ztunnel-broker-test
