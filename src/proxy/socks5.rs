@@ -193,10 +193,9 @@ async fn negotiate_socks_connection(
     let nmethods = version[1];
 
     if nmethods == 0 {
-        return Err(SocksError::invalid_protocol(format!(
-            "methods cannot be zero {}",
-            version[0]
-        )));
+        return Err(SocksError::invalid_protocol(
+            "methods cannot be zero".to_string(),
+        ));
     }
 
     // List of supported auth methods
