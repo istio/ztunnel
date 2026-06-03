@@ -83,7 +83,12 @@ impl ConnSpawner {
 
         let cert = self.local_workload.fetch_certificate().await?;
         let connector = cert.outbound_connector(key.dst_id.clone())?;
-        let tcp_stream = super::freebind_connect(None, key.dst, self.socket_factory.as_ref())
+        let local = if self.cfg.enable_outbound_original_source {
+            Some(key.src)
+        } else {
+            None
+        };
+        let tcp_stream = super::freebind_connect(local, key.dst, self.socket_factory.as_ref())
             .await
             .map_err(|e: io::Error| match e.kind() {
                 io::ErrorKind::TimedOut => Error::MaybeHBONENetworkPolicyError(e),
