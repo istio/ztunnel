@@ -14,17 +14,10 @@
 
 use super::Error;
 
-#[allow(unused_imports)]
-use crate::PQC_ENABLED;
-use crate::TLS12_ENABLED;
 use crate::identity::{self, Identity};
 
 use std::fmt::Debug;
-
 use std::sync::Arc;
-
-use rustls;
-use rustls::crypto::CryptoProvider;
 
 use rustls::ClientConfig;
 use rustls::ServerConfig;
@@ -39,18 +32,6 @@ pub trait ServerCertProvider: Send + Sync + Clone {
     async fn fetch_cert(&mut self) -> Result<Arc<ServerConfig>, TlsError>;
 }
 
-static TLS_VERSIONS_13_ONLY: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS13];
-static TLS_VERSIONS_12_AND_13: &[&rustls::SupportedProtocolVersion] =
-    &[&rustls::version::TLS13, &rustls::version::TLS12];
-
-pub fn tls_versions() -> &'static [&'static rustls::SupportedProtocolVersion] {
-    if *TLS12_ENABLED {
-        TLS_VERSIONS_12_AND_13
-    } else {
-        TLS_VERSIONS_13_ONLY
-    }
-}
-
 #[cfg(feature = "tls-aws-lc")]
 pub static CRYPTO_PROVIDER: &str = "tls-aws-lc";
 #[cfg(feature = "tls-ring")]
@@ -59,112 +40,6 @@ pub static CRYPTO_PROVIDER: &str = "tls-ring";
 pub static CRYPTO_PROVIDER: &str = "tls-boring";
 #[cfg(feature = "tls-openssl")]
 pub static CRYPTO_PROVIDER: &str = "tls-openssl";
-
-// Ztunnel use `rustls` with pluggable crypto modules.
-// All crypto MUST be done via the below providers.
-//
-// One exception is CSR generation which doesn't currently have a plugin mechanism (https://github.com/rustls/rcgen/issues/228);
-// In that case, and any future ones, it is critical to guard the code with appropriate `cfg` guards.
-
-#[cfg(feature = "tls-boring")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
-    // Due to 'fips-only' feature on the boring provider, this will use only AES_256_GCM_SHA384
-    // and AES_128_GCM_SHA256
-    Arc::new(boring_rustls_provider::provider())
-}
-
-#[cfg(feature = "tls-ring")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
-    let mut cipher_suites = vec![
-        rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
-        rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
-    ];
-    if *TLS12_ENABLED {
-        // Add TLS 1.2 FIPS-compatible cipher suites
-        cipher_suites.extend([
-            rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-            rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-            rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-            rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-        ]);
-    }
-    Arc::new(CryptoProvider {
-        cipher_suites,
-        ..rustls::crypto::ring::default_provider()
-    })
-}
-
-#[cfg(feature = "tls-aws-lc")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
-    let mut cipher_suites = vec![
-        rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
-        rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256,
-    ];
-    if *TLS12_ENABLED {
-        // Add TLS 1.2 FIPS-compatible cipher suites
-        cipher_suites.extend([
-            rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-            rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-            rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-            rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-        ]);
-    }
-    let mut provider = CryptoProvider {
-        cipher_suites,
-        ..rustls::crypto::aws_lc_rs::default_provider()
-    };
-
-    if *PQC_ENABLED {
-        provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768]
-    }
-
-    Arc::new(provider)
-}
-
-#[cfg(feature = "tls-openssl")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
-    let mut cipher_suites = vec![
-        rustls_openssl::cipher_suite::TLS13_AES_256_GCM_SHA384,
-        rustls_openssl::cipher_suite::TLS13_AES_128_GCM_SHA256,
-    ];
-    if *TLS12_ENABLED {
-        // Add TLS 1.2 FIPS-compatible cipher suites
-        cipher_suites.extend([
-            rustls_openssl::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-            rustls_openssl::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-            rustls_openssl::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-            rustls_openssl::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-        ]);
-    }
-
-    let kx_groups: Vec<&'static dyn rustls::crypto::SupportedKxGroup> = if *PQC_ENABLED {
-        // To use PQC with OpenSSL provider the binary needs to be
-        // both compiled and used with OpenSSL >= 3.5.0.
-        #[cfg(ossl350)]
-        {
-            if openssl::version::number() >= 0x30500000 {
-                vec![rustls_openssl::kx_group::X25519MLKEM768]
-            } else {
-                panic!("COMPLIANCE_POLICY=pqc requires OpenSSL >=3.5.0");
-            }
-        }
-        #[cfg(not(ossl350))]
-        {
-            panic!("COMPLIANCE_POLICY=pqc requires compilation with OpenSSL >=3.5.0");
-        }
-    } else {
-        vec![
-            rustls_openssl::kx_group::SECP256R1,
-            rustls_openssl::kx_group::SECP384R1,
-        ]
-    };
-
-    Arc::new(CryptoProvider {
-        cipher_suites,
-        kx_groups,
-        ..rustls_openssl::default_provider()
-    })
-}
 
 #[derive(thiserror::Error, Debug)]
 pub enum TlsError {
@@ -274,40 +149,5 @@ pub mod tests {
         );
         assert!(!future_certs.is_expired());
         assert_eq!(future_certs.get_duration_until_refresh(), zero_dur);
-    }
-
-    #[test]
-    #[cfg(feature = "tls-openssl")]
-    fn test_openssl_provider_created_successfully() {
-        // Test that provider can be created without panicking
-        let provider = super::provider();
-        assert!(
-            !provider.kx_groups.is_empty(),
-            "kx_groups should not be empty"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "tls-openssl")]
-    fn test_openssl_provider_kx_groups_valid() {
-        // Provider must have valid key exchange groups regardless of PQC state
-        let provider = super::provider();
-        let expected_len = if *crate::PQC_ENABLED { 1 } else { 2 };
-        assert_eq!(
-            provider.kx_groups.len(),
-            expected_len,
-            "PQC={} should have {} kx groups",
-            *crate::PQC_ENABLED,
-            expected_len
-        );
-    }
-
-    #[test]
-    #[cfg(all(feature = "tls-openssl", not(ossl350)))]
-    fn test_pqc_panic_expected_without_ossl350() {
-        // Without ossl350 cfg, PQC cannot be enabled (would panic in provider())
-        if *crate::PQC_ENABLED {
-            panic!("PQC_ENABLED=true without ossl350 cfg - provider() will panic");
-        }
     }
 }
