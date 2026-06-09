@@ -42,7 +42,7 @@ pub enum CrlError {
 /// refreshes (~12h), so CRL changes apply on that cadence unless the server config path changes.
 ///
 /// For **outbound** mesh TLS, [`crate::tls::WorkloadCertificate::outbound_connector`] calls
-/// [`CrlManager::get_crl_ders`] when building each new client connector (e.g. new HBONE pool
+/// [`CrlManager::get_crls`] when building each new client connector (e.g. new HBONE pool
 /// connections), so CRL file updates apply to new handshakes without waiting for cert rotation.
 pub struct CrlManager {
     inner: Arc<RwLock<CrlManagerInner>>,

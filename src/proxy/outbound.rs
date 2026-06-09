@@ -277,7 +277,13 @@ impl OutboundConnection {
                 .await?;
             let connector =
                 cert.outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())?;
-            let tls_stream = connector.connect(upgraded).await?;
+            let tls_stream = connector.connect(upgraded).await.inspect_err(|e| {
+                if crate::tls::io_error_is_cert_revoked(e) {
+                    self.pi
+                        .metrics
+                        .record_crl_rejection(crate::proxy::metrics::Reporter::source);
+                }
+            })?;
             let (_, ssl) = tls_stream.get_ref();
             let peer_identity = identity_from_connection(ssl);
 
