@@ -315,12 +315,10 @@ impl Store {
                 // <pod-hostname>.<pod-sub-domain>.<namespace>.svc.<cluster-domain>.
                 out.push(append_name(name.clone(), &self.svc_domain));
             }
-            4 => {
-                if has_domain(name, SVC.deref()) {
-                    // Expand <pod-hostname>.<pod-sub-domain>.<namespace>.svc to
-                    // <pod-hostname>.<pod-sub-domain>.<namespace>.svc.<cluster-domain>.
-                    out.push(append_name(name.clone(), &self.domain));
-                }
+            4 if has_domain(name, SVC.deref()) => {
+                // Expand <pod-hostname>.<pod-sub-domain>.<namespace>.svc to
+                // <pod-hostname>.<pod-sub-domain>.<namespace>.svc.<cluster-domain>.
+                out.push(append_name(name.clone(), &self.domain));
             }
             _ => {
                 // Everything else is either already an FQDN or not a supported
