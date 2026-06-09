@@ -166,6 +166,28 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
     })
 }
 
+/// Returns true if the given [`std::io::Error`] wraps a rustls
+/// [`rustls::CertificateError::Revoked`] error, meaning the TLS peer's certificate (or a
+/// certificate in its chain) was rejected because it appears in a loaded CRL.
+pub fn io_error_is_cert_revoked(e: &std::io::Error) -> bool {
+    e.get_ref()
+        .and_then(|src| src.downcast_ref::<rustls::Error>())
+        .is_some_and(|re| {
+            matches!(
+                re,
+                rustls::Error::InvalidCertificate(rustls::CertificateError::Revoked)
+            )
+        })
+}
+
+/// Returns true if the given [`TlsError`] represents a CRL certificate revocation rejection.
+pub fn tls_error_is_cert_revoked(e: &TlsError) -> bool {
+    match e {
+        TlsError::Handshake(io_err) => io_error_is_cert_revoked(io_err),
+        _ => false,
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum TlsError {
     #[error("tls handshake error: {0:?}")]

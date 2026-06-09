@@ -74,6 +74,8 @@ struct ConnSpawner {
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     local_workload: Arc<LocalWorkloadInformation>,
     timeout_rx: watch::Receiver<bool>,
+    crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
+    metrics: Arc<crate::proxy::Metrics>,
 }
 
 // Does nothing but spawn new conns when asked
@@ -82,7 +84,7 @@ impl ConnSpawner {
         debug!("spawning new pool conn for {}", key);
 
         let cert = self.local_workload.fetch_certificate().await?;
-        let connector = cert.outbound_connector(key.dst_id.clone())?;
+        let connector = cert.outbound_connector(key.dst_id.clone(), self.crl_manager.clone())?;
         let tcp_stream = super::freebind_connect(None, key.dst, self.socket_factory.as_ref())
             .await
             .map_err(|e: io::Error| match e.kind() {
@@ -90,7 +92,12 @@ impl ConnSpawner {
                 _ => e.into(),
             })?;
 
-        let tls_stream = connector.connect(tcp_stream).await?;
+        let tls_stream = connector.connect(tcp_stream).await.inspect_err(|e| {
+            if crate::tls::io_error_is_cert_revoked(e) {
+                self.metrics
+                    .record_crl_rejection(crate::proxy::metrics::Reporter::source);
+            }
+        })?;
         trace!("connector connected, handshaking");
         let sender = h2::client::spawn_connection(
             self.cfg.clone(),
@@ -338,6 +345,8 @@ impl WorkloadHBONEPool {
         cfg: Arc<crate::config::Config>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         local_workload: Arc<LocalWorkloadInformation>,
+        crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
+        metrics: Arc<crate::proxy::Metrics>,
     ) -> WorkloadHBONEPool {
         let (timeout_tx, timeout_rx) = watch::channel(false);
         let (timeout_send, timeout_recv) = watch::channel(false);
@@ -348,6 +357,8 @@ impl WorkloadHBONEPool {
             socket_factory,
             local_workload,
             timeout_rx: timeout_recv.clone(),
+            crl_manager,
+            metrics,
         };
 
         Self {
@@ -1028,7 +1039,13 @@ mod test {
             mock_proxy_state,
             identity::mock::new_secret_manager(Duration::from_secs(10)),
         ));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, local_workload);
+        let pool = WorkloadHBONEPool::new(
+            Arc::new(cfg),
+            sock_fact,
+            local_workload,
+            None,
+            Arc::new(crate::proxy::Metrics::new(&mut Registry::default())),
+        );
         let server = TestServer {
             conn_counter,
             drop_rx,

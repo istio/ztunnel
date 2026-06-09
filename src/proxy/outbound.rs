@@ -84,6 +84,8 @@ impl Outbound {
             self.pi.cfg.clone(),
             self.pi.socket_factory.clone(),
             self.pi.local_workload_information.clone(),
+            self.pi.crl_manager.clone(),
+            self.pi.metrics.clone(),
         );
         let pi = self.pi.clone();
         let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
@@ -273,8 +275,15 @@ impl OutboundConnection {
                 .local_workload_information
                 .fetch_certificate()
                 .await?;
-            let connector = cert.outbound_connector(wl_key.dst_id.clone())?;
-            let tls_stream = connector.connect(upgraded).await?;
+            let connector =
+                cert.outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())?;
+            let tls_stream = connector.connect(upgraded).await.inspect_err(|e| {
+                if crate::tls::io_error_is_cert_revoked(e) {
+                    self.pi
+                        .metrics
+                        .record_crl_rejection(crate::proxy::metrics::Reporter::source);
+                }
+            })?;
             let (_, ssl) = tls_stream.get_ref();
             let peer_identity = identity_from_connection(ssl);
 
@@ -889,6 +898,8 @@ mod tests {
                 cfg.clone(),
                 sock_fact,
                 local_workload_information.clone(),
+                None,
+                test_proxy_metrics(),
             ),
             hbone_port: cfg.inbound_addr.port(),
         };
@@ -2021,6 +2032,8 @@ mod tests {
                 cfg.clone(),
                 sock_fact,
                 local_workload_information.clone(),
+                None,
+                test_proxy_metrics(),
             ),
             hbone_port: cfg.inbound_addr.port(),
         };

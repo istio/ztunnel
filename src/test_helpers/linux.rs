@@ -114,13 +114,14 @@ impl WorkloadManager {
     /// Warning: currently, workloads are not dynamically update; they are snapshotted at the time
     /// deploy_ztunnel is called. As such, you must ensure this is called after all other workloads are created.
     pub async fn deploy_ztunnel(&mut self, node: &str) -> anyhow::Result<TestApp> {
-        self.deploy_dedicated_ztunnel(node, None).await
+        self.deploy_dedicated_ztunnel(node, None, None).await
     }
 
     /// deploy_ztunnel runs a ztunnel instance for dedicated mode.
     pub async fn deploy_dedicated_ztunnel(
         &mut self,
         node: &str,
+        cfg_override: Option<config::Config>,
         wli: Option<state::WorkloadInfo>,
     ) -> anyhow::Result<TestApp> {
         let mut inpod_uds: PathBuf = "/dev/null".into();
@@ -204,6 +205,7 @@ impl WorkloadManager {
         // Config for ztunnel's own identity and workload, primarily for when it acts as a server (metrics endpoint).
         let cfg_ztunnel_identity = ztunnel_shared_identity.clone();
         let cfg_ztunnel_workload_info = ztunnel_shared_workload_info.clone();
+        let base_config = cfg_override.unwrap_or_else(|| config::parse_config().unwrap());
 
         // Config for the workload this ztunnel instance is proxying for :
         // If Shared, ztunnel is effectively proxying for itself
@@ -234,7 +236,7 @@ impl WorkloadManager {
             localhost_app_tunnel: true,
             ztunnel_identity: cfg_ztunnel_identity,
             ztunnel_workload: cfg_ztunnel_workload_info,
-            ..config::parse_config().unwrap()
+            ..base_config
         };
 
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
