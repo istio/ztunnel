@@ -67,14 +67,14 @@ pub static CRYPTO_PROVIDER: &str = "tls-openssl";
 // In that case, and any future ones, it is critical to guard the code with appropriate `cfg` guards.
 
 #[cfg(feature = "tls-boring")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
+pub(crate) fn provider() -> Arc<CryptoProvider> {
     // Due to 'fips-only' feature on the boring provider, this will use only AES_256_GCM_SHA384
     // and AES_128_GCM_SHA256
     Arc::new(boring_rustls_provider::provider())
 }
 
 #[cfg(feature = "tls-ring")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
+pub(crate) fn provider() -> Arc<CryptoProvider> {
     let mut cipher_suites = vec![
         rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
         rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
@@ -95,7 +95,7 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
 }
 
 #[cfg(feature = "tls-aws-lc")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
+pub(crate) fn provider() -> Arc<CryptoProvider> {
     let mut cipher_suites = vec![
         rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
         rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256,
@@ -122,7 +122,7 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
 }
 
 #[cfg(feature = "tls-openssl")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
+pub(crate) fn provider() -> Arc<CryptoProvider> {
     let mut cipher_suites = vec![
         rustls_openssl::cipher_suite::TLS13_AES_256_GCM_SHA384,
         rustls_openssl::cipher_suite::TLS13_AES_128_GCM_SHA256,

@@ -1,0 +1,73 @@
+# Overrides for the SPIFFE Helm umbrella chart (spiffe/spire).
+#
+# Documented values:
+#   https://github.com/spiffe/helm-charts-hardened/tree/main/charts/spire
+#
+# The umbrella chart wires spire-server, spire-agent, and the
+# spire-controller-manager together with shared `global.spire.*` config.
+# We override only what's required to:
+#   (a) use the `matheuscscp:broker-api` images,
+#   (b) point at the cluster trust domain matching ztunnel's TRUST_DOMAIN,
+#   (c) expose the standard Workload-API socket at a node-local path that
+#       ztunnel can mount (used for ztunnel's own SVID bootstrap),
+#   (d) the SPIFFE Broker endpoint is added on top via a post-install
+#       ConfigMap overlay performed by setup.sh because the upstream chart
+#       has no escape hatch for the `experimental.broker {}` HCL block.
+#
+# Image registry/repository/tag fields are interpolated by setup.sh from
+# $SPIRE_SERVER_IMAGE and $SPIRE_AGENT_IMAGE via `--set`.
+
+global:
+  spire:
+    clusterName: ztunnel-spiffe-broker
+    trustDomain: cluster.local
+    recommendations:
+      enabled: true
+    # We pre-create the namespaces in setup.sh with kubectl so this script
+    # is idempotent across reruns where one namespace may already exist.
+    namespaces:
+      create: false
+
+spire-server:
+  image:
+    registry: ""
+    repository: ""
+    tag: ""
+  # caSubject is required by the chart since v0.20 — fill with dev-only
+  # values; the broker mints leaves that inherit this CA subject.
+  caSubject:
+    country: US
+    organization: SPIFFE
+    commonName: ztunnel-spiffe-broker
+  nodeAttestor:
+    k8sPSAT:
+      enabled: true
+
+spire-agent:
+  image:
+    registry: ""
+    repository: ""
+    tag: ""
+  # Standard SPIRE Workload API socket. ztunnel bootstraps its OWN SVID
+  # from this socket (via the k8s workload attestor on the agent), then
+  # uses that SVID to mTLS into the broker endpoint at
+  #   /run/spire/agent-sockets/broker.sock
+  # which is provisioned by the post-install ConfigMap overlay in setup.sh.
+  socketPath: /run/spire/agent-sockets/api.sock
+  # Host PID is required for both the agent's k8s/unix workload attestors
+  # and for ztunnel's own PidAttestor to see workload PIDs.
+  hostPID: true
+  workloadAttestors:
+    k8s:
+      enabled: true
+      skipKubeletVerification: true
+    unix:
+      enabled: true
+  tolerations:
+    - operator: Exists
+
+spire-controller-manager:
+  # Drive registration via the ClusterSPIFFEID CRD in clusterspiffeids.yaml
+  # rather than inlining identity templates here.
+  identities:
+    enabled: false

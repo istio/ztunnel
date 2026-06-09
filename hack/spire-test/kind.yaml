@@ -1,0 +1,24 @@
+# Kind cluster for the ztunnel SPIFFE Broker testbed.
+#
+# Layout:
+#   - 1 control-plane
+#   - 2 workers; SPIRE agents (DaemonSet) land on every node
+#
+# Agent socket sharing:
+#   The SPIRE agent writes its broker socket to /run/spire/agent-sockets
+#   on the node (which is just a directory inside the kind-node container).
+#   ztunnel mounts the same directory via a node-local hostPath
+#   (DirectoryOrCreate) — see istio/ztunnel-patch.yaml. No host-side
+#   bind mount is required, so this config stays portable across
+#   bare-metal hosts and docker-in-docker / devcontainer setups.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ztunnel-spiffe-broker
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+networking:
+  # ztunnel HBONE + capture works fine on IPv4; keep things deterministic.
+  ipFamily: ipv4
+  disableDefaultCNI: false
