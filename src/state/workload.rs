@@ -1602,6 +1602,7 @@ mod tests {
                         routing_preference: vec![],
                         mode: 0,
                         health_policy: HealthPolicy::AllowAll as i32,
+                        dns_connect_strategy: 0,
                     }),
                     ip_families: 0,
                     extensions: Default::default(),
@@ -1655,6 +1656,7 @@ mod tests {
                 routing_preference: vec![],
                 mode: 0,
                 health_policy: HealthPolicy::AllowAll as i32,
+                dns_connect_strategy: 0,
             }),
             ip_families: 0,
             extensions: Default::default(),
@@ -1769,6 +1771,7 @@ mod tests {
             routing_preference: vec![],
             mode: 0,
             health_policy: HealthPolicy::AllowAll as i32,
+            dns_connect_strategy: 0,
         });
         updater
             .insert_service(&mut state.write().unwrap(), swapped)
