@@ -611,8 +611,11 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     // Note: since DNS proxy runs in the pod network namespace, we will recompute IPv6 enablement
     // on a pod-by-pod basis.
     let dns_proxy_addr: Address = match pc.proxy_metadata.get(DNS_PROXY_ADDR_METADATA) {
-        Some(dns_addr) => Address::new(ipv6_localhost_enabled, dns_addr)
-            .unwrap_or_else(|_| panic!("failed to parse DNS_PROXY_ADDR: {dns_addr}")),
+        Some(dns_addr) => Address::new(ipv6_localhost_enabled, dns_addr).map_err(|e| {
+            Error::InvalidState(format!(
+                "failed to parse {DNS_PROXY_ADDR_METADATA}: {dns_addr} ({e})"
+            ))
+        })?,
         None => Address::Localhost(ipv6_localhost_enabled, DEFAULT_DNS_PORT),
     };
 
@@ -1229,5 +1232,21 @@ pub mod tests {
             env::remove_var(ZTUNNEL_WORKER_THREADS);
             env::remove_var(ZTUNNEL_CPU_LIMIT);
         }
+    }
+
+    #[test]
+    fn invalid_dns_proxy_addr_returns_error() {
+        let pc = ProxyConfig {
+            proxy_metadata: HashMap::from([(
+                DNS_PROXY_ADDR_METADATA.to_string(),
+                "not-an-address".to_string(),
+            )]),
+            ..ProxyConfig::default()
+        };
+
+        let err = construct_config(pc).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidState(msg) if msg.contains("failed to parse DNS_PROXY_ADDR: not-an-address"))
+        );
     }
 }
