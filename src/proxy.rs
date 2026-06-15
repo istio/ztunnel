@@ -177,6 +177,11 @@ pub struct LocalWorkloadInformation {
     // full_cert_manager gives access to the full SecretManager. This MUST only be given restricted
     // access to the appropriate certificates
     full_cert_manager: Arc<SecretManager>,
+    /// Pod UID identifying this specific workload. Populated by the inpod
+    /// control loop when the configured CA provider is the SPIFFE Broker;
+    /// `None` for the Istio CA path so per-pod attestation stays opt-in and
+    /// SVIDs continue to dedupe across pods sharing an identity.
+    workload_uid: Option<Strng>,
 }
 
 impl LocalWorkloadInformation {
@@ -189,6 +194,23 @@ impl LocalWorkloadInformation {
             wi,
             state,
             full_cert_manager: cert_manager,
+            workload_uid: None,
+        }
+    }
+
+    /// Variant for inpod broker mode: carries the pod's UID so
+    /// `fetch_certificate` can use the workload-keyed broker path.
+    pub fn new_with_inpod(
+        wi: Arc<WorkloadInfo>,
+        state: DemandProxyState,
+        cert_manager: Arc<SecretManager>,
+        workload_uid: Strng,
+    ) -> LocalWorkloadInformation {
+        LocalWorkloadInformation {
+            wi,
+            state,
+            full_cert_manager: cert_manager,
+            workload_uid: Some(workload_uid),
         }
     }
 
@@ -204,12 +226,22 @@ impl LocalWorkloadInformation {
             .get_workload()
             .await
             .map_err(|_| identity::Error::UnknownWorkload(self.workload_info()))?;
-        let id = &Identity::Spiffe {
+        let id = Identity::Spiffe {
             trust_domain: wl.trust_domain.clone(),
             namespace: (&self.wi.namespace).into(),
             service_account: (&self.wi.service_account).into(),
         };
-        self.full_cert_manager.fetch_certificate(id).await
+        // If we have per-pod broker context, use the workload-keyed fetch
+        // so the SPIFFE Broker attestor sees the pod UID. Otherwise fall
+        // through to the identity-only path used by Istio CA.
+        match self.workload_uid.as_ref() {
+            Some(uid) => {
+                self.full_cert_manager
+                    .fetch_workload_certificate(&id, self.wi.clone(), uid.clone())
+                    .await
+            }
+            _ => self.full_cert_manager.fetch_certificate(&id).await,
+        }
     }
 
     pub fn workload_info(&self) -> Arc<WorkloadInfo> {
