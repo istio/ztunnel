@@ -19,6 +19,7 @@ pub mod csr;
 mod lib;
 #[cfg(any(test, feature = "testing"))]
 pub mod mock;
+mod verifier;
 mod workload;
 
 use std::sync::Arc;
@@ -28,7 +29,6 @@ pub use crate::tls::control::*;
 pub use crate::tls::lib::*;
 pub use crate::tls::workload::*;
 use hyper::http::uri::InvalidUri;
-use rustls::server::VerifierBuilderError;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -61,9 +61,6 @@ pub enum Error {
     #[error("invalid certificate generation: {0:?}")]
     #[cfg(any(feature = "tls-ring", feature = "tls-aws-lc"))]
     RcgenError(Arc<rcgen::Error>),
-
-    #[error("failed to build server verifier: {0}")]
-    ServerVerifierBuilderError(#[from] VerifierBuilderError),
 
     #[error("invalid alt hostname: {0}")]
     InvalidAltHostname(#[from] rustls::pki_types::InvalidDnsNameError),

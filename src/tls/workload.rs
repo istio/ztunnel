@@ -16,7 +16,7 @@ use crate::identity::Identity;
 use std::error::Error;
 use std::fmt::{Debug, Display};
 
-use crate::tls::lib::provider;
+use crate::tls::verifier;
 use crate::tls::{ServerCertProvider, TlsError};
 use futures_util::TryFutureExt;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -24,21 +24,18 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{
-    CertRevocationListError, ClientConfig, DigitallySignedStruct, DistinguishedName, OtherError,
-    RootCertStore, SignatureScheme,
+    ClientConfig, DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme,
 };
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use webpki::{
-    CertRevocationList, EndEntityCert, ExpirationPolicy, KeyUsage, RevocationCheckDepth,
-    RevocationOptionsBuilder, UnknownStatusPolicy,
-};
+use webpki::KeyUsage;
 
 use crate::strng::Strng;
 use crate::tls;
+use crate::tls::crl::CrlManager;
 use tokio::net::TcpStream;
 use tokio_rustls::client;
 use tracing::{debug, trace};
@@ -54,15 +51,36 @@ impl<F: ServerCertProvider> InboundAcceptor<F> {
     }
 }
 
+/// Inbound mesh-TLS client-certificate verifier.
+///
+/// Verifies that the client certificate chains to a trusted root and is not revoked using
+/// the shared webpki routine ([`verifier::verify_cert_chain`]),
+/// then enforces that the client's SPIFFE identity belongs to the expected trust domain.
+///
+/// CRLs are read from the [`CrlManager`] on every handshake, so CRL file updates take effect on new
+/// inbound connections immediately (matching outbound).
 #[derive(Debug)]
-pub(super) struct TrustDomainVerifier {
-    base: Arc<dyn ClientCertVerifier>,
+pub(super) struct WorkloadClientVerifier {
+    roots: Arc<RootCertStore>,
     trust_domain: Option<Strng>,
+    crl_manager: Option<Arc<CrlManager>>,
+    /// Trust-anchor subject DNs advertised to clients in the TLS CertificateRequest
+    root_hint_subjects: Vec<DistinguishedName>,
 }
 
-impl TrustDomainVerifier {
-    pub fn new(base: Arc<dyn ClientCertVerifier>, trust_domain: Option<Strng>) -> Arc<Self> {
-        Arc::new(Self { base, trust_domain })
+impl WorkloadClientVerifier {
+    pub fn new(
+        roots: Arc<RootCertStore>,
+        trust_domain: Option<Strng>,
+        crl_manager: Option<Arc<CrlManager>>,
+    ) -> Arc<Self> {
+        let root_hint_subjects = roots.subjects();
+        Arc::new(Self {
+            roots,
+            trust_domain,
+            crl_manager,
+            root_hint_subjects,
+        })
     }
 
     fn verify_trust_domain(&self, client_cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
@@ -99,11 +117,11 @@ impl TrustDomainVerifier {
     }
 }
 
-// Implement our custom ClientCertVerifier logic. We only want to add an extra check, but
-// need a decent amount of boilerplate to do so.
-impl ClientCertVerifier for TrustDomainVerifier {
+// Custom ClientCertVerifier: chain + CRL verification via the shared webpki routine, plus our
+// trust-domain identity check. The signature/scheme methods delegate to the active crypto provider.
+impl ClientCertVerifier for WorkloadClientVerifier {
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        self.base.root_hint_subjects()
+        &self.root_hint_subjects
     }
 
     fn verify_client_cert(
@@ -112,11 +130,18 @@ impl ClientCertVerifier for TrustDomainVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        let res = self
-            .base
-            .verify_client_cert(end_entity, intermediates, now)?;
+        // CRLs are read per handshake inside verify_cert_chain, so updates apply to new connections
+        // without waiting for cert rotation.
+        verifier::verify_cert_chain(
+            end_entity,
+            intermediates,
+            &self.roots,
+            now,
+            KeyUsage::client_auth(),
+            self.crl_manager.as_deref(),
+        )?;
         self.verify_trust_domain(end_entity)?;
-        Ok(res)
+        Ok(ClientCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -125,7 +150,7 @@ impl ClientCertVerifier for TrustDomainVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.base.verify_tls12_signature(message, cert, dss)
+        verifier::verify_tls12_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
@@ -134,11 +159,11 @@ impl ClientCertVerifier for TrustDomainVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.base.verify_tls13_signature(message, cert, dss)
+        verifier::verify_tls13_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.base.supported_verify_schemes()
+        verifier::supported_verify_schemes()
     }
 }
 
@@ -187,47 +212,6 @@ pub struct IdentityVerifier {
     pub(super) roots: Arc<RootCertStore>,
     pub(super) identity: Vec<Identity>,
     pub(super) crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
-}
-
-/// Maps `rustls-webpki` errors to `rustls::Error`.
-///
-/// We map the variants that carry structured `CertificateError` / CRL types used by rustls for
-/// handshake reporting; everything else (signature-algorithm context, uncommon path failures, and
-/// future `#[non_exhaustive]` variants) is wrapped in [`CertificateError::Other`] while preserving
-/// the original `webpki::Error` for logs.
-fn webpki_error_to_rustls(error: webpki::Error) -> rustls::Error {
-    use rustls::CertificateError;
-    use webpki::Error;
-
-    match error {
-        Error::BadDer | Error::BadDerTime | Error::TrailingData(_) => {
-            CertificateError::BadEncoding.into()
-        }
-        Error::CertNotValidYet { time, not_before } => {
-            CertificateError::NotValidYetContext { time, not_before }.into()
-        }
-        Error::CertExpired { time, not_after } => {
-            CertificateError::ExpiredContext { time, not_after }.into()
-        }
-        Error::UnknownIssuer => CertificateError::UnknownIssuer.into(),
-        Error::CertNotValidForName(ctx) => CertificateError::NotValidForNameContext {
-            expected: ctx.expected,
-            presented: ctx.presented,
-        }
-        .into(),
-        Error::CertRevoked => CertificateError::Revoked.into(),
-        Error::UnknownRevocationStatus => CertificateError::UnknownRevocationStatus.into(),
-        Error::CrlExpired { time, next_update } => {
-            CertificateError::ExpiredRevocationListContext { time, next_update }.into()
-        }
-        Error::IssuerNotCrlSigner => CertRevocationListError::IssuerInvalidForCrl.into(),
-        Error::InvalidSignatureForPublicKey => CertificateError::BadSignature.into(),
-        #[allow(deprecated)]
-        Error::RequiredEkuNotFound | Error::RequiredEkuNotFoundContext(_) => {
-            CertificateError::InvalidPurpose.into()
-        }
-        e => CertificateError::Other(OtherError(std::sync::Arc::new(e))).into(),
-    }
 }
 
 impl IdentityVerifier {
@@ -286,7 +270,7 @@ impl ServerCertVerifier for IdentityVerifier {
     /// Will verify the certificate is valid in the following ways:
     /// - Signed by a trusted `RootCertStore` CA
     /// - Not expired
-    /// - Optional CRL checking (same webpki policy as inbound `WebPkiClientVerifier` when enabled)
+    /// - Optional CRL checking (shared webpki policy with inbound when enabled)
     /// - SPIFFE URI SAN matches expected identities (not DNS `ServerName`)
     fn verify_server_cert(
         &self,
@@ -296,37 +280,14 @@ impl ServerCertVerifier for IdentityVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        let algs = provider().signature_verification_algorithms;
-        let ee = EndEntityCert::try_from(end_entity).map_err(webpki_error_to_rustls)?;
-
-        // must convert from get_crls() returned OwnedCertRevocationList into CertRevocationList<'_> before passing to RevocationOptionsBuilder.
-        let crls: Arc<Vec<CertRevocationList<'static>>> = self
-            .crl_manager
-            .as_deref()
-            .map(|mgr| mgr.get_crls())
-            .unwrap_or_default();
-        let crl_refs: Vec<&CertRevocationList<'_>> = crls.iter().collect();
-
-        let revocation = (!crl_refs.is_empty()).then(|| {
-            RevocationOptionsBuilder::new(&crl_refs)
-                .expect("non-empty CRL list")
-                .with_depth(RevocationCheckDepth::Chain)
-                .with_status_policy(UnknownStatusPolicy::Allow)
-                .with_expiration_policy(ExpirationPolicy::Ignore)
-                .build()
-        });
-
-        // verifies cert chain
-        ee.verify_for_usage(
-            algs.all,
-            &self.roots.roots,
+        verifier::verify_cert_chain(
+            end_entity,
             intermediates,
+            &self.roots,
             now,
             KeyUsage::server_auth(),
-            revocation,
-            None,
-        )
-        .map_err(webpki_error_to_rustls)?;
+            self.crl_manager.as_deref(),
+        )?;
 
         if !ocsp_response.is_empty() {
             trace!("Unvalidated OCSP response: {ocsp_response:?}");
@@ -345,12 +306,7 @@ impl ServerCertVerifier for IdentityVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &provider().signature_verification_algorithms,
-        )
+        verifier::verify_tls12_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
@@ -359,17 +315,10 @@ impl ServerCertVerifier for IdentityVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &provider().signature_verification_algorithms,
-        )
+        verifier::verify_tls13_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        provider()
-            .signature_verification_algorithms
-            .supported_schemes()
+        verifier::supported_verify_schemes()
     }
 }
