@@ -69,7 +69,7 @@ hyper = { version = "1.10", features = ["full"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["logging", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["full"] }
 ipnet = { version = "2.12", features = ["serde"] }
-itertools = "0.14"
+itertools = "0.15"
 keyed_priority_queue = "0.4"
 libc = "0.2"
 log = "0.4"
@@ -79,7 +79,7 @@ notify-debouncer-full = "0.7"
 once_cell = "1.21"
 num_cpus = "1.16"
 ppp = "2.3"
-prometheus-client = { version = "0.24" }
+prometheus-client = { version = "0.25" }
 prometheus-parse = "0.2"
 prost = { version = "0.14", default-features = false }
 prost-types = { version = "0.14", default-features = false }
