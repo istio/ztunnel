@@ -84,6 +84,8 @@ pub enum ResponseFlags {
     NetworkPolicyError,
     // Identity/certificate error
     IdentityError,
+    // Connection terminated because a peer certificate was revoked by a CRL
+    CertificateRevoked,
 }
 
 impl EncodeLabelValue for ResponseFlags {
@@ -96,6 +98,7 @@ impl EncodeLabelValue for ResponseFlags {
             ResponseFlags::Http2HandshakeFailure => writer.write_str("H2_HANDSHAKE_FAILURE"),
             ResponseFlags::NetworkPolicyError => writer.write_str("NETWORK_POLICY"),
             ResponseFlags::IdentityError => writer.write_str("IDENTITY_ERROR"),
+            ResponseFlags::CertificateRevoked => writer.write_str("CERT_REVOKED"),
         }
     }
 }
@@ -704,6 +707,7 @@ impl ConnectionResult {
                 | proxy::Error::AuthorizationPolicyLateRejection => {
                     ResponseFlags::AuthorizationPolicyDenied
                 }
+                proxy::Error::CertificateRevoked => ResponseFlags::CertificateRevoked,
                 proxy::Error::ConnectionFailed(_) => ResponseFlags::ConnectionFailure,
                 _ => ResponseFlags::ConnectionFailure,
             };
@@ -733,6 +737,7 @@ impl ConnectionResult {
                 | ResponseFlags::Http2HandshakeFailure
                 | ResponseFlags::NetworkPolicyError
                 | ResponseFlags::IdentityError
+                | ResponseFlags::CertificateRevoked
         ) {
             self.metrics.connection_failures.get_or_create(tl).inc();
         }

@@ -14,13 +14,14 @@
 
 use futures_util::TryFutureExt;
 use http::{Method, Response, StatusCode};
+use rustls::CommonState;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 use tls_listener::AsyncTls;
 use tokio::sync::watch;
 
-use tracing::{Instrument, debug, error, info, info_span, trace_span};
+use tracing::{Instrument, debug, error, info, info_span, trace_span, warn};
 
 use super::{
     ConnectionResult, ConnectionResultBuilder, Error, HboneAddress, LocalWorkloadInformation,
@@ -149,6 +150,17 @@ impl Inbound {
                     };
                     debug!(%conn, "accepted connection");
                     let cfg = pi.cfg.clone();
+                    // Enforce CRL revocation on this existing connection when a CRL is configured.
+                    // The revocation state owns the per-connection signal that `serve_connection`
+                    // sets when this peer's cert is revoked; each stream's serving future watches a
+                    // receiver of it so the access log attributes the termination (mirrors the RBAC
+                    // late-rejection drain). Re-checking revocation reuses the same webpki
+                    // chain-validation path as the handshake, so it needs our own cert's trust
+                    // anchors alongside the peer chain already captured from `ssl`. Boxed so the
+                    // `fetch_certificate` await doesn't inline its state into `serve_client` (this
+                    // future must stay small — see the assertion below).
+                    let revocation = Box::pin(Self::build_revocation(&pi, ssl)).await;
+                    let revoked_rx = revocation.as_ref().map(|r| r.subscribe_revoked());
                     let request_handler = move |req| {
                         let id = Self::extract_traceparent(&req);
                         let peer = conn.src;
@@ -156,6 +168,7 @@ impl Inbound {
                             pi.clone(),
                             conn.clone(),
                             self.enable_orig_src,
+                            revoked_rx.clone(),
                             req,
                         )
                         .instrument(info_span!("inbound", %id, %peer));
@@ -169,6 +182,7 @@ impl Inbound {
                         tls,
                         drain,
                         force_shutdown,
+                        revocation,
                         request_handler,
                     );
                     // This is per HBONE connection, so while would be nice to be small, at least it
@@ -192,6 +206,29 @@ impl Inbound {
         .await
     }
 
+    /// Builds this connection's CRL revocation state, or `None` when CRL enforcement is disabled.
+    /// Kept as its own `async fn` (and boxed at the call site) so the `fetch_certificate` await
+    /// doesn't grow the size of the caller's future.
+    async fn build_revocation(
+        pi: &ProxyInputs,
+        ssl: &CommonState,
+    ) -> Option<Box<h2::revocation::ConnectionRevocation>> {
+        let crl_manager = pi.crl_manager.as_ref()?;
+        match pi.local_workload_information.fetch_certificate().await {
+            Ok(cert) => Some(h2::revocation::ConnectionRevocation::new(
+                ssl,
+                crl_manager.clone(),
+                pi.metrics.clone(),
+                cert.root_store(),
+                webpki::KeyUsage::client_auth(),
+            )),
+            Err(e) => {
+                warn!("failed to fetch certificate for CRL revocation enforcement: {e}");
+                None
+            }
+        }
+    }
+
     fn extract_traceparent(req: &H2Request) -> TraceParent {
         req.headers()
             .get(TRACEPARENT_HEADER)
@@ -206,6 +243,7 @@ impl Inbound {
         pi: Arc<ProxyInputs>,
         conn: Connection,
         enable_original_source: bool,
+        revoked: Option<watch::Receiver<bool>>,
         req: H2Request,
     ) {
         let src = conn.src;
@@ -344,7 +382,7 @@ impl Inbound {
                 .instrument(trace_span!("hbone server"))
                 .await
             });
-        let res = handle_connection!(conn_guard, send);
+        let res = handle_connection!(conn_guard, revoked, send);
         ri.result_tracker.record(res);
     }
 

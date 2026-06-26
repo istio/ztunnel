@@ -45,7 +45,7 @@ use webpki::{
 /// on new connections immediately — both directions get identical snapshot semantics for free.
 ///
 /// Does NOT perform any SAN / identity / hostname check — callers layer that on top.
-pub(crate) fn verify_cert_chain(
+pub fn verify_cert_chain(
     end_entity: &CertificateDer<'_>,
     intermediates: &[CertificateDer<'_>],
     roots: &RootCertStore,

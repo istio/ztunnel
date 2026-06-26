@@ -280,6 +280,13 @@ impl WorkloadCertificate {
         self.cert.identity()
     }
 
+    /// The trust anchors this certificate chains to. Used to re-run the shared webpki
+    /// chain-validation path ([`crate::tls::verifier::verify_cert_chain`]) against a peer chain
+    /// captured at handshake time, e.g. to re-check CRL revocation on an existing connection.
+    pub fn root_store(&self) -> Arc<RootCertStore> {
+        self.root_store.clone()
+    }
+
     // TODO: can we precompute some or all of this?
 
     pub(in crate::tls) fn cert_and_intermediates_der(&self) -> Vec<CertificateDer<'static>> {

@@ -15,6 +15,7 @@
 use crate::baggage::{Baggage, parse_baggage_header};
 use crate::config;
 use crate::identity::Identity;
+use crate::proxy::h2::revocation::{self, ConnectionRevocation};
 use crate::proxy::{BAGGAGE_HEADER, Error};
 use bytes::{Buf, Bytes};
 use h2::SendStream;
@@ -29,7 +30,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::oneshot;
-use tokio::sync::watch::Receiver;
+use tokio::sync::watch::{self, Receiver};
 use tracing::{Instrument, debug, error, trace, warn};
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,10 @@ pub struct H2ConnectClient {
     pub max_allowed_streams: u16,
     stream_count: Arc<AtomicU16>,
     wl_key: WorkloadKey,
+    /// Tunnel revocation signal, surfaced to downstream connections via [`Self::revoked_receiver`]
+    /// so they can attribute a revoked teardown as `CERT_REVOKED`.
+    /// `None` when CRL enforcement is disabled.
+    revoked_rx: Option<watch::Receiver<bool>>,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -143,6 +148,13 @@ impl H2ConnectClient {
         let baggage = parse_baggage_header(response.headers().get_all(BAGGAGE_HEADER)).ok();
         Ok((stream, response.into_body(), baggage))
     }
+
+    /// A receiver for this tunnel's CRL revocation signal, or `None` when CRL enforcement is disabled.
+    /// The outbound proxy races this against its data copy (via [`crate::proxy::connection_manager::await_revocation`])
+    /// so a revoked teardown is attributed as `CERT_REVOKED` in the access log — mirroring the inbound per-stream attribution.
+    pub fn revoked_receiver(&self) -> Option<watch::Receiver<bool>> {
+        self.revoked_rx.clone()
+    }
 }
 
 pub async fn spawn_connection(
@@ -150,6 +162,7 @@ pub async fn spawn_connection(
     s: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
     driver_drain: Receiver<bool>,
     wl_key: WorkloadKey,
+    revocation: Option<Box<ConnectionRevocation>>,
 ) -> Result<H2ConnectClient, Error> {
     let mut builder = h2::client::Builder::new();
     builder
@@ -175,12 +188,16 @@ pub async fn spawn_connection(
             .try_into()
             .unwrap_or(u16::MAX),
     );
+    // Subscribe to the tunnel's revocation signal (if CRL enforcement is on) before the revocation
+    // state is moved into the driver task, so each stream this connection produces can attribute a
+    // revoked teardown.
+    let revoked_rx = revocation.as_ref().map(|r| r.subscribe_revoked());
     // spawn a task to poll the connection and drive the HTTP state
     // if we got a drain for that connection, respect it in a race
     // it is important to have a drain here, or this connection will never terminate
     tokio::spawn(
         async move {
-            drive_connection(connection, driver_drain).await;
+            drive_connection(connection, driver_drain, revocation).await;
         }
         .in_current_span(),
     );
@@ -190,12 +207,16 @@ pub async fn spawn_connection(
         stream_count: Arc::new(AtomicU16::new(0)),
         max_allowed_streams,
         wl_key,
+        revoked_rx,
     };
     Ok(c)
 }
 
-async fn drive_connection<S, B>(mut conn: Connection<S, B>, mut driver_drain: Receiver<bool>)
-where
+async fn drive_connection<S, B>(
+    mut conn: Connection<S, B>,
+    mut driver_drain: Receiver<bool>,
+    mut revocation: Option<Box<ConnectionRevocation>>,
+) where
     S: AsyncRead + AsyncWrite + Send + Unpin,
     B: Buf,
 {
@@ -216,6 +237,19 @@ where
         }
         _ = ping_drop_rx => {
             warn!("HBONE ping timeout/error");
+        }
+        // CRL update revoked a cert in this connection's upstream chain. Revocation is a security
+        // event, so we tear the tunnel down abruptly (let `conn` drop below) so any in-flight
+        // streams multiplexed over it are reset. `record_revocation` signals those downstream
+        // connections before the drop so each attributes `CERT_REVOKED` rather than a generic reset.
+        _ = revocation::wait_for_revocation(revocation.as_mut()) => {
+            if let Some(rev) = revocation.as_ref() {
+                let peer = rev.record_revocation(crate::proxy::metrics::Reporter::source);
+                debug!(
+                    %peer,
+                    "terminating outbound connection: upstream certificate revoked by CRL update"
+                );
+            }
         }
         res = conn => {
             match res {
