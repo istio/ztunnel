@@ -632,7 +632,12 @@ impl Resolver for Store {
         // From this point on, we are the authority for the response.
         let is_authoritative = true;
 
-        if !service_family_allowed(&service_match.server, record_type, self.ipv6_enabled) {
+        if !service_family_allowed(
+            &service_match.server,
+            &client,
+            record_type,
+            self.ipv6_enabled,
+        ) {
             access_log(
                 request,
                 Some(&client),
@@ -687,16 +692,37 @@ impl Resolver for Store {
     }
 }
 
-/// service_family_allowed indicates whether the service supports the given record type.
+/// service_family_allowed indicates whether the given record type should be returned to
+/// the requesting client for the given server.
 /// This is primarily to support headless services; an IPv4 only service should only have IPv4 addresses
 /// anyway, so would naturally work.
 /// Headless services, however, do not have VIPs, and the Pods behind them can have dual stack IPs even with
 /// the Service being single-stack. In this case, we are NOT supposed to return both IPs.
 /// If IPv6 is globally disabled, AAAA records are not allowed.
-fn service_family_allowed(server: &Address, record_type: RecordType, ipv6_enabled: bool) -> bool {
+/// Finally, we never return a record of an IP family the requesting client has no address for: a
+/// single-stack IPv4 client must not receive AAAA records (e.g. an auto-allocated IPv6 VIP), since it
+/// would prefer the IPv6 address and fail to connect with "network is unreachable". This mirrors the
+/// sidecar/NDS FilterAddressesByIPFamily behavior, which filters by the requesting proxy's IP family.
+fn service_family_allowed(
+    server: &Address,
+    client: &Workload,
+    record_type: RecordType,
+    ipv6_enabled: bool,
+) -> bool {
     // If IPv6 is globally disabled, don't allow AAAA records
     if !ipv6_enabled && record_type == RecordType::AAAA {
         return false;
+    }
+
+    // Don't return a record of a family the requesting client cannot use. Only constrain a
+    // single-stack client (one that has an address of the opposite family but not this one), so a
+    // client with both families, or one whose addresses are unknown, is unaffected.
+    let client_has_v4 = client.workload_ips.iter().any(|ip| ip.is_ipv4());
+    let client_has_v6 = client.workload_ips.iter().any(|ip| ip.is_ipv6());
+    match record_type {
+        RecordType::AAAA if client_has_v4 && !client_has_v6 => return false,
+        RecordType::A if client_has_v6 && !client_has_v4 => return false,
+        _ => {}
     }
 
     match server {
@@ -1657,6 +1683,60 @@ mod tests {
                 as_name("cluster.local"),
             ]
         );
+    }
+
+    #[test]
+    fn service_family_allowed_filters_by_client_family() {
+        use std::net::IpAddr;
+        // The server type is irrelevant here; the client-family check applies to any server.
+        let server = Address::Workload(Arc::new(test_default_workload()));
+        let with_ips = |ips: Vec<IpAddr>| Workload {
+            workload_ips: ips,
+            ..test_default_workload()
+        };
+        let v4: IpAddr = "1.1.1.1".parse().unwrap();
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+
+        // A single-stack IPv4 client must not be given AAAA records (e.g. an auto-allocated
+        // IPv6 VIP), but still gets A records.
+        let v4_only = with_ips(vec![v4]);
+        assert!(!service_family_allowed(
+            &server,
+            &v4_only,
+            RecordType::AAAA,
+            true
+        ));
+        assert!(service_family_allowed(
+            &server,
+            &v4_only,
+            RecordType::A,
+            true
+        ));
+
+        // A single-stack IPv6 client is the mirror image.
+        let v6_only = with_ips(vec![v6]);
+        assert!(!service_family_allowed(
+            &server,
+            &v6_only,
+            RecordType::A,
+            true
+        ));
+        assert!(service_family_allowed(
+            &server,
+            &v6_only,
+            RecordType::AAAA,
+            true
+        ));
+
+        // A dual-stack client gets both families.
+        let dual = with_ips(vec![v4, v6]);
+        assert!(service_family_allowed(&server, &dual, RecordType::A, true));
+        assert!(service_family_allowed(
+            &server,
+            &dual,
+            RecordType::AAAA,
+            true
+        ));
     }
 
     /// Sort the IP records so that we can directly compare them to the expected. The resulting
