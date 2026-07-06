@@ -182,27 +182,49 @@ impl ProxyStateUpdateMutator {
         fields(uid=%w.uid),
     )]
     pub fn insert_workload(&self, state: &mut ProxyState, w: XdsWorkload) -> anyhow::Result<()> {
+        // Conversion happens here (off any caller-held lock); the store mutation is
+        // the only part that needs the lock.
+        let prepared = PreparedWorkload::try_from_xds(w)?;
         let mut acc = EndpointAccumulator::default();
-        self.insert_workload_into(state, w, &mut acc)?;
+        self.apply_prepared_workload(state, prepared, &mut acc);
         acc.apply(&mut state.services);
         Ok(())
     }
 
-    /// Inserts a workload into the workload store and accumulates its service
-    /// endpoint changes into `acc` (rather than applying them per-endpoint). The
-    /// caller drains `acc` once per push via [EndpointAccumulator::apply].
-    fn insert_workload_into(
+    /// Applies an already-converted batch of updates to the state under the
+    /// caller's write lock. All expensive proto→internal conversion has already
+    /// happened off-lock (see [PreparedUpdate]); this only mutates the stores.
+    /// Endpoint changes are accumulated and applied once per service at the end.
+    fn apply_prepared(&self, state: &mut ProxyState, prepared: Vec<PreparedUpdate>) {
+        let mut acc = EndpointAccumulator::default();
+        for update in prepared {
+            match update {
+                PreparedUpdate::Workload(w) => self.apply_prepared_workload(state, w, &mut acc),
+                // Services are applied in order (already a single clone + reindex,
+                // and must be present before phase-2 endpoint application).
+                PreparedUpdate::Service(s) => self.insert_service_prepared(state, *s),
+                PreparedUpdate::Remove(name) => {
+                    debug!("handling delete {}", name);
+                    self.remove_internal(state, &name, false, &mut acc);
+                }
+            }
+        }
+        acc.apply(&mut state.services);
+    }
+
+    /// Inserts a pre-converted workload into the workload store and accumulates
+    /// its service endpoint changes into `acc` (applied once per service later).
+    fn apply_prepared_workload(
         &self,
         state: &mut ProxyState,
-        w: XdsWorkload,
+        prepared: PreparedWorkload,
         acc: &mut EndpointAccumulator,
-    ) -> anyhow::Result<()> {
+    ) {
         debug!("handling insert");
-
-        // Convert the workload first, so a malformed update leaves the existing
-        // workload untouched.
-        let (workload, services): (Workload, HashMap<String, PortList>) = w.try_into()?;
-        let workload = Arc::new(workload);
+        let PreparedWorkload {
+            workload,
+            endpoints,
+        } = prepared;
 
         // First, remove the entry entirely to make sure things are cleaned up properly.
         self.remove_workload_for_insert(state, &workload.uid, acc);
@@ -210,11 +232,10 @@ impl ProxyStateUpdateMutator {
         // Prefetch the cert for the workload.
         self.cert_fetcher.prefetch_cert(&workload);
 
-        // Lock and upstate the stores.
         state.workloads.insert(workload.clone());
-        accumulate_service_endpoints(&workload, &services, acc)?;
-
-        Ok(())
+        for (service, endpoint) in endpoints {
+            acc.upsert(service, workload.uid.clone(), endpoint);
+        }
     }
 
     pub fn remove(&self, state: &mut ProxyState, xds_name: &Strng) {
@@ -294,26 +315,9 @@ impl ProxyStateUpdateMutator {
     }
 
     pub fn insert_address(&self, state: &mut ProxyState, a: XdsAddress) -> anyhow::Result<()> {
-        let mut acc = EndpointAccumulator::default();
-        self.insert_address_into(state, a, &mut acc)?;
-        acc.apply(&mut state.services);
+        let prepared = PreparedUpdate::try_from_address(a)?;
+        self.apply_prepared(state, vec![prepared]);
         Ok(())
-    }
-
-    fn insert_address_into(
-        &self,
-        state: &mut ProxyState,
-        a: XdsAddress,
-        acc: &mut EndpointAccumulator,
-    ) -> anyhow::Result<()> {
-        match a.r#type {
-            Some(XdsType::Workload(w)) => self.insert_workload_into(state, w, acc),
-            // Services are applied immediately (already a single clone + reindex,
-            // and they must be present before phase-2 endpoint application so the
-            // staged-endpoint flush runs first).
-            Some(XdsType::Service(s)) => self.insert_service(state, s),
-            _ => Err(anyhow::anyhow!("unknown address type")),
-        }
     }
 
     #[instrument(
@@ -327,9 +331,15 @@ impl ProxyStateUpdateMutator {
         state: &mut ProxyState,
         service: XdsService,
     ) -> anyhow::Result<()> {
-        debug!("handling insert");
-        let mut service = Service::try_from(&service)?;
+        let service = Service::try_from(&service)?;
+        self.insert_service_prepared(state, service);
+        Ok(())
+    }
 
+    /// Applies an already-converted [Service] to the store, migrating existing
+    /// endpoints into the new instance.
+    fn insert_service_prepared(&self, state: &mut ProxyState, mut service: Service) {
+        debug!("handling insert");
         // If the service already exists, add existing endpoints into the new service.
         if let Some(prev) = state
             .services
@@ -345,7 +355,6 @@ impl ProxyStateUpdateMutator {
         }
 
         state.services.insert(service);
-        Ok(())
     }
 
     pub fn insert_authorization(
@@ -377,24 +386,21 @@ impl Handler<XdsWorkload> for ProxyStateUpdater {
         &self,
         updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsWorkload>>>,
     ) -> Result<(), Vec<RejectedConfig>> {
-        // use deepsize::DeepSizeOf;
-        let mut state = self.state.write().unwrap();
-        let mut acc = EndpointAccumulator::default();
+        // Phase 1: convert every resource off-lock. A malformed resource only
+        // rejects itself and doesn't abort the batch.
+        let mut prepared = Vec::new();
         let result = handle_single_resource(updates, |res: XdsUpdate<XdsWorkload>| {
-            match res {
-                XdsUpdate::Update(w) => self
-                    .updater
-                    .insert_workload_into(&mut state, w.resource, &mut acc)?,
-                XdsUpdate::Remove(name) => {
-                    debug!("handling delete {}", name);
-                    self.updater
-                        .remove_internal(&mut state, &strng::new(name), false, &mut acc)
+            prepared.push(match res {
+                XdsUpdate::Update(w) => {
+                    PreparedUpdate::Workload(PreparedWorkload::try_from_xds(w.resource)?)
                 }
-            }
+                XdsUpdate::Remove(name) => PreparedUpdate::Remove(strng::new(name)),
+            });
             Ok(())
         });
-        // Apply all accumulated endpoint changes, one clone + reindex per service.
-        acc.apply(&mut state.services);
+        // Phase 2: take the write lock once and apply the converted batch.
+        let mut state = self.state.write().unwrap();
+        self.updater.apply_prepared(&mut state, prepared);
         result
     }
 }
@@ -404,62 +410,95 @@ impl Handler<XdsAddress> for ProxyStateUpdater {
         &self,
         updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsAddress>>>,
     ) -> Result<(), Vec<RejectedConfig>> {
-        let mut state = self.state.write().unwrap();
-        let mut acc = EndpointAccumulator::default();
-        // Phase 1: apply workloads to the workload store and services to the
-        // service store immediately, accumulating each workload's endpoint
-        // changes (keyed by service) into `acc`.
+        // Phase 1: convert every resource off-lock (the expensive proto→internal
+        // work). A malformed resource only rejects itself.
+        let mut prepared = Vec::new();
         let result = handle_single_resource(updates, |res: XdsUpdate<XdsAddress>| {
-            match res {
-                XdsUpdate::Update(w) => self
-                    .updater
-                    .insert_address_into(&mut state, w.resource, &mut acc)?,
-                XdsUpdate::Remove(name) => {
-                    debug!("handling delete {}", name);
-                    self.updater
-                        .remove_internal(&mut state, &strng::new(name), false, &mut acc)
-                }
-            }
+            prepared.push(match res {
+                XdsUpdate::Update(w) => PreparedUpdate::try_from_address(w.resource)?,
+                XdsUpdate::Remove(name) => PreparedUpdate::Remove(strng::new(name)),
+            });
             Ok(())
         });
-        // Phase 2: apply the accumulated endpoint changes, one clone + reindex
-        // per distinct service rather than once per endpoint.
-        acc.apply(&mut state.services);
+        // Phase 2: take the write lock once and apply the converted batch, one
+        // clone + reindex per distinct service rather than once per endpoint.
+        let mut state = self.state.write().unwrap();
+        self.updater.apply_prepared(&mut state, prepared);
         result
     }
 }
 
-fn accumulate_service_endpoints(
-    workload: &Workload,
-    services: &HashMap<String, PortList>,
-    acc: &mut EndpointAccumulator,
-) -> anyhow::Result<()> {
-    for (namespaced_host, ports) in services {
-        // Parse the namespaced hostname for the service.
-        let namespaced_host = NamespacedHostname::from_str(namespaced_host)?;
-        acc.upsert(
-            namespaced_host,
-            workload.uid.clone(),
-            Endpoint {
-                workload_uid: workload.uid.clone(),
-                port: ports.into(),
-                status: workload.status,
-            },
-        );
+/// A resource converted from its xDS proto form, ready to be applied under the
+/// write lock. Conversion (proto→internal, string interning, hostname parsing) is
+/// the expensive part and happens off-lock so it doesn't starve readers.
+enum PreparedUpdate {
+    Workload(PreparedWorkload),
+    // Boxed: Service is far larger than the other variants, and a push holds a
+    // Vec of these sized to the largest variant.
+    Service(Box<Service>),
+    Remove(Strng),
+}
+
+impl PreparedUpdate {
+    fn try_from_address(a: XdsAddress) -> anyhow::Result<Self> {
+        match a.r#type {
+            Some(XdsType::Workload(w)) => Ok(Self::Workload(PreparedWorkload::try_from_xds(w)?)),
+            Some(XdsType::Service(s)) => Ok(Self::Service(Box::new(Service::try_from(&s)?))),
+            _ => Err(anyhow::anyhow!("unknown address type")),
+        }
     }
-    Ok(())
+}
+
+/// A converted workload plus the per-service endpoints it contributes, computed
+/// off-lock.
+struct PreparedWorkload {
+    workload: Arc<Workload>,
+    endpoints: Vec<(NamespacedHostname, Endpoint)>,
+}
+
+impl PreparedWorkload {
+    fn try_from_xds(w: XdsWorkload) -> anyhow::Result<Self> {
+        let (workload, services): (Workload, HashMap<String, PortList>) = w.try_into()?;
+        Self::build(Arc::new(workload), &services)
+    }
+
+    fn build(
+        workload: Arc<Workload>,
+        services: &HashMap<String, PortList>,
+    ) -> anyhow::Result<Self> {
+        let mut endpoints = Vec::with_capacity(services.len());
+        for (namespaced_host, ports) in services {
+            // Parse the namespaced hostname for the service.
+            let namespaced_host = NamespacedHostname::from_str(namespaced_host)?;
+            endpoints.push((
+                namespaced_host,
+                Endpoint {
+                    workload_uid: workload.uid.clone(),
+                    port: ports.into(),
+                    status: workload.status,
+                },
+            ));
+        }
+        Ok(Self {
+            workload,
+            endpoints,
+        })
+    }
 }
 
 /// Applies a single workload's service endpoints directly (one-shot). Used by the
 /// file-based [LocalClient], which builds state fresh and isn't on the xDS push
 /// hot path.
 fn insert_service_endpoints(
-    workload: &Workload,
+    workload: &Arc<Workload>,
     services: &HashMap<String, PortList>,
     services_state: &mut ServiceStore,
 ) -> anyhow::Result<()> {
+    let prepared = PreparedWorkload::build(workload.clone(), services)?;
     let mut acc = EndpointAccumulator::default();
-    accumulate_service_endpoints(workload, services, &mut acc)?;
+    for (service, endpoint) in prepared.endpoints {
+        acc.upsert(service, workload.uid.clone(), endpoint);
+    }
     acc.apply(services_state);
     Ok(())
 }
