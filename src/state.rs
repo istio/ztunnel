@@ -518,6 +518,24 @@ impl DemandProxyState {
     }
 }
 
+/// sample_weighted_waypoint picks one waypoint from a service's weighted set, proportional to
+/// each entry's weight (used to shift a percentage of traffic between waypoints during a canary).
+/// Returns None when there is no usable weighted set — an empty set, or one that is not samplable
+/// (e.g. all weights zero) — in which case the caller falls back to the single `waypoint` field.
+fn sample_weighted_waypoint<'a>(
+    service: &'a Service,
+    rng: &mut impl rand::Rng,
+) -> Option<&'a GatewayAddress> {
+    if service.weighted_waypoints.is_empty() {
+        return None;
+    }
+    service
+        .weighted_waypoints
+        .choose_weighted(rng, |ww| ww.weight)
+        .ok()
+        .map(|ww| &ww.destination)
+}
+
 impl DemandProxyState {
     pub fn new(
         state: Arc<RwLock<ProxyState>>,
@@ -996,9 +1014,19 @@ impl DemandProxyState {
         source_workload: &Workload,
         original_destination_address: SocketAddr,
     ) -> Result<Option<Upstream>, Error> {
-        let Some(gw_address) = &service.waypoint else {
-            // no waypoint
-            return Ok(None);
+        // When a weighted set is present, sample one waypoint per connection proportional to
+        // weight (used to shift a percentage of traffic between waypoints during a canary).
+        // Otherwise (or if the set is not samplable, e.g. all-zero) fall back to the single
+        // `waypoint` field, preserving existing behavior.
+        let gw_address = match sample_weighted_waypoint(service, &mut rand::rng()) {
+            Some(gw_address) => gw_address,
+            None => {
+                let Some(gw_address) = &service.waypoint else {
+                    // no waypoint
+                    return Ok(None);
+                };
+                gw_address
+            }
         };
         self.fetch_waypoint(gw_address, source_workload, original_destination_address)
             .await
@@ -1182,6 +1210,108 @@ mod tests {
 
     use crate::{strng, test_helpers};
     use test_case::test_case;
+
+    #[test]
+    fn test_sample_weighted_waypoint() {
+        use crate::state::service::WeightedWaypoint;
+        let ga = |ip: &str| GatewayAddress {
+            destination: Destination::Address(NetworkAddress {
+                network: "".into(),
+                address: ip.parse().unwrap(),
+            }),
+            hbone_mtls_port: 15008,
+        };
+        let svc = |waypoint: Option<GatewayAddress>, weighted: Vec<WeightedWaypoint>| Service {
+            waypoint,
+            weighted_waypoints: weighted,
+            ..test_helpers::mock_default_service()
+        };
+        let a = ga("10.0.0.1");
+        let b = ga("10.0.0.2");
+        let mut rng = rand::rng();
+
+        // No weighted set -> None (caller falls back to the single `waypoint` field).
+        assert_eq!(sample_weighted_waypoint(&svc(None, vec![]), &mut rng), None);
+
+        // A zero-weight entry is never selected: [100, 0] always picks the first (primary).
+        let primary_only = svc(
+            None,
+            vec![
+                WeightedWaypoint {
+                    destination: a.clone(),
+                    weight: 100,
+                },
+                WeightedWaypoint {
+                    destination: b.clone(),
+                    weight: 0,
+                },
+            ],
+        );
+        for _ in 0..50 {
+            assert_eq!(sample_weighted_waypoint(&primary_only, &mut rng), Some(&a));
+        }
+
+        // [0, 100] always picks the second (canary fully promoted).
+        let canary_only = svc(
+            None,
+            vec![
+                WeightedWaypoint {
+                    destination: a.clone(),
+                    weight: 0,
+                },
+                WeightedWaypoint {
+                    destination: b.clone(),
+                    weight: 100,
+                },
+            ],
+        );
+        for _ in 0..50 {
+            assert_eq!(sample_weighted_waypoint(&canary_only, &mut rng), Some(&b));
+        }
+
+        // All-zero weights are not samplable -> None (fall back to primary).
+        let all_zero = svc(
+            Some(a.clone()),
+            vec![
+                WeightedWaypoint {
+                    destination: a.clone(),
+                    weight: 0,
+                },
+                WeightedWaypoint {
+                    destination: b.clone(),
+                    weight: 0,
+                },
+            ],
+        );
+        assert_eq!(sample_weighted_waypoint(&all_zero, &mut rng), None);
+
+        // A genuine split exercises both waypoints across many samples.
+        let split = svc(
+            None,
+            vec![
+                WeightedWaypoint {
+                    destination: a.clone(),
+                    weight: 50,
+                },
+                WeightedWaypoint {
+                    destination: b.clone(),
+                    weight: 50,
+                },
+            ],
+        );
+        let (mut saw_a, mut saw_b) = (false, false);
+        for _ in 0..200 {
+            match sample_weighted_waypoint(&split, &mut rng) {
+                Some(x) if *x == a => saw_a = true,
+                Some(x) if *x == b => saw_b = true,
+                other => panic!("unexpected selection: {other:?}"),
+            }
+        }
+        assert!(
+            saw_a && saw_b,
+            "both waypoints should be selected across samples"
+        );
+    }
 
     #[tokio::test]
     async fn test_wait_for_workload() {

@@ -683,6 +683,7 @@ mod tests {
             }],
             subject_alt_names: vec!["SAN1".to_string(), "SAN2".to_string()],
             waypoint: None,
+            weighted_waypoints: vec![],
             load_balancing: Some(XdsLoadBalancing {
                 routing_preference: vec![1, 2],
                 mode: 1,
