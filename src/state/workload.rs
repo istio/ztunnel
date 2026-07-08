@@ -1182,6 +1182,52 @@ mod tests {
         assert_eq!(actual_error, expected_error);
     }
 
+    #[test]
+    fn workload_by_name_insert_remove() {
+        let uid1: Strng = "uid1".into();
+        let uid2: Strng = "uid2".into();
+        let missing: Strng = "missing".into();
+
+        let mut by_name = WorkloadByName::default();
+        assert!(by_name.is_empty());
+        assert_eq!(by_name.iter().count(), 0);
+
+        by_name.insert(uid1.clone());
+        assert_eq!(
+            by_name.iter().cloned().collect::<HashSet<_>>(),
+            HashSet::from([uid1.clone()])
+        );
+
+        by_name.insert(uid1.clone());
+        assert_eq!(
+            by_name.iter().cloned().collect::<HashSet<_>>(),
+            HashSet::from([uid1.clone()])
+        );
+
+        by_name.insert(uid2.clone());
+        assert_eq!(
+            by_name.iter().cloned().collect::<HashSet<_>>(),
+            HashSet::from([uid1.clone(), uid2.clone()])
+        );
+
+        assert!(!by_name.remove(&missing));
+        assert_eq!(
+            by_name.iter().cloned().collect::<HashSet<_>>(),
+            HashSet::from([uid1.clone(), uid2.clone()])
+        );
+
+        assert!(by_name.remove(&uid1));
+        assert_eq!(
+            by_name.iter().cloned().collect::<HashSet<_>>(),
+            HashSet::from([uid2.clone()])
+        );
+        assert!(!by_name.is_empty());
+
+        assert!(by_name.remove(&uid2));
+        assert!(by_name.is_empty());
+        assert_eq!(by_name.iter().count(), 0);
+    }
+
     fn test_workload(
         name: &str,
         ns: &str,
