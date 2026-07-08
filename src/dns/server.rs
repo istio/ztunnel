@@ -382,7 +382,18 @@ impl Store {
                     })
                     // Drop services not visible to the client's namespace. If this empties the
                     // candidate list, we forward upstream as if the service were not in the mesh.
-                    .filter(|service| service.visible_to(&client.namespace))
+                    .filter(|service| {
+                        let visible = service.visible_to(&client.namespace);
+                        if !visible {
+                            debug!(
+                                hostname = %service.hostname,
+                                service_namespace = %service.namespace,
+                                client_namespace = %client.namespace,
+                                "visibility filtering: service not visible to client namespace"
+                            );
+                        }
+                        visible
+                    })
                     // Get the service matching the client namespace. If no match exists, just
                     // return the first service.
                     .collect();

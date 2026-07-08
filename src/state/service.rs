@@ -19,7 +19,7 @@ use serde::{Deserializer, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
-use tracing::trace;
+use tracing::{debug, trace};
 
 use xds::istio::workload::Service as XdsService;
 
@@ -463,9 +463,19 @@ impl ServiceStore {
             // service). With no client namespace (e.g. the inbound path), don't enforce.
             return Some(
                 ServiceMatch::find_best_match(
-                    services
-                        .iter()
-                        .filter(|s| ns.is_none_or(|n| s.visible_to(n))),
+                    services.iter().filter(|s| {
+                        let visible = ns.is_none_or(|n| s.visible_to(n));
+                        if !visible {
+                            debug!(
+                                hostname = %s.hostname,
+                                service_namespace = %s.namespace,
+                                client_namespace = ns.map(Strng::as_str).unwrap_or(""),
+                                vip = %vip.address,
+                                "visibility filtering: service not visible to client namespace"
+                            );
+                        }
+                        visible
+                    }),
                     ns,
                     None,
                 )?
@@ -491,6 +501,13 @@ impl ServiceStore {
             // Skip services not visible to the client's namespace (see get_best_by_vip); only
             // enforced when a client namespace is provided.
             if ns.is_some_and(|n| !svc.visible_to(n)) {
+                debug!(
+                    hostname = %svc.hostname,
+                    service_namespace = %svc.namespace,
+                    client_namespace = ns.map(Strng::as_str).unwrap_or(""),
+                    vip = %vip.address,
+                    "visibility filtering: service not visible to client namespace"
+                );
                 continue;
             }
             let rank = CidrMatchRank {
