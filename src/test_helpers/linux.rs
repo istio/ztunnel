@@ -14,7 +14,7 @@
 
 use crate::config::{ConfigSource, ProxyMode};
 use crate::rbac::Authorization;
-use crate::state::service::{Endpoint, Service};
+use crate::state::service::{Endpoint, Service, Visibility};
 use crate::state::workload::{HealthStatus, Workload, gatewayaddress};
 use crate::strng::Strng;
 use crate::test_helpers::app::TestApp;
@@ -411,6 +411,7 @@ impl<'a> TestServiceBuilder<'a> {
                 load_balancer: None,
                 ip_families: None,
                 canonical: true,
+                visibility: Visibility::Public,
             },
             manager,
         }

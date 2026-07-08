@@ -14,7 +14,7 @@
 
 use crate::config::ConfigSource;
 use crate::config::{self, RootCert};
-use crate::state::service::{Endpoint, EndpointSet, Service};
+use crate::state::service::{Endpoint, EndpointSet, Service, Visibility};
 use crate::state::workload::InboundProtocol::{HBONE, TCP};
 use crate::state::workload::{
     GatewayAddress, NamespacedHostname, NetworkAddress, Workload, gatewayaddress,
@@ -205,6 +205,7 @@ pub fn mock_default_service() -> Service {
         load_balancer: None,
         ip_families: None,
         canonical: true,
+        visibility: Visibility::Public,
     }
 }
 
@@ -302,6 +303,7 @@ fn test_custom_svc(
         load_balancer: None,
         ip_families: None,
         canonical: true,
+        visibility: Visibility::Public,
     })
 }
 

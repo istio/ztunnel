@@ -68,6 +68,11 @@ pub struct Service {
 
     #[serde(default)]
     pub canonical: bool,
+
+    // Always rendered (no skip_serializing_if) so a service's visibility is visible in a
+    // ztunnel config dump even when it is the default PUBLIC.
+    #[serde(default)]
+    pub visibility: Visibility,
 }
 
 /// WeightedWaypoint is a candidate waypoint plus its relative selection weight, used to shift a
@@ -247,6 +252,35 @@ impl IpFamily {
     }
 }
 
+/// Visibility controls which clients can resolve and route to a service.
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub enum Visibility {
+    /// Visible to every client the control plane serves (default / legacy behavior).
+    #[default]
+    Public,
+    /// Visible only to clients in the same namespace as the service.
+    Namespace,
+}
+
+impl From<xds::istio::workload::service::Visibility> for Visibility {
+    fn from(value: xds::istio::workload::service::Visibility) -> Self {
+        use xds::istio::workload::service::Visibility as XdsVisibility;
+        match value {
+            XdsVisibility::Public => Visibility::Public,
+            XdsVisibility::Namespace => Visibility::Namespace,
+        }
+    }
+}
+
+impl Service {
+    /// visible_to reports whether a client in the given namespace may resolve and route to
+    /// this service. Namespace-scoped services are only visible within their own namespace;
+    /// all others are visible everywhere the control plane serves.
+    pub fn visible_to(&self, client_namespace: &Strng) -> bool {
+        self.visibility != Visibility::Namespace || &self.namespace == client_namespace
+    }
+}
+
 impl Service {
     pub fn namespaced_hostname(&self) -> NamespacedHostname {
         NamespacedHostname {
@@ -375,6 +409,10 @@ impl TryFrom<&XdsService> for Service {
             load_balancer: lb,
             ip_families,
             canonical: s.canonical,
+            // Unknown values fall back to PUBLIC (fail open) rather than dropping the Service.
+            visibility: xds::istio::workload::service::Visibility::try_from(s.visibility)
+                .unwrap_or_default()
+                .into(),
         };
         Ok(svc)
     }
@@ -817,6 +855,7 @@ mod tests {
             load_balancer: None,
             ip_families: None,
             canonical: false,
+            visibility: Visibility::Public,
         }
     }
 
@@ -1153,6 +1192,7 @@ mod tests {
             load_balancer: None,
             ip_families: None,
             canonical: false,
+            visibility: Visibility::Public,
         };
         store.insert(svc);
 

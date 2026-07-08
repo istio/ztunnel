@@ -784,7 +784,7 @@ mod tests {
         rbac::Connection,
         state::{
             self, DemandProxyState, WorkloadInfo,
-            service::{Endpoint, EndpointSet, Service},
+            service::{Endpoint, EndpointSet, Service, Visibility},
             workload::{
                 ApplicationTunnel, GatewayAddress, HealthStatus, InboundProtocol, NetworkAddress,
                 NetworkMode, Workload, application_tunnel::Protocol as AppProtocol,
@@ -1025,6 +1025,7 @@ mod tests {
             load_balancer: None,
             ip_families: None,
             canonical: true,
+            visibility: Visibility::Public,
         });
 
         let workloads = vec![

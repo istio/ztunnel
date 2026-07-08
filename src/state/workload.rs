@@ -1160,6 +1160,7 @@ mod tests {
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    visibility: 0,
                 },
             )
             .unwrap();
@@ -1198,6 +1199,7 @@ mod tests {
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    visibility: 0,
                 },
             )
             .unwrap();
@@ -1261,6 +1263,7 @@ mod tests {
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    visibility: 0,
                 },
             )
             .unwrap();
@@ -1581,6 +1584,7 @@ mod tests {
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    visibility: 0,
                 },
             )
             .unwrap();
@@ -1611,6 +1615,7 @@ mod tests {
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    visibility: 0,
                 },
             )
             .unwrap();
@@ -1665,6 +1670,7 @@ mod tests {
             ip_families: 0,
             extensions: Default::default(),
             canonical: true,
+            visibility: 0,
         };
         updater
             .insert_service(
@@ -1689,6 +1695,7 @@ mod tests {
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    visibility: 0,
                 },
             )
             .unwrap();
