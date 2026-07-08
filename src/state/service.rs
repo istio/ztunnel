@@ -458,7 +458,19 @@ impl ServiceStore {
         ns: Option<&Strng>,
     ) -> Option<Arc<Service>> {
         if let Some(services) = self.by_vip.get(vip) {
-            return Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone());
+            // When a client namespace is provided, skip services not visible to it so the lookup
+            // misses and the caller falls through to passthrough (as if the VIP were not a mesh
+            // service). With no client namespace (e.g. the inbound path), don't enforce.
+            return Some(
+                ServiceMatch::find_best_match(
+                    services
+                        .iter()
+                        .filter(|s| ns.is_none_or(|n| s.visible_to(n))),
+                    ns,
+                    None,
+                )?
+                .clone(),
+            );
         }
         self.get_best_by_cidr_vip(vip, ns)
     }
@@ -474,6 +486,11 @@ impl ServiceStore {
         let mut best: Option<RankedMatch<'_>> = None;
         for (nc, svc) in &self.by_cidr_vip {
             if nc.network != vip.network || !nc.cidr.contains(&vip.address) {
+                continue;
+            }
+            // Skip services not visible to the client's namespace (see get_best_by_vip); only
+            // enforced when a client namespace is provided.
+            if ns.is_some_and(|n| !svc.visible_to(n)) {
                 continue;
             }
             let rank = CidrMatchRank {
@@ -950,6 +967,40 @@ mod tests {
         assert_eq!(store.num_services(), 0);
         assert!(store.get_by_vip(&nw(shared)).is_none());
         assert!(store.get_by_vip(&nw(only_b)).is_none());
+    }
+
+    #[test]
+    fn namespace_visibility_vip() {
+        let mut store = ServiceStore::default();
+        let ns_a: Strng = "ns-a".into();
+        let ns_b: Strng = "ns-b".into();
+
+        // Exact-VIP path: a NAMESPACE-scoped service.
+        let vip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut nslocal = make_service("nslocal", "ns-a", vec![vip], vec![]);
+        nslocal.visibility = Visibility::Namespace;
+        store.insert(nslocal);
+
+        // Same-namespace client resolves it.
+        assert_eq!(
+            store
+                .get_best_by_vip(&nw(vip), Some(&ns_a))
+                .unwrap()
+                .namespace,
+            ns_a,
+        );
+        // Out-of-namespace client sees no match -> caller falls through to passthrough.
+        assert!(store.get_best_by_vip(&nw(vip), Some(&ns_b)).is_none());
+        // No client namespace (e.g. inbound path) -> visibility is not enforced, so it resolves.
+        assert!(store.get_best_by_vip(&nw(vip), None).is_some());
+
+        // CIDR-VIP path: same behavior.
+        let cidr_vip = IpAddr::V4(Ipv4Addr::new(10, 1, 0, 5));
+        let mut cidr_svc = make_service("cidrlocal", "ns-a", vec![], vec![cidr("10.1.0.0/16")]);
+        cidr_svc.visibility = Visibility::Namespace;
+        store.insert(cidr_svc);
+        assert!(store.get_best_by_vip(&nw(cidr_vip), Some(&ns_a)).is_some());
+        assert!(store.get_best_by_vip(&nw(cidr_vip), Some(&ns_b)).is_none());
     }
 
     #[test]
