@@ -827,7 +827,90 @@ pub struct WorkloadStore {
     // Identity->Set of UIDs. Only stores local nodes
     node_local_by_identity: HashMap<WorkloadIdentity, HashSet<Strng>>,
     /// by_name maps workload names to workload UIDs.
-    by_name: HashMap<Strng, HashSet<Strng>>,
+    by_name: HashMap<Strng, WorkloadByName>,
+}
+
+#[derive(Debug)]
+/// WorkloadByAddr is a small wrapper around a single or multiple Workloads
+/// We split these as in the vast majority of cases there is only a single one, so we save HashSet allocation.
+enum WorkloadByName {
+    None,
+    Single(Strng),
+    Many(HashSet<Strng>),
+}
+
+impl Default for WorkloadByName {
+    fn default() -> Self {
+        WorkloadByName::None
+    }
+}
+
+impl WorkloadByName {
+    // Inserts uid into the set, converting from None -> Single or Single -> Many if it's
+    // not already present.
+    fn insert(&mut self, uid: Strng) {
+        match std::mem::take(self) {
+            WorkloadByName::None => {
+                *self = WorkloadByName::Single(uid);
+            }
+            WorkloadByName::Single(existing) => {
+                if *existing == uid {
+                    *self = WorkloadByName::Single(existing);
+                    return;
+                }
+                let mut uids = HashSet::new();
+                uids.insert(existing);
+                uids.insert(uid);
+                *self = WorkloadByName::Many(uids)
+            }
+            WorkloadByName::Many(mut uids) => {
+                uids.insert(uid);
+                *self = WorkloadByName::Many(uids)
+            }
+        }
+    }
+
+    // Remove uid from the set, converting from Many -> Single -> None when appropriate.
+    // Returns whether uid was present in the set.
+    fn remove(&mut self, uid: &Strng) -> bool {
+        match std::mem::take(self) {
+            WorkloadByName::None => false,
+            WorkloadByName::Single(ref existing) if existing == uid => {
+                *self = WorkloadByName::None;
+                true
+            }
+            WorkloadByName::Single(existing) => {
+                *self = WorkloadByName::Single(existing);
+                false
+            }
+            WorkloadByName::Many(mut uids) => {
+                let removed = uids.remove(uid);
+                if uids.len() == 1 {
+                    let uid = uids.into_iter().next().expect("set has one item");
+                    *self = WorkloadByName::Single(uid);
+                } else {
+                    *self = WorkloadByName::Many(uids);
+                }
+                removed
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            WorkloadByName::None => true,
+            WorkloadByName::Single(_) => false,
+            WorkloadByName::Many(uids) => uids.is_empty(),
+        }
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = &Strng> + '_> {
+        match self {
+            WorkloadByName::None => Box::new(std::iter::empty()),
+            WorkloadByName::Single(uid) => Box::new(std::iter::once(uid)),
+            WorkloadByName::Many(uids) => Box::new(uids.iter()),
+        }
+    }
 }
 
 #[derive(Debug)]
