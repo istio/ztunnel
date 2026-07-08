@@ -830,19 +830,14 @@ pub struct WorkloadStore {
     by_name: HashMap<Strng, WorkloadByName>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 /// WorkloadByAddr is a small wrapper around a single or multiple Workloads
 /// We split these as in the vast majority of cases there is only a single one, so we save HashSet allocation.
 enum WorkloadByName {
+    #[default]
     None,
     Single(Strng),
     Many(HashSet<Strng>),
-}
-
-impl Default for WorkloadByName {
-    fn default() -> Self {
-        WorkloadByName::None
-    }
 }
 
 impl WorkloadByName {
