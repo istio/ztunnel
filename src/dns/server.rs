@@ -346,7 +346,7 @@ impl Store {
         out
     }
 
-    /// Returns the cluster-local domain suffix used to identify Kubernetes headless services,
+    /// Returns the cluster-local domain suffix used to identify Kubernetes services,
     /// e.g. `.svc.cluster.local` (no trailing dot).
     fn kubernetes_cluster_local_domain(&self) -> String {
         let domain = ".".to_string() + &self.svc_domain.to_utf8();
