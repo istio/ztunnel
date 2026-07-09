@@ -102,7 +102,9 @@ async fn handle_metrics(
         let mut fmt_target = FmtToIoWriter {
             inner: &mut sync_writer,
         };
-        let _ = encode(&mut fmt_target, &reg);
+        if let Err(e) = encode(&mut fmt_target, &reg) {
+            tracing::warn!("metric registry encoding failed: {}", e)
+        }
         let _ = sync_writer.flush();
     });
 
