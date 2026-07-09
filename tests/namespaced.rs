@@ -194,6 +194,7 @@ mod namespaced {
             ),
         ]);
         telemetry::testing::assert_contains(want);
+        verify_metrics_compression(&zt).await;
         Ok(())
     }
 
@@ -310,6 +311,7 @@ mod namespaced {
             ("dst.identity", "spiffe://cluster.local/ns/default/sa/echo"),
         ]);
         telemetry::testing::assert_contains(want);
+        verify_metrics_compression(&zt).await;
         Ok(())
     }
 
@@ -469,6 +471,7 @@ mod namespaced {
             ),
         ]);
         telemetry::testing::assert_contains(want);
+        verify_metrics_compression(&zt).await;
         Ok(())
     }
 
@@ -550,6 +553,7 @@ mod namespaced {
             ),
         ]);
         telemetry::testing::assert_contains(want);
+        verify_metrics_compression(&zt).await;
         Ok(())
     }
 
@@ -618,6 +622,7 @@ mod namespaced {
             ),
         ]);
         telemetry::testing::assert_contains(want);
+        verify_metrics_compression(&zt).await;
         Ok(())
     }
 
@@ -850,6 +855,8 @@ mod namespaced {
             ]),
         )
         .await;
+        verify_metrics_compression(&local).await;
+        verify_metrics_compression(&remote).await;
         Ok(())
     }
 
@@ -1504,6 +1511,7 @@ mod namespaced {
         ]);
         telemetry::testing::assert_contains(want);
 
+        verify_metrics_compression(&zt).await;
         Ok(())
     }
 
@@ -1595,6 +1603,7 @@ mod namespaced {
         )
         .await;
 
+        verify_metrics_compression(&remote_zt).await;
         Ok(())
     }
 
@@ -1685,6 +1694,7 @@ mod namespaced {
         )
         .await;
 
+        verify_metrics_compression(&local_zt).await;
         Ok(())
     }
     const TEST_VIP: &str = "10.10.0.1";
@@ -1819,6 +1829,7 @@ mod namespaced {
                 want.insert("dst.identity", "");
             }
             telemetry::testing::assert_contains(want);
+            verify_metrics_compression(zt).await;
         }
         if let Some(zt) = client_ztunnel {
             let _remote_metrics = verify_metrics(&zt, &metrics, &source_labels()).await;
@@ -1845,6 +1856,7 @@ mod namespaced {
                 want.insert("dst.identity", "");
             }
             telemetry::testing::assert_contains(want);
+            verify_metrics_compression(&zt).await;
         }
     }
 
@@ -1873,7 +1885,7 @@ mod namespaced {
             if found {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(i * 10)).await;
+            tokio::time::sleep(Duration::from_millis(i as u64 * 10)).await;
         }
         let metrics = ztunnel.metrics().await.unwrap();
 
@@ -1911,6 +1923,18 @@ mod namespaced {
             labels,
             got.dump()
         );
+    }
+
+    async fn verify_metrics_compression(ztunnel: &TestApp) {
+        let expected = ztunnel.get_metrics("").await.unwrap().len();
+        for encoding in ["gzip", "zstd", "br"] {
+            let actual = ztunnel.get_metrics(encoding).await.unwrap().len();
+            assert_eq!(
+                actual, expected,
+                "decompression mismatch got: {} want: {}",
+                actual, expected
+            );
+        }
     }
 
     fn resolve_target(resolver: Resolver, target: &str) -> SocketAddr {

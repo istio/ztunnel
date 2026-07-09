@@ -13,21 +13,43 @@
 // limitations under the License.
 
 use bytes::Bytes;
+use futures_util::StreamExt;
+use std::convert::Infallible;
+use std::io::Write;
 use std::sync::Mutex;
 use std::{net::SocketAddr, sync::Arc};
 
-use http_body_util::Full;
+use http_body::Frame;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Empty, StreamBody};
 use hyper::body::Incoming;
 use hyper::{Request, Response};
 use prometheus_client::encoding::text::encode;
 use prometheus_client::registry::Registry;
+use tokio::io::duplex;
+use tokio_util::io::{ReaderStream, SyncIoBridge};
+use tower::ServiceBuilder;
+use tower_http::compression::CompressionLayer;
 
 use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::hyper_util;
 
+struct FmtToIoWriter<'a, W: std::io::Write> {
+    inner: &'a mut W,
+}
+
+impl<'a, W: std::io::Write> std::fmt::Write for FmtToIoWriter<'a, W> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.inner
+            .write_all(s.as_bytes())
+            .map_err(|_| std::fmt::Error)
+    }
+}
+
 pub struct Server {
-    s: hyper_util::Server<Mutex<Registry>>,
+    s: hyper_util::Server,
+    registry: Mutex<Registry>,
 }
 
 impl Server {
@@ -36,14 +58,12 @@ impl Server {
         drain_rx: DrainWatcher,
         registry: Registry,
     ) -> anyhow::Result<Self> {
-        hyper_util::Server::<Mutex<Registry>>::bind(
-            "stats",
-            config.stats_addr,
-            drain_rx,
-            Mutex::new(registry),
-        )
-        .await
-        .map(|s| Server { s })
+        hyper_util::Server::bind("stats", config.stats_addr, drain_rx)
+            .await
+            .map(|s| Server {
+                s,
+                registry: Mutex::new(registry),
+            })
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -51,34 +71,53 @@ impl Server {
     }
 
     pub fn spawn(self) {
-        self.s.spawn(|registry, req| async move {
-            match req.uri().path() {
-                "/metrics" | "/stats/prometheus" => Ok(handle_metrics(registry, req).await),
-                _ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
-            }
-        })
+        let state = Arc::new(self.registry);
+        let service = ServiceBuilder::new()
+            .layer(CompressionLayer::new())
+            .service_fn(move |req: Request<Incoming>| {
+                let state = state.clone();
+                async move {
+                    match req.uri().path() {
+                        "/metrics" | "/stats/prometheus" => Ok(handle_metrics(state, req).await),
+                        _ => Response::builder()
+                            .status(hyper::StatusCode::NOT_FOUND)
+                            .body(Empty::new().boxed()),
+                    }
+                }
+            });
+
+        self.s.spawn(service)
     }
 }
 
 async fn handle_metrics(
     reg: Arc<Mutex<Registry>>,
     req: Request<Incoming>,
-) -> Response<Full<Bytes>> {
-    let mut buf = String::new();
-    let reg = reg.lock().expect("mutex");
-    if let Err(err) = encode(&mut buf, &reg) {
-        return Response::builder()
-            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-            .body(err.to_string().into())
-            .expect("builder with known status code should not fail");
-    }
+) -> Response<BoxBody<Bytes, Infallible>> {
+    let (writer, reader) = duplex(4096);
+
+    tokio::task::spawn_blocking(move || {
+        let mut sync_writer = SyncIoBridge::new(writer);
+        let reg = reg.lock().expect("mutex");
+        let mut fmt_target = FmtToIoWriter {
+            inner: &mut sync_writer,
+        };
+        let _ = encode(&mut fmt_target, &reg);
+        let _ = sync_writer.flush();
+    });
+
+    let raw_stream = ReaderStream::new(reader);
+    let framed_stream = raw_stream.map(|result| {
+        let bytes = result.unwrap_or_else(|_| Bytes::new());
+        Ok::<_, Infallible>(Frame::data(bytes))
+    });
 
     let response_content_type = content_type(&req);
 
     Response::builder()
         .status(hyper::StatusCode::OK)
         .header(hyper::header::CONTENT_TYPE, response_content_type)
-        .body(buf.into())
+        .body(BoxBody::new(StreamBody::new(framed_stream)))
         .expect("builder with known status code should not fail")
 }
 

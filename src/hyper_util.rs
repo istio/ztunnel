@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::{
     future::Future,
@@ -25,13 +23,14 @@ use std::{
 use crate::drain::DrainWatcher;
 use crate::{config, proxy};
 use bytes::Bytes;
-use futures_util::TryFutureExt;
 use http_body_util::Full;
+use hyper::body::Incoming;
 use hyper::client;
 use hyper::rt::Sleep;
 use hyper::server::conn::{http1, http2};
 use hyper::{Request, Response};
 use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::service::TowerToHyperService;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::Stream;
 use tracing::{Instrument, debug, info, warn};
@@ -182,19 +181,17 @@ pub fn plaintext_response(code: hyper::StatusCode, body: String) -> Response<Ful
 /// Server implements a generic HTTP server with the follow behavior:
 /// * HTTP/1.1 plaintext only
 /// * Draining
-pub struct Server<S> {
+pub struct Server {
     name: String,
     binds: Vec<TcpListener>,
     drain_rx: DrainWatcher,
-    state: S,
 }
 
-impl<S> Server<S> {
+impl Server {
     pub async fn bind(
         name: &str,
         addrs: config::Address,
         drain_rx: DrainWatcher,
-        s: S,
     ) -> anyhow::Result<Self> {
         let mut binds = vec![];
         for addr in addrs.into_iter() {
@@ -204,7 +201,6 @@ impl<S> Server<S> {
             name: name.to_string(),
             binds,
             drain_rx,
-            state: s,
         })
     }
 
@@ -216,21 +212,20 @@ impl<S> Server<S> {
             .expect("local address must be ready")
     }
 
-    pub fn state_mut(&mut self) -> &mut S {
-        &mut self.state
-    }
-
-    pub fn spawn<F, R>(self, f: F)
+    pub fn spawn<F, B>(self, f: F)
     where
-        S: Send + Sync + 'static,
-        F: Fn(Arc<S>, Request<hyper::body::Incoming>) -> R + Send + Sync + 'static,
-        R: Future<Output = Result<Response<Full<Bytes>>, anyhow::Error>> + Send + Sync + 'static,
+        F: tower::Service<Request<Incoming>, Response = Response<B>> + Clone + Send + 'static,
+        F::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+        F::Future: Send,
+        B: hyper::body::Body + Send + 'static,
+        B::Data: Send,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
         use futures_util::StreamExt as OtherStreamExt;
         let address = self.address();
         let drain = self.drain_rx;
-        let state = Arc::new(self.state);
-        let f = Arc::new(f);
+
+        let hyper_service = TowerToHyperService::new(f);
         info!(
             %address,
             component=self.name,
@@ -239,37 +234,21 @@ impl<S> Server<S> {
         for bind in self.binds {
             let drain_stream = drain.clone();
             let drain_connections = drain.clone();
-            let state = state.clone();
+            let hyper_service = hyper_service.clone();
             let name = self.name.clone();
-            let f = f.clone();
             tokio::spawn(async move {
                 let stream = tokio_stream::wrappers::TcpListenerStream::new(bind);
                 let mut stream = stream.take_until(Box::pin(drain_stream.wait_for_drain()));
                 while let Some(Ok(socket)) = stream.next().await {
                     socket.set_nodelay(true).unwrap();
                     let drain = drain_connections.clone();
-                    let f = f.clone();
-                    let state = state.clone();
+                    let hyper_service = hyper_service.clone();
                     tokio::spawn(async move {
-                        let serve =
-                            http1_server()
-                                .half_close(true)
-                                .header_read_timeout(Duration::from_secs(2))
-                                .max_buf_size(8 * 1024)
-                                .serve_connection(
-                                    hyper_util::rt::TokioIo::new(socket),
-                                    hyper::service::service_fn(move |req| {
-                                        let state = state.clone();
-
-                                        // Failures would abort the whole connection; we just want to return an HTTP error
-                                        f(state, req).or_else(|err| async move {
-                                            Ok::<Response<Full<Bytes>>, Infallible>(Response::builder()
-                                                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-                                                .body(err.to_string().into())
-                                                .expect("builder with known status code should not fail"))
-                                        })
-                                    }),
-                                );
+                        let serve = http1_server()
+                            .half_close(true)
+                            .header_read_timeout(Duration::from_secs(2))
+                            .max_buf_size(8 * 1024)
+                            .serve_connection(hyper_util::rt::TokioIo::new(socket), hyper_service);
                         // Wait for drain to signal or connection serving to complete
                         match futures_util::future::select(Box::pin(drain.wait_for_drain()), serve)
                             .await
