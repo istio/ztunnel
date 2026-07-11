@@ -490,8 +490,10 @@ impl Inbound {
         })
     }
 
-    // Selects a service by hostname without the explicit knowledge of the namespace
-    // There is no explicit mapping from hostname to namespace (e.g. foo.com)
+    // A hostname has no namespace (e.g. foo.com), so resolve against the local workload's.
+    // Leak-safe even on inbound, where local_workload is the dst and not the client: the dst may
+    // only handle traffic for a service it can itself see, so long as the rule barring cross-namespace
+    // binding of NAMESPACE-visibility services holds.
     fn find_service_by_hostname(
         state: &DemandProxyState,
         local_workload: &Workload,
