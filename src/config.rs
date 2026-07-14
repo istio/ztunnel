@@ -60,6 +60,17 @@ const SECRET_TTL: &str = "SECRET_TTL";
 const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const ZTUNNEL_CPU_LIMIT: &str = "ZTUNNEL_CPU_LIMIT";
+// Set by the chart ONLY when resources.limits.cpu is configured; its presence signals an
+// explicit operator CPU limit, which we use directly as the worker-thread count (see
+// default_worker_threads). Separate from ZTUNNEL_CPU_LIMIT (see get_cpu_count), which the
+// downward API also fills with node-allocatable cores when no limit is set, so it cannot
+// distinguish "limited to all N cores" from "no limit on an N-core node".
+const ZTUNNEL_RESOURCE_CPU_LIMIT: &str = "ZTUNNEL_RESOURCE_CPU_LIMIT";
+// Set by the chart ONLY when resources.requests.cpu is configured; its presence signals an
+// explicit operator CPU request. We use it to raise the worker-thread floor (see
+// default_worker_threads) so a pod that reserves N cores gets at least N worker threads,
+// rather than the historical flat default of DEFAULT_WORKER_THREADS.
+const ZTUNNEL_RESOURCE_CPU_REQUEST: &str = "ZTUNNEL_RESOURCE_CPU_REQUEST";
 const POOL_MAX_STREAMS_PER_CONNECTION: &str = "POOL_MAX_STREAMS_PER_CONNECTION";
 const POOL_UNUSED_RELEASE_TIMEOUT: &str = "POOL_UNUSED_RELEASE_TIMEOUT";
 // CONNECTION_TERMINATION_DEADLINE configures an explicit deadline
@@ -81,6 +92,8 @@ const UNSTABLE_ENABLE_SOCKS5: &str = "UNSTABLE_ENABLE_SOCKS5";
 const CRL_PATH: &str = "CRL_PATH";
 
 const DEFAULT_WORKER_THREADS: u16 = 2;
+// Fraction of the node's logical cores used for worker threads when no explicit CPU limit is set.
+const DEFAULT_WORKER_THREAD_CPU_FRACTION: f64 = 0.25;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_READINESS_PORT: u16 = 15021;
 const DEFAULT_STATS_PORT: u16 = 15020;
@@ -441,6 +454,22 @@ fn get_cpu_count() -> Result<usize, Error> {
         // This is *logical cores*
         None => Ok(num_cpus::get()),
     }
+}
+
+/// Default worker-thread count when neither ZTUNNEL_WORKER_THREADS nor proxy
+/// `concurrency` is set.
+fn default_worker_threads() -> Result<usize, Error> {
+    // Maximum of user set request and default
+    let floor = match parse::<usize>(ZTUNNEL_RESOURCE_CPU_REQUEST)? {
+        Some(request) => request.max(DEFAULT_WORKER_THREADS as usize),
+        None => DEFAULT_WORKER_THREADS as usize,
+    };
+    // User set limit or fraction of available CPUs
+    let target = match parse::<usize>(ZTUNNEL_RESOURCE_CPU_LIMIT)? {
+        Some(limit) => limit,
+        None => (num_cpus::get() as f64 * DEFAULT_WORKER_THREAD_CPU_FRACTION).ceil() as usize,
+    };
+    Ok(target.max(floor))
 }
 
 /// Parse worker threads configuration, supporting both fixed numbers and percentages
@@ -814,9 +843,14 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         fake_ca,
         auth,
 
-        num_worker_threads: parse_worker_threads(
-            pc.concurrency.unwrap_or(DEFAULT_WORKER_THREADS).into(),
-        )?,
+        num_worker_threads: parse_worker_threads(match pc.concurrency {
+            // Explicit positive concurrency: use it directly.
+            Some(concurrency) if concurrency > 0 => concurrency as usize,
+            // concurrency == 0 means "use all available cores"
+            Some(_) => num_cpus::get(),
+            // Unset: CPU-aware auto-default.
+            None => default_worker_threads()?,
+        })?,
 
         require_original_source: parse(ENABLE_ORIG_SRC)?,
         proxy_args: parse_args(),
@@ -1231,6 +1265,58 @@ pub mod tests {
             // Clean up
             env::remove_var(ZTUNNEL_WORKER_THREADS);
             env::remove_var(ZTUNNEL_CPU_LIMIT);
+
+            // default_worker_threads: explicit limit wins, even above the node fraction.
+            env::remove_var(ZTUNNEL_CPU_LIMIT);
+            env::set_var(ZTUNNEL_RESOURCE_CPU_LIMIT, "16");
+            assert_eq!(default_worker_threads().unwrap(), 16);
+
+            // default_worker_threads: explicit limit is floored at DEFAULT_WORKER_THREADS.
+            env::set_var(ZTUNNEL_RESOURCE_CPU_LIMIT, "1");
+            assert_eq!(default_worker_threads().unwrap(), 2);
+            env::remove_var(ZTUNNEL_RESOURCE_CPU_LIMIT);
+
+            // default_worker_threads: node fraction wins when no explicit limit is present.
+            // num_cpus is cgroup-aware, so we don't separately consult ZTUNNEL_CPU_LIMIT here.
+            env::remove_var(ZTUNNEL_RESOURCE_CPU_LIMIT);
+            let node_default =
+                (num_cpus::get() as f64 * DEFAULT_WORKER_THREAD_CPU_FRACTION).ceil() as usize;
+            assert_eq!(
+                default_worker_threads().unwrap(),
+                node_default.max(DEFAULT_WORKER_THREADS as usize)
+            );
+
+            // default_worker_threads: a CPU request raises the floor above the default.
+            env::remove_var(ZTUNNEL_RESOURCE_CPU_LIMIT);
+            env::set_var(ZTUNNEL_RESOURCE_CPU_REQUEST, "8");
+            assert_eq!(
+                default_worker_threads().unwrap(),
+                node_default.max(8),
+                "request should raise the floor to at least 8"
+            );
+
+            // default_worker_threads: a request below the default doesn't lower the floor.
+            env::set_var(ZTUNNEL_RESOURCE_CPU_REQUEST, "1");
+            assert_eq!(default_worker_threads().unwrap(), node_default.max(2));
+
+            // default_worker_threads: the limit still wins as the count, with the request
+            // acting only as the lower bound.
+            env::set_var(ZTUNNEL_RESOURCE_CPU_LIMIT, "16");
+            env::set_var(ZTUNNEL_RESOURCE_CPU_REQUEST, "4");
+            assert_eq!(default_worker_threads().unwrap(), 16);
+
+            // ...and when the request exceeds the limit, the request floor wins.
+            env::set_var(ZTUNNEL_RESOURCE_CPU_LIMIT, "4");
+            env::set_var(ZTUNNEL_RESOURCE_CPU_REQUEST, "8");
+            assert_eq!(default_worker_threads().unwrap(), 8);
+            env::remove_var(ZTUNNEL_RESOURCE_CPU_LIMIT);
+            env::remove_var(ZTUNNEL_RESOURCE_CPU_REQUEST);
+
+            // Clean up
+            env::remove_var(ZTUNNEL_WORKER_THREADS);
+            env::remove_var(ZTUNNEL_CPU_LIMIT);
+            env::remove_var(ZTUNNEL_RESOURCE_CPU_LIMIT);
+            env::remove_var(ZTUNNEL_RESOURCE_CPU_REQUEST);
         }
     }
 
