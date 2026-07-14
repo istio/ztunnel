@@ -15,7 +15,7 @@
 use crate::config;
 use crate::drain::DrainWatcher;
 use crate::proxy::Error;
-use crate::proxy::h2::revocation::{self, ConnectionRevocation};
+use crate::tls::revocation::{self, RevocationHandle};
 use bytes::Bytes;
 use futures_util::FutureExt;
 use http::Response;
@@ -100,7 +100,7 @@ pub async fn serve_connection<F, Fut>(
     s: tokio_rustls::server::TlsStream<TcpStream>,
     drain: DrainWatcher,
     mut force_shutdown: watch::Receiver<()>,
-    mut revocation: Option<Box<ConnectionRevocation>>,
+    mut revocation: Option<RevocationHandle>,
     handler: F,
 ) -> Result<(), Error>
 where
@@ -175,9 +175,8 @@ where
             // chain is now revoked we abruptly terminate (GOAWAY) rather than gracefully drain.
             _ = revocation::wait_for_revocation(revocation.as_mut()) => {
                 if let Some(rev) = revocation.as_ref() {
-                    let peer = rev.record_revocation(crate::proxy::metrics::Reporter::destination);
                     debug!(
-                        %peer,
+                        peer = %rev.peer(),
                         "terminating inbound connection: peer certificate revoked by CRL update"
                     );
                     conn.abrupt_shutdown(h2::Reason::NO_ERROR); // maybe INADEQUATE_SECURITY instead?

@@ -294,13 +294,12 @@ impl OutboundConnection {
             let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
             // Enforce CRL revocation on this inner tunnel for its lifetime
             let revocation = self.pi.crl_manager.as_ref().map(|crl_manager| {
-                super::h2::revocation::ConnectionRevocation::new(
+                crl_manager.register(crate::tls::revocation::ConnRegistration::from_conn(
                     ssl,
-                    crl_manager.clone(),
-                    self.pi.metrics.clone(),
                     cert.root_store(),
                     webpki::KeyUsage::server_auth(),
-                )
+                    crate::proxy::metrics::Reporter::source,
+                ))
             });
             let mut sender = super::h2::client::spawn_connection(
                 self.pi.cfg.clone(),

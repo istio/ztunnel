@@ -546,8 +546,13 @@ mod test {
         crl_file.flush().unwrap();
 
         // Create CRL manager to load the CRL from file path
-        let crl_mgr =
-            Arc::new(crate::tls::crl::CrlManager::new(crl_file.path().to_path_buf()).unwrap());
+        let crl_mgr = Arc::new(
+            crate::tls::crl::CrlManager::new(
+                crl_file.path().to_path_buf(),
+                crate::test_helpers::helpers::test_proxy_metrics(),
+            )
+            .unwrap(),
+        );
 
         // Create TLS server to listen for incoming connections
         let server_tls = TlsAcceptor::from(Arc::new(server_wl.server_config(None).unwrap()));
@@ -618,8 +623,13 @@ mod test {
         crl_file.write_all(crl_pem.as_bytes()).unwrap();
         crl_file.flush().unwrap();
 
-        let crl_mgr =
-            Arc::new(crate::tls::crl::CrlManager::new(crl_file.path().to_path_buf()).unwrap());
+        let crl_mgr = Arc::new(
+            crate::tls::crl::CrlManager::new(
+                crl_file.path().to_path_buf(),
+                crate::test_helpers::helpers::test_proxy_metrics(),
+            )
+            .unwrap(),
+        );
 
         let server_tls = TlsAcceptor::from(Arc::new(server_wl.server_config(None).unwrap()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -212,15 +212,16 @@ impl Inbound {
     async fn build_revocation(
         pi: &ProxyInputs,
         ssl: &CommonState,
-    ) -> Option<Box<h2::revocation::ConnectionRevocation>> {
+    ) -> Option<crate::tls::revocation::RevocationHandle> {
         let crl_manager = pi.crl_manager.as_ref()?;
         match pi.local_workload_information.fetch_certificate().await {
-            Ok(cert) => Some(h2::revocation::ConnectionRevocation::new(
-                ssl,
-                crl_manager.clone(),
-                pi.metrics.clone(),
-                cert.root_store(),
-                webpki::KeyUsage::client_auth(),
+            Ok(cert) => Some(crl_manager.register(
+                crate::tls::revocation::ConnRegistration::from_conn(
+                    ssl,
+                    cert.root_store(),
+                    webpki::KeyUsage::client_auth(),
+                    crate::proxy::metrics::Reporter::destination,
+                ),
             )),
             Err(e) => {
                 warn!("failed to fetch certificate for CRL revocation enforcement: {e}");

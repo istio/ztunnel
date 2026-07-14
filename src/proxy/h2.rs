@@ -26,7 +26,6 @@ use tokio::sync::oneshot;
 use tracing::trace;
 
 pub mod client;
-pub mod revocation;
 pub mod server;
 
 async fn do_ping_pong(

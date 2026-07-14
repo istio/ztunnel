@@ -15,8 +15,8 @@
 use crate::baggage::{Baggage, parse_baggage_header};
 use crate::config;
 use crate::identity::Identity;
-use crate::proxy::h2::revocation::{self, ConnectionRevocation};
 use crate::proxy::{BAGGAGE_HEADER, Error};
+use crate::tls::revocation::{self, RevocationHandle};
 use bytes::{Buf, Bytes};
 use h2::SendStream;
 use h2::client::{Connection, SendRequest};
@@ -162,7 +162,7 @@ pub async fn spawn_connection(
     s: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
     driver_drain: Receiver<bool>,
     wl_key: WorkloadKey,
-    revocation: Option<Box<ConnectionRevocation>>,
+    revocation: Option<RevocationHandle>,
 ) -> Result<H2ConnectClient, Error> {
     let mut builder = h2::client::Builder::new();
     builder
@@ -215,7 +215,7 @@ pub async fn spawn_connection(
 async fn drive_connection<S, B>(
     mut conn: Connection<S, B>,
     mut driver_drain: Receiver<bool>,
-    mut revocation: Option<Box<ConnectionRevocation>>,
+    mut revocation: Option<RevocationHandle>,
 ) where
     S: AsyncRead + AsyncWrite + Send + Unpin,
     B: Buf,
@@ -240,13 +240,13 @@ async fn drive_connection<S, B>(
         }
         // CRL update revoked a cert in this connection's upstream chain. Revocation is a security
         // event, so we tear the tunnel down abruptly (let `conn` drop below) so any in-flight
-        // streams multiplexed over it are reset. `record_revocation` signals those downstream
-        // connections before the drop so each attributes `CERT_REVOKED` rather than a generic reset.
+        // streams multiplexed over it are reset. `revoked()` fires this tunnel's revocation signal
+        // before returning (and thus before the drop), so each downstream connection attributes
+        // `CERT_REVOKED` rather than a generic reset.
         _ = revocation::wait_for_revocation(revocation.as_mut()) => {
             if let Some(rev) = revocation.as_ref() {
-                let peer = rev.record_revocation(crate::proxy::metrics::Reporter::source);
                 debug!(
-                    %peer,
+                    peer = %rev.peer(),
                     "terminating outbound connection: upstream certificate revoked by CRL update"
                 );
             }

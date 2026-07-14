@@ -21,9 +21,11 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::sync::watch;
 use tracing::{debug, warn};
 use webpki::{CertRevocationList, OwnedCertRevocationList};
+
+use crate::proxy::Metrics;
+use crate::tls::revocation::{ConnRegistration, RevocationHandle, RevocationIndex};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CrlError {
@@ -41,13 +43,13 @@ pub enum CrlError {
 /// Both **inbound** and **outbound** mesh TLS verifiers call [`CrlManager::get_crls`] on every
 /// handshake, so CRL file updates apply to new connections immediately.
 ///
-/// For *existing* connections, [`CrlManager::subscribe`] hands out a watch receiver that fires on
-/// every successful (re)load, so a watcher can re-evaluate already-open connections against the
-/// updated CRL set.
+/// For *existing* connections, the manager owns a [`RevocationIndex`]: [`CrlManager::register`] tracks
+/// a connection at handshake, and every successful (re)load re-evaluates the tracked connections
+/// against the updated CRL set via [`RevocationIndex::navigate`].
 pub struct CrlManager {
     inner: Arc<RwLock<CrlManagerInner>>,
-    /// Bumped on every successful CRL (re)load. Subscribers re-evaluate existing connections.
-    notify: Arc<watch::Sender<u64>>,
+    /// Existing connection enforcement index. CRL reload path drives navigation.
+    index: RevocationIndex,
 }
 
 impl std::fmt::Debug for CrlManager {
@@ -68,8 +70,9 @@ struct CrlManagerInner {
 }
 
 impl CrlManager {
-    /// creates a new CRL manager
-    pub fn new(crl_path: PathBuf) -> Result<Self, CrlError> {
+    /// creates a new CRL manager. `metrics` is used by the owned [`RevocationIndex`] to record
+    /// existing-connection revocations.
+    pub fn new(crl_path: PathBuf, metrics: Arc<Metrics>) -> Result<Self, CrlError> {
         debug!(path = ?crl_path, "initializing crl manager");
 
         let manager = Self {
@@ -78,7 +81,7 @@ impl CrlManager {
                 crl_path: crl_path.clone(),
                 _debouncer: None,
             })),
-            notify: Arc::new(watch::channel(0u64).0),
+            index: RevocationIndex::new(metrics),
         };
 
         // try to load the CRL, but don't fail if the file doesn't exist yet
@@ -101,22 +104,21 @@ impl CrlManager {
         Ok(manager)
     }
 
-    /// Returns a watch receiver whose value increments on every successful CRL (re)load.
-    /// Used by the connection manager's CRL watcher to re-evaluate existing connections on update.
-    pub fn subscribe(&self) -> watch::Receiver<u64> {
-        self.notify.subscribe()
+    /// Track an existing connection for CRL revocation enforcement, returning its [`RevocationHandle`].
+    pub fn register(&self, conn: ConnRegistration) -> RevocationHandle {
+        self.index.register(self, conn)
     }
 
-    /// Reloads the CRL set from disk and, on success, notifies subscribers (so watchers can re-evaluate existing connections).
-    /// Lazy loads from `get_crls` also flow through here, but only fire once since subsequent calls find the CRLs already loaded.
+    /// Reloads the CRL set from disk and, on success, re-evaluates existing connections against the new set.
     pub fn load_crl(&self) -> Result<(), CrlError> {
         let res = self.reload_crl_data();
         if res.is_ok() {
-            self.notify.send_modify(|v| *v = v.wrapping_add(1));
+            self.index.navigate(self);
         }
         res
     }
 
+    /// Reloads and re-parses the CRL set, replacing the cached set.
     fn reload_crl_data(&self) -> Result<(), CrlError> {
         let mut inner = self.inner.write().unwrap();
 
@@ -196,7 +198,7 @@ impl CrlManager {
         }
         drop(inner);
         debug!("crl not loaded, attempting to load now");
-        if let Err(e) = self.load_crl() {
+        if let Err(e) = self.reload_crl_data() {
             debug!(error = %e, "failed to load crl");
             return Arc::new(Vec::new());
         }
@@ -283,12 +285,16 @@ impl CrlManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::helpers::test_proxy_metrics;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     #[test]
     fn test_crl_manager_missing_file() {
-        let result = CrlManager::new(PathBuf::from("/nonexistent/path/crl.pem"));
+        let result = CrlManager::new(
+            PathBuf::from("/nonexistent/path/crl.pem"),
+            test_proxy_metrics(),
+        );
         assert!(result.is_ok(), "should handle missing CRL file gracefully");
     }
 
@@ -299,7 +305,7 @@ mod tests {
             .expect("failed to write test data to temporary file");
         file.flush().expect("failed to flush temporary test file");
 
-        let result = CrlManager::new(file.path().to_path_buf());
+        let result = CrlManager::new(file.path().to_path_buf(), test_proxy_metrics());
         assert!(result.is_err(), "should fail on invalid CRL data");
     }
 
@@ -308,25 +314,8 @@ mod tests {
         let file = NamedTempFile::new().expect("failed to create temporary test file");
         // file is empty by default
 
-        let result = CrlManager::new(file.path().to_path_buf());
+        let result = CrlManager::new(file.path().to_path_buf(), test_proxy_metrics());
         assert!(result.is_ok(), "should handle empty CRL file gracefully");
-    }
-
-    #[test]
-    fn test_crl_manager_notifies_subscribers_on_reload() {
-        // An empty file is a valid CRL (no revocations), so load_crl succeeds and must notify.
-        let file = NamedTempFile::new().expect("failed to create temporary test file");
-        let mgr = CrlManager::new(file.path().to_path_buf()).expect("manager");
-
-        let mut rx = mgr.subscribe();
-        // Mark the current version (bumped by the initial load in `new`) as seen.
-        rx.borrow_and_update();
-
-        mgr.load_crl().expect("reload should succeed");
-        assert!(
-            rx.has_changed().expect("sender is alive"),
-            "subscribers should be notified after a successful CRL reload"
-        );
     }
 
     #[test]
@@ -376,7 +365,7 @@ mod tests {
         file.flush().expect("failed to flush temporary test file");
 
         // test that CrlManager can load it
-        let manager = CrlManager::new(file.path().to_path_buf())
+        let manager = CrlManager::new(file.path().to_path_buf(), test_proxy_metrics())
             .expect("should successfully parse valid CRL");
 
         let crls = manager.get_crls();
