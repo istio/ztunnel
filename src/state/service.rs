@@ -265,6 +265,41 @@ impl Service {
                 .map(|lb| lb.health_policy == LoadBalancerHealthPolicy::AllowAll)
                 .unwrap_or(false)
     }
+
+    /// Compares two services ignoring `endpoints`. Endpoints are derived from
+    /// workloads (not carried on the XDS Service), so a freshly-converted Service
+    /// always has empty endpoints; this compares only the service's own config to
+    /// detect whether an incoming update actually changes anything.
+    ///
+    /// The destructure makes adding a field a compile error, forcing a decision
+    /// about whether it belongs in this comparison.
+    pub fn config_eq(&self, other: &Service) -> bool {
+        let Service {
+            name,
+            namespace,
+            hostname,
+            vips,
+            cidr_vips,
+            ports,
+            endpoints: _,
+            subject_alt_names,
+            waypoint,
+            load_balancer,
+            ip_families,
+            canonical,
+        } = self;
+        *name == other.name
+            && *namespace == other.namespace
+            && *hostname == other.hostname
+            && *vips == other.vips
+            && *cidr_vips == other.cidr_vips
+            && *ports == other.ports
+            && *subject_alt_names == other.subject_alt_names
+            && *waypoint == other.waypoint
+            && *load_balancer == other.load_balancer
+            && *ip_families == other.ip_families
+            && *canonical == other.canonical
+    }
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize)]

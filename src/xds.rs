@@ -386,11 +386,9 @@ impl Handler<XdsWorkload> for ProxyStateUpdater {
         &self,
         updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsWorkload>>>,
     ) -> Result<(), Vec<RejectedConfig>> {
-        // Phase 1: convert every resource off-lock. A malformed resource only
-        // rejects itself and doesn't abort the batch.
-        let mut prepared = Vec::new();
+        let mut batch = PreparedBatch::default();
         let result = handle_single_resource(updates, |res: XdsUpdate<XdsWorkload>| {
-            prepared.push(match res {
+            batch.push(match res {
                 XdsUpdate::Update(w) => {
                     PreparedUpdate::Workload(PreparedWorkload::try_from_xds(w.resource)?)
                 }
@@ -398,7 +396,15 @@ impl Handler<XdsWorkload> for ProxyStateUpdater {
             });
             Ok(())
         });
-        // Phase 2: take the write lock once and apply the converted batch.
+        // For large batches, drop no-op updates by diffing against
+        // current state under a read lock (shared; doesn't block readers).
+        let prepared = if batch.should_diff() {
+            let state = self.state.read().unwrap();
+            reduce_by_diff(&state, batch.updates)
+        } else {
+            batch.updates
+        };
+        // Take the write lock once and apply the reduced batch.
         let mut state = self.state.write().unwrap();
         self.updater.apply_prepared(&mut state, prepared);
         result
@@ -410,17 +416,23 @@ impl Handler<XdsAddress> for ProxyStateUpdater {
         &self,
         updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsAddress>>>,
     ) -> Result<(), Vec<RejectedConfig>> {
-        // Phase 1: convert every resource off-lock (the expensive proto→internal
-        // work). A malformed resource only rejects itself.
-        let mut prepared = Vec::new();
+        let mut batch = PreparedBatch::default();
         let result = handle_single_resource(updates, |res: XdsUpdate<XdsAddress>| {
-            prepared.push(match res {
+            batch.push(match res {
                 XdsUpdate::Update(w) => PreparedUpdate::try_from_address(w.resource)?,
                 XdsUpdate::Remove(name) => PreparedUpdate::Remove(strng::new(name)),
             });
             Ok(())
         });
-        // Phase 2: take the write lock once and apply the converted batch, one
+        // For large batches (e.g. the full re-push on reconnect), drop
+        // no-op updates by diffing against current state under a read lock
+        let prepared = if batch.should_diff() {
+            let state = self.state.read().unwrap();
+            reduce_by_diff(&state, batch.updates)
+        } else {
+            batch.updates
+        };
+        // Take the write lock once and apply the reduced batch, one
         // clone + reindex per distinct service rather than once per endpoint.
         let mut state = self.state.write().unwrap();
         self.updater.apply_prepared(&mut state, prepared);
@@ -484,6 +496,58 @@ impl PreparedWorkload {
             endpoints,
         })
     }
+}
+
+/// Above these sizes a push is worth diffing against current state before
+/// applying (the read-lock comparison pass pays for itself by skipping unchanged
+/// resources); smaller steady-state deltas apply directly. `store_insert` cost is
+/// per-workload, so the primary gate is workload count.
+// TODO: Kinda arbitrary, tune these?
+const DIFF_MIN_WORKLOADS: usize = 1000;
+const DIFF_MIN_SERVICES: usize = 100;
+
+/// The converted resources of a push, accumulated during phase-1 conversion.
+/// Tracks the per-kind counts as it's built so the diff-vs-direct decision needs
+/// no extra pass over the batch.
+#[derive(Default)]
+struct PreparedBatch {
+    updates: Vec<PreparedUpdate>,
+    workloads: usize,
+    services: usize,
+}
+
+impl PreparedBatch {
+    fn push(&mut self, update: PreparedUpdate) {
+        match &update {
+            PreparedUpdate::Workload(_) => self.workloads += 1,
+            PreparedUpdate::Service(_) => self.services += 1,
+            PreparedUpdate::Remove(_) => {}
+        }
+        self.updates.push(update);
+    }
+
+    fn should_diff(&self) -> bool {
+        self.workloads >= DIFF_MIN_WORKLOADS || self.services >= DIFF_MIN_SERVICES
+    }
+}
+
+/// Drops updates that would be no-ops against `state`
+/// Removes are always kept.
+fn reduce_by_diff(state: &ProxyState, prepared: Vec<PreparedUpdate>) -> Vec<PreparedUpdate> {
+    prepared
+        .into_iter()
+        .filter(|update| match update {
+            PreparedUpdate::Workload(pw) => state
+                .workloads
+                .find_uid(&pw.workload.uid)
+                .is_none_or(|existing| *existing != *pw.workload),
+            PreparedUpdate::Service(svc) => state
+                .services
+                .get_by_namespaced_host(&svc.namespaced_hostname())
+                .is_none_or(|existing| !existing.config_eq(svc)),
+            PreparedUpdate::Remove(_) => true,
+        })
+        .collect()
 }
 
 /// Applies a single workload's service endpoints directly (one-shot). Used by the
@@ -836,5 +900,74 @@ mod tests {
         let remove = XdsUpdate::<XdsAddress>::Remove(workload(0, XdsStatus::Healthy).uid.into());
         apply(&updater, vec![remove]).unwrap();
         assert_eq!(endpoint_count(&state), 1);
+    }
+
+    // A batch large enough to trigger the diff path (> DIFF_MIN_WORKLOADS).
+    fn large_batch() -> Vec<XdsUpdate<XdsAddress>> {
+        let n = DIFF_MIN_WORKLOADS + 50;
+        let mut batch = vec![svc_update(service())];
+        batch.extend((0..n).map(|i| wl_update(workload(i, XdsStatus::Healthy))));
+        batch
+    }
+
+    fn reindexes(state: &Arc<RwLock<ProxyState>>) -> usize {
+        state.read().unwrap().services.endpoint_reindexes()
+    }
+
+    // Re-pushing the identical large batch (the reconnect case) is reduced to a
+    // no-op: no endpoints change and no service is reindexed.
+    #[test]
+    fn reconnect_repush_is_noop() {
+        let (updater, state) = updater_and_state();
+        apply(&updater, large_batch()).unwrap();
+        let eps = endpoint_count(&state);
+        let before = reindexes(&state);
+
+        apply(&updater, large_batch()).unwrap();
+
+        assert_eq!(endpoint_count(&state), eps);
+        assert_eq!(
+            reindexes(&state),
+            before,
+            "identical re-push must not reindex"
+        );
+    }
+
+    // In a large re-push where only one workload changed, only that change is
+    // applied: the unchanged service is skipped, so exactly one reindex occurs.
+    #[test]
+    fn diff_applies_only_changed() {
+        let (updater, state) = updater_and_state();
+        let n = DIFF_MIN_WORKLOADS + 50;
+        apply(&updater, large_batch()).unwrap();
+        assert_eq!(endpoint_count(&state), n);
+        let before = reindexes(&state);
+
+        // Same batch, but workload 0 is now unhealthy -> dropped from the service.
+        let mut batch = vec![svc_update(service())];
+        batch.push(wl_update(workload(0, XdsStatus::Unhealthy)));
+        batch.extend((1..n).map(|i| wl_update(workload(i, XdsStatus::Healthy))));
+        apply(&updater, batch).unwrap();
+
+        assert_eq!(endpoint_count(&state), n - 1);
+        assert_eq!(reindexes(&state), before + 1);
+    }
+
+    // Removes survive the diff (they are never dropped as "unchanged").
+    #[test]
+    fn diff_keeps_removes() {
+        let (updater, state) = updater_and_state();
+        let n = DIFF_MIN_WORKLOADS + 50;
+        apply(&updater, large_batch()).unwrap();
+        assert_eq!(endpoint_count(&state), n);
+
+        // A large, otherwise-unchanged re-push that also removes workload 0.
+        let mut batch = large_batch();
+        batch.push(XdsUpdate::Remove(
+            workload(0, XdsStatus::Healthy).uid.into(),
+        ));
+        apply(&updater, batch).unwrap();
+
+        assert_eq!(endpoint_count(&state), n - 1);
     }
 }
