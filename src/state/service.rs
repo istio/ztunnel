@@ -55,7 +55,7 @@ pub struct Service {
 
     /// When non-empty, a weighted set of waypoints for this service. The client samples one
     /// per connection proportional to weight (see [WeightedWaypoint]); used to shift a
-    /// percentage of traffic between waypoints during a canary. When empty, `waypoint` is used
+    /// share of connections between waypoints during a canary. When empty, `waypoint` is used
     /// as before. `waypoint` stays populated with the primary for backward compatibility.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub weighted_waypoints: Vec<WeightedWaypoint>,
@@ -71,7 +71,7 @@ pub struct Service {
 }
 
 /// WeightedWaypoint is a candidate waypoint plus its relative selection weight, used to shift a
-/// percentage of a service's traffic between waypoints (see [Service::weighted_waypoints]).
+/// share of a service's connections between waypoints (see [Service::weighted_waypoints]).
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WeightedWaypoint {

@@ -519,7 +519,7 @@ impl DemandProxyState {
 }
 
 /// sample_weighted_waypoint picks one waypoint from a service's weighted set, proportional to
-/// each entry's weight (used to shift a percentage of traffic between waypoints during a canary).
+/// each entry's weight (used to shift a share of connections between waypoints during a canary).
 /// Returns None when there is no usable weighted set — an empty set, or one that is not samplable
 /// (e.g. all weights zero) — in which case the caller falls back to the single `waypoint` field.
 fn sample_weighted_waypoint<'a>(
@@ -1015,7 +1015,7 @@ impl DemandProxyState {
         original_destination_address: SocketAddr,
     ) -> Result<Option<Upstream>, Error> {
         // When a weighted set is present, sample one waypoint per connection proportional to
-        // weight (used to shift a percentage of traffic between waypoints during a canary).
+        // weight (used to shift a share of connections between waypoints during a canary).
         // Otherwise (or if the set is not samplable, e.g. all-zero) fall back to the single
         // `waypoint` field, preserving existing behavior.
         let gw_address = match sample_weighted_waypoint(service, &mut rand::rng()) {
