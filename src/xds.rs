@@ -534,6 +534,11 @@ impl PreparedBatch {
 /// Drops updates that would be no-ops against `state`
 /// Removes are always kept.
 fn reduce_by_diff(state: &ProxyState, prepared: Vec<PreparedUpdate>) -> Vec<PreparedUpdate> {
+    // Nothing to diff against on the initial push (empty state) — every resource
+    // is new, so skip the comparison pass and apply the batch as-is.
+    if state.workloads.is_empty() && state.services.is_empty() {
+        return prepared;
+    }
     prepared
         .into_iter()
         .filter(|update| match update {

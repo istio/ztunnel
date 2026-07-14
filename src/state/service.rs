@@ -508,6 +508,10 @@ impl ServiceStore {
     /// # Arguments
     ///
     /// * `host` - the namespaced hostname.
+    pub fn is_empty(&self) -> bool {
+        self.by_host.is_empty()
+    }
+
     pub fn get_by_namespaced_host(&self, host: &NamespacedHostname) -> Option<Arc<Service>> {
         // Get the list of services that match the hostname. Typically there will only be one, but
         // ServiceEntry allows configuring arbitrary hostnames on a per-namespace basis.

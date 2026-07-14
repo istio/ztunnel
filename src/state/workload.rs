@@ -900,6 +900,10 @@ impl WorkloadStore {
         self.by_uid.get(uid).cloned()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.by_uid.is_empty()
+    }
+
     // was_last_identity_on_node is a specialized function to help determine if we should clear a certificate.
     // It is called when a workload is removed, with the node and identity of the workload
     pub fn was_last_identity_on_node(&self, node_name: &Strng, identity: &Identity) -> bool {
