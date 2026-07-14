@@ -448,9 +448,10 @@ impl ServiceStore {
     }
 
     /// Returns the "best" [Service] matching the given VIP.
-    /// If a namespace is provided, a Service from that namespace is preferred.
+    /// If a namespace is provided, filter for visibility.
+    /// Next, prefer a Service from that namespace.
     /// Next, a Service marked `canonical` is preferred.
-    /// Falls back to CIDR matching if no exact VIP match: namespace match wins
+    /// Fall back to CIDR matching if no exact VIP match: namespace match wins
     /// over specificity, then longest-prefix, then canonical.
     pub fn get_best_by_vip(
         &self,
@@ -458,11 +459,7 @@ impl ServiceStore {
         ns: Option<&Strng>,
     ) -> Option<Arc<Service>> {
         if let Some(services) = self.by_vip.get(vip) {
-            // When a client namespace is provided, skip services not visible to it. If a visible
-            // match remains, return it; if the filter empties the set (or nothing matches), fall
-            // through to the CIDR lookup rather than returning None — a VIP whose services are all
-            // hidden should behave as if it were not an exact-VIP mesh service, and a CIDR VIP may
-            // still match. With no client namespace (e.g. the inbound path), don't enforce.
+            // only return a service that is visible to the passed in workload's namespace
             if let Some(m) = ServiceMatch::find_best_match(
                 services.iter().filter(|s| {
                     let visible = ns.is_none_or(|n| s.visible_to(n));
@@ -541,9 +538,7 @@ impl ServiceStore {
         let services = self.by_host.get(hostname)?;
         // When a client namespace is provided, skip services not visible to it so a NAMESPACE-scoped
         // service is not resolvable by hostname from another namespace. The namespace also ranks the
-        // match (find_best_match) — see its doc for the general inbound-selection caveat when several
-        // services share a key (e.g. multiple PUBLIC SEs on one waypoint). With no client namespace,
-        // don't enforce.
+        // match (find_best_match).
         Some(
             ServiceMatch::find_best_match(
                 services.iter().filter(|s| {
@@ -851,19 +846,6 @@ impl<'a> ServiceMatch<'a> {
     /// Picks the best service among candidates sharing a key (VIP, CIDR-VIP, or hostname). Ranking:
     /// a service in `client_ns` first, then a `canonical` service, then one in `preferred_namespace`,
     /// then the first seen.
-    ///
-    /// `client_ns` should be the client's namespace, and outbound callers pass it. Inbound callers do
-    /// not: the hostname path passes the serving workload's (dst) namespace and the VIP path passes
-    /// None — neither is the client's, and neither has an intrinsic relation to it. The selection
-    /// matches what the client resolved only when the key is unique or the service is co-located with
-    /// the dst (for application workloads, this is ~invariant); a waypoint may front services in other
-    /// namespaces, so neither holds there and the wrong service's policy / port mapping can be
-    /// applied. In practice this bites only sandwiched third-party waypoints, where ztunnel terminates
-    /// inbound HBONE in front of the proxy: the Istio (Envoy) waypoint terminates HBONE itself, so its
-    /// analogous misselection is an Envoy-config concern rather than this path. The client's namespace
-    /// is available on inbound from the mTLS peer identity (`conn.src_identity`), so these paths could
-    /// pass it instead; inbound passthrough has no identity and cannot (waypoints arguably should not
-    /// accept passthrough).
     pub fn find_best_match(
         mut services: impl Iterator<Item = &'a Arc<Service>>,
         client_ns: Option<&Strng>,
