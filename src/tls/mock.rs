@@ -27,11 +27,6 @@ use rustls::ServerConfig;
 
 use super::{ServerCertProvider, TlsError, WorkloadCertificate};
 
-/// Test-only re-export of the shared webpki chain + CRL verification routine, so tests/benches can
-/// exercise the exact check [`crate::proxy::h2::revocation::ConnectionRevocation`] uses to
-/// re-evaluate an existing connection, without duplicating it.
-pub use crate::tls::verifier::verify_cert_chain;
-
 pub const TEST_CERT: &[u8] = include_bytes!("cert-chain.pem");
 pub const TEST_WORKLOAD_CERT: &[u8] = include_bytes!("cert.pem");
 pub const TEST_PKEY: &[u8] = include_bytes!("key.pem");
@@ -208,22 +203,6 @@ impl ServerCertProvider for MockServerCertProvider {
 /// embeds as the issuer field in issued leaf certs and what `TEST_ROOT` sets for its subject.
 #[cfg(any(test, feature = "testing"))]
 pub fn crl_pem_revoking_cert(revoked_serial: &[u8]) -> String {
-    crl_pem_revoking_certs(std::slice::from_ref(&revoked_serial.to_vec()))
-}
-
-/// Sign a single PEM CRL with the test root key that revokes all of the given serial numbers.
-///
-/// Unlike concatenating several single-serial CRLs from [`crl_pem_revoking_cert`], this models how
-/// a real CA actually publishes revocations: one cumulative, authoritative CRL per issuer, updated
-/// in place. That distinction matters for webpki-backed revocation checking (`verify_cert_chain`):
-/// `rustls-webpki` picks the *first* CRL in its list that's authoritative for a cert's issuer and
-/// checks only that one (see `RevocationOptions::check`'s `.find(...)`) — it does not union revoked
-/// serials across multiple same-issuer CRL objects the way the old `(issuer, serial)` membership
-/// check did. So a test/benchmark that re-derives revocation incrementally over multiple reloads
-/// must, on each reload, hand `CrlManager` one CRL containing the *entire* current revoked set for
-/// an issuer, not a new single-entry CRL appended to the previous ones.
-#[cfg(any(test, feature = "testing"))]
-pub fn crl_pem_revoking_certs(revoked_serials: &[Vec<u8>]) -> String {
     use rcgen::*;
 
     let ca_kp = KeyPair::from_pem(std::str::from_utf8(TEST_ROOT_KEY).unwrap()).unwrap();
@@ -238,15 +217,12 @@ pub fn crl_pem_revoking_certs(revoked_serials: &[Vec<u8>]) -> String {
         next_update: now + time::Duration::days(30),
         crl_number: SerialNumber::from(1u64),
         issuing_distribution_point: None,
-        revoked_certs: revoked_serials
-            .iter()
-            .map(|serial| RevokedCertParams {
-                serial_number: SerialNumber::from_slice(serial),
-                revocation_time: now,
-                reason_code: Some(RevocationReason::KeyCompromise),
-                invalidity_date: None,
-            })
-            .collect(),
+        revoked_certs: vec![RevokedCertParams {
+            serial_number: SerialNumber::from_slice(revoked_serial),
+            revocation_time: now,
+            reason_code: Some(RevocationReason::KeyCompromise),
+            invalidity_date: None,
+        }],
         key_identifier_method: KeyIdMethod::Sha256,
     };
     let issuer = Issuer::from_params(&ca_params, &ca_kp);
@@ -259,7 +235,7 @@ pub fn crl_pem_revoking_certs(revoked_serials: &[Vec<u8>]) -> String {
 
 /// Generate an intermediate CA certificate signed by `root_ca_key`, using the same `O=cluster.local` DN as `TEST_ROOT`.
 /// Returns the IA key (PEM), cert (PEM), and serial number (bytes).
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub fn generate_intermediate_ca(root_ca_key: &[u8]) -> (String, String, Vec<u8>) {
     use rcgen::*;
 

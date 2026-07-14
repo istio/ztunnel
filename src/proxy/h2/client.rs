@@ -149,9 +149,7 @@ impl H2ConnectClient {
         Ok((stream, response.into_body(), baggage))
     }
 
-    /// A receiver for this tunnel's CRL revocation signal, or `None` when CRL enforcement is disabled.
-    /// The outbound proxy races this against its data copy (via [`crate::proxy::connection_manager::await_revocation`])
-    /// so a revoked teardown is attributed as `CERT_REVOKED` in the access log — mirroring the inbound per-stream attribution.
+    /// A receiver for this tunnel's CRL revocation signal, or `None` when CRL enforcement is disabled
     pub fn revoked_receiver(&self) -> Option<watch::Receiver<bool>> {
         self.revoked_rx.clone()
     }

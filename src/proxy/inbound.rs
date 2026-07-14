@@ -150,15 +150,7 @@ impl Inbound {
                     };
                     debug!(%conn, "accepted connection");
                     let cfg = pi.cfg.clone();
-                    // Enforce CRL revocation on this existing connection when a CRL is configured.
-                    // The revocation state owns the per-connection signal that `serve_connection`
-                    // sets when this peer's cert is revoked; each stream's serving future watches a
-                    // receiver of it so the access log attributes the termination (mirrors the RBAC
-                    // late-rejection drain). Re-checking revocation reuses the same webpki
-                    // chain-validation path as the handshake, so it needs our own cert's trust
-                    // anchors alongside the peer chain already captured from `ssl`. Boxed so the
-                    // `fetch_certificate` await doesn't inline its state into `serve_client` (this
-                    // future must stay small — see the assertion below).
+                    // Enforce CRL revocation on this existing connection when a CRL is configured
                     let revocation = Box::pin(Self::build_revocation(&pi, ssl)).await;
                     let revoked_rx = revocation.as_ref().map(|r| r.subscribe_revoked());
                     let request_handler = move |req| {

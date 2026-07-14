@@ -171,15 +171,14 @@ where
                 conn.graceful_shutdown();
                 break;
             }
-            // CRL update: revocation is a security event, so if any cert in this connection's peer
-            // chain is now revoked we abruptly terminate (GOAWAY) rather than gracefully drain.
+            // CRL update: revocation is a security event, abruptly terminate (GOAWAY) rather than gracefully drain
             _ = revocation::wait_for_revocation(revocation.as_mut()) => {
                 if let Some(rev) = revocation.as_ref() {
                     debug!(
                         peer = %rev.peer(),
                         "terminating inbound connection: peer certificate revoked by CRL update"
                     );
-                    conn.abrupt_shutdown(h2::Reason::NO_ERROR); // maybe INADEQUATE_SECURITY instead?
+                    conn.abrupt_shutdown(h2::Reason::NO_ERROR);
                     break;
                 }
             }
