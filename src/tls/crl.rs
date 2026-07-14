@@ -18,7 +18,7 @@ use notify_debouncer_full::{
 };
 use rustls_pemfile::Item;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -120,15 +120,25 @@ impl CrlManager {
 
     /// Reloads and re-parses the CRL set, replacing the cached set.
     fn reload_crl_data(&self) -> Result<(), CrlError> {
-        let mut inner = self.inner.write().unwrap();
+        // Snapshot the path under a brief read lock, then release it before blocking on I/O.
+        let crl_path = self.inner.read().unwrap().crl_path.clone();
 
-        let data = std::fs::read(&inner.crl_path)?;
+        let crls = Self::parse_crl_file(&crl_path)?;
+
+        // Swap in the finished set under a brief write lock.
+        self.inner.write().unwrap().crls = Some(Arc::new(crls));
+        Ok(())
+    }
+
+    /// Reads and parses the CRL file into webpki's pre-parsed form.
+    /// An empty file — or one with no CRL blocks — is valid and yields an empty set (no revocations)
+    fn parse_crl_file(crl_path: &Path) -> Result<Vec<CertRevocationList<'static>>, CrlError> {
+        let data = std::fs::read(crl_path)?;
 
         // empty file means no revocations - this is valid
         if data.is_empty() {
-            debug!(path = ?inner.crl_path, "crl file is empty, treating as no revocations");
-            inner.crls = Some(Arc::new(Vec::new()));
-            return Ok(());
+            debug!(path = ?crl_path, "crl file is empty, treating as no revocations");
+            return Ok(Vec::new());
         }
 
         // parse all CRL blocks (handles concatenated CRLs)
@@ -141,9 +151,8 @@ impl CrlManager {
 
         // empty PEM file (no CRL blocks) means no revocations
         if der_crls.is_empty() {
-            debug!(path = ?inner.crl_path, "no crl blocks found, treating as no revocations");
-            inner.crls = Some(Arc::new(Vec::new()));
-            return Ok(());
+            debug!(path = ?crl_path, "no crl blocks found, treating as no revocations");
+            return Ok(Vec::new());
         }
 
         let mut validated_crls: Vec<CertRevocationList<'static>> =
@@ -159,16 +168,13 @@ impl CrlManager {
             validated_crls.push(CertRevocationList::from(owned));
         }
 
-        let count = validated_crls.len();
-        inner.crls = Some(Arc::new(validated_crls));
-
         debug!(
-            path = ?inner.crl_path,
+            path = ?crl_path,
             format = if is_pem { "PEM" } else { "DER" },
-            count = count,
+            count = validated_crls.len(),
             "crl loaded successfully"
         );
-        Ok(())
+        Ok(validated_crls)
     }
 
     /// parses PEM-encoded CRL data that may contain multiple CRL blocks
