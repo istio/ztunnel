@@ -53,6 +53,13 @@ pub struct Service {
     #[serde(default, skip_serializing_if = "is_default")]
     pub waypoint: Option<GatewayAddress>,
 
+    /// When non-empty, a weighted set of waypoints for this service. The client samples one
+    /// per connection proportional to weight (see [WeightedWaypoint]); used to shift a
+    /// share of connections between waypoints during a canary. When empty, `waypoint` is used
+    /// as before. `waypoint` stays populated with the primary for backward compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub weighted_waypoints: Vec<WeightedWaypoint>,
+
     #[serde(default, skip_serializing_if = "is_default")]
     pub load_balancer: Option<LoadBalancer>,
 
@@ -61,6 +68,15 @@ pub struct Service {
 
     #[serde(default)]
     pub canonical: bool,
+}
+
+/// WeightedWaypoint is a candidate waypoint plus its relative selection weight, used to shift a
+/// share of a service's connections between waypoints (see [Service::weighted_waypoints]).
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WeightedWaypoint {
+    pub destination: GatewayAddress,
+    pub weight: u32,
 }
 
 /// EndpointSet is an abstraction over a set of endpoints.
@@ -307,6 +323,20 @@ impl TryFrom<&XdsService> for Service {
             Some(w) => Some(GatewayAddress::try_from(w)?),
             None => None,
         };
+        let weighted_waypoints = s
+            .weighted_waypoints
+            .iter()
+            .map(|ww| {
+                let dest = ww
+                    .destination
+                    .as_ref()
+                    .ok_or(WorkloadError::MissingGatewayAddress)?;
+                Ok(WeightedWaypoint {
+                    destination: GatewayAddress::try_from(dest)?,
+                    weight: ww.weight,
+                })
+            })
+            .collect::<Result<Vec<_>, WorkloadError>>()?;
         let lb = if let Some(lb) = &s.load_balancing {
             Some(LoadBalancer {
                 routing_preferences: lb
@@ -341,6 +371,7 @@ impl TryFrom<&XdsService> for Service {
             endpoints: Default::default(), // Will be populated once inserted into the store.
             subject_alt_names: s.subject_alt_names.iter().map(strng::new).collect(),
             waypoint,
+            weighted_waypoints,
             load_balancer: lb,
             ip_families,
             canonical: s.canonical,
@@ -782,6 +813,7 @@ mod tests {
             endpoints: EndpointSet::from_list([]),
             subject_alt_names: vec![],
             waypoint: None,
+            weighted_waypoints: vec![],
             load_balancer: None,
             ip_families: None,
             canonical: false,
@@ -1117,6 +1149,7 @@ mod tests {
             endpoints: EndpointSet::from_list([]),
             subject_alt_names: vec![],
             waypoint: None,
+            weighted_waypoints: vec![],
             load_balancer: None,
             ip_families: None,
             canonical: false,
