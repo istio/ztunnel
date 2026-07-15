@@ -1014,9 +1014,7 @@ impl DemandProxyState {
         source_workload: &Workload,
         original_destination_address: SocketAddr,
     ) -> Result<Option<Upstream>, Error> {
-        // When a weighted set is present, sample one waypoint per connection proportional to
-        // weight (used to shift a share of connections between waypoints during a canary).
-        // Otherwise (or if the set is not samplable, e.g. all-zero) fall back to the single
+        // Choose a weighted waypoint, else fall back to the single
         // `waypoint` field, preserving existing behavior.
         let gw_address = match sample_weighted_waypoint(service, &mut rand::rng()) {
             Some(gw_address) => gw_address,
