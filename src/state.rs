@@ -1226,7 +1226,9 @@ mod tests {
         };
         let a = ga("10.0.0.1");
         let b = ga("10.0.0.2");
-        let mut rng = rand::rng();
+        // Seed deterministically so the distribution assertion below cannot flake.
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(0);
 
         // No weighted set -> None (caller falls back to the single `waypoint` field).
         assert_eq!(sample_weighted_waypoint(&svc(None, vec![]), &mut rng), None);
@@ -1283,31 +1285,35 @@ mod tests {
         );
         assert_eq!(sample_weighted_waypoint(&all_zero, &mut rng), None);
 
-        // A genuine split exercises both waypoints across many samples.
+        // A genuine split tracks the configured weights across many samples.
+        // 75/25 is asymmetric so the assertion would catch a swapped or ignored weight.
         let split = svc(
             None,
             vec![
                 WeightedWaypoint {
                     destination: a.clone(),
-                    weight: 50,
+                    weight: 75,
                 },
                 WeightedWaypoint {
                     destination: b.clone(),
-                    weight: 50,
+                    weight: 25,
                 },
             ],
         );
-        let (mut saw_a, mut saw_b) = (false, false);
-        for _ in 0..200 {
+        let n = 10_000;
+        let (mut count_a, mut count_b) = (0, 0);
+        for _ in 0..n {
             match sample_weighted_waypoint(&split, &mut rng) {
-                Some(x) if *x == a => saw_a = true,
-                Some(x) if *x == b => saw_b = true,
+                Some(x) if *x == a => count_a += 1,
+                Some(x) if *x == b => count_b += 1,
                 other => panic!("unexpected selection: {other:?}"),
             }
         }
+        // Expect ~75/25. With a fixed seed and a wide tolerance this is stable, not statistical.
+        let frac_a = count_a as f64 / n as f64;
         assert!(
-            saw_a && saw_b,
-            "both waypoints should be selected across samples"
+            (0.70..0.80).contains(&frac_a),
+            "expected ~75% for a, got {frac_a} (a={count_a}, b={count_b})"
         );
     }
 
