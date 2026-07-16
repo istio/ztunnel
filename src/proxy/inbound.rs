@@ -490,8 +490,8 @@ impl Inbound {
         })
     }
 
-    // Selects a service by hostname without the explicit knowledge of the namespace
-    // There is no explicit mapping from hostname to namespace (e.g. foo.com)
+    // Select a service by hostname, preferring one in the namespace of the given workload.
+    // The given workload may be in the perspective of outbound or inbound.
     fn find_service_by_hostname(
         state: &DemandProxyState,
         local_workload: &Workload,
@@ -784,7 +784,7 @@ mod tests {
         rbac::Connection,
         state::{
             self, DemandProxyState, WorkloadInfo,
-            service::{Endpoint, EndpointSet, Service},
+            service::{Endpoint, EndpointSet, Service, Visibility},
             workload::{
                 ApplicationTunnel, GatewayAddress, HealthStatus, InboundProtocol, NetworkAddress,
                 NetworkMode, Workload, application_tunnel::Protocol as AppProtocol,
@@ -1025,6 +1025,7 @@ mod tests {
             load_balancer: None,
             ip_families: None,
             canonical: true,
+            visibility: Visibility::Public,
         });
 
         let workloads = vec![

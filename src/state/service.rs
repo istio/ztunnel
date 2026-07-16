@@ -19,7 +19,7 @@ use serde::{Deserializer, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
-use tracing::trace;
+use tracing::{debug, trace};
 
 use xds::istio::workload::Service as XdsService;
 
@@ -68,6 +68,11 @@ pub struct Service {
 
     #[serde(default)]
     pub canonical: bool,
+
+    // Always rendered (no skip_serializing_if) so a service's visibility is visible in a
+    // ztunnel config dump even when it is the default PUBLIC.
+    #[serde(default)]
+    pub visibility: Visibility,
 }
 
 /// WeightedWaypoint is a candidate waypoint plus its relative selection weight, used to shift a
@@ -247,6 +252,35 @@ impl IpFamily {
     }
 }
 
+/// Visibility controls which clients can resolve and route to a service.
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub enum Visibility {
+    /// Visible to every client the control plane serves (default / legacy behavior).
+    #[default]
+    Public,
+    /// Visible only to clients in the same namespace as the service.
+    Namespace,
+}
+
+impl From<xds::istio::workload::service::Visibility> for Visibility {
+    fn from(value: xds::istio::workload::service::Visibility) -> Self {
+        use xds::istio::workload::service::Visibility as XdsVisibility;
+        match value {
+            XdsVisibility::Public => Visibility::Public,
+            XdsVisibility::Namespace => Visibility::Namespace,
+        }
+    }
+}
+
+impl Service {
+    /// visible_to reports whether a client in the given namespace may resolve and route to
+    /// this service. Namespace-scoped services are only visible within their own namespace;
+    /// all others are visible everywhere the control plane serves.
+    pub fn visible_to(&self, client_namespace: &Strng) -> bool {
+        self.visibility != Visibility::Namespace || &self.namespace == client_namespace
+    }
+}
+
 impl Service {
     pub fn namespaced_hostname(&self) -> NamespacedHostname {
         NamespacedHostname {
@@ -375,6 +409,10 @@ impl TryFrom<&XdsService> for Service {
             load_balancer: lb,
             ip_families,
             canonical: s.canonical,
+            // Unknown values fall back to PUBLIC (fail open) rather than dropping the Service.
+            visibility: xds::istio::workload::service::Visibility::try_from(s.visibility)
+                .unwrap_or_default()
+                .into(),
         };
         Ok(svc)
     }
@@ -410,9 +448,10 @@ impl ServiceStore {
     }
 
     /// Returns the "best" [Service] matching the given VIP.
-    /// If a namespace is provided, a Service from that namespace is preferred.
+    /// If a namespace is provided, filter for visibility.
+    /// Next, prefer a Service from that namespace.
     /// Next, a Service marked `canonical` is preferred.
-    /// Falls back to CIDR matching if no exact VIP match: namespace match wins
+    /// Fall back to CIDR matching if no exact VIP match: namespace match wins
     /// over specificity, then longest-prefix, then canonical.
     pub fn get_best_by_vip(
         &self,
@@ -420,7 +459,26 @@ impl ServiceStore {
         ns: Option<&Strng>,
     ) -> Option<Arc<Service>> {
         if let Some(services) = self.by_vip.get(vip) {
-            return Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone());
+            // only return a service that is visible to the passed in workload's namespace
+            if let Some(m) = ServiceMatch::find_best_match(
+                services.iter().filter(|s| {
+                    let visible = ns.is_none_or(|n| s.visible_to(n));
+                    if !visible {
+                        debug!(
+                            hostname = %s.hostname,
+                            service_namespace = %s.namespace,
+                            client_namespace = ns.map(Strng::as_str).unwrap_or(""),
+                            vip = %vip.address,
+                            "visibility filtering: service not visible to client namespace"
+                        );
+                    }
+                    visible
+                }),
+                ns,
+                None,
+            ) {
+                return Some(m.clone());
+            }
         }
         self.get_best_by_cidr_vip(vip, ns)
     }
@@ -436,6 +494,18 @@ impl ServiceStore {
         let mut best: Option<RankedMatch<'_>> = None;
         for (nc, svc) in &self.by_cidr_vip {
             if nc.network != vip.network || !nc.cidr.contains(&vip.address) {
+                continue;
+            }
+            // Skip services not visible to the client's namespace (see get_best_by_vip); only
+            // enforced when a client namespace is provided.
+            if ns.is_some_and(|n| !svc.visible_to(n)) {
+                debug!(
+                    hostname = %svc.hostname,
+                    service_namespace = %svc.namespace,
+                    client_namespace = ns.map(Strng::as_str).unwrap_or(""),
+                    vip = %vip.address,
+                    "visibility filtering: service not visible to client namespace"
+                );
                 continue;
             }
             let rank = CidrMatchRank {
@@ -466,7 +536,28 @@ impl ServiceStore {
     // Next, a Service marked `canonical` is prerferred.
     pub fn get_best_by_host(&self, hostname: &Strng, ns: Option<&Strng>) -> Option<Arc<Service>> {
         let services = self.by_host.get(hostname)?;
-        Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone())
+        // When a client namespace is provided, skip services not visible to it so a NAMESPACE-scoped
+        // service is not resolvable by hostname from another namespace. The namespace also ranks the
+        // match (find_best_match).
+        Some(
+            ServiceMatch::find_best_match(
+                services.iter().filter(|s| {
+                    let visible = ns.is_none_or(|n| s.visible_to(n));
+                    if !visible {
+                        debug!(
+                            hostname = %s.hostname,
+                            service_namespace = %s.namespace,
+                            client_namespace = ns.map(Strng::as_str).unwrap_or(""),
+                            "visibility filtering: service not visible to client namespace"
+                        );
+                    }
+                    visible
+                }),
+                ns,
+                None,
+            )?
+            .clone(),
+        )
     }
 
     pub fn get_by_workload(&self, workload: &Workload) -> Vec<Arc<Service>> {
@@ -752,6 +843,9 @@ impl<'a> From<ServiceMatch<'a>> for Option<&'a Arc<Service>> {
 impl<'a> ServiceMatch<'a> {
     /// Finds the best matching service from an iterator using fold_while.
     /// Short-circuits on Namespace match - the best possible result.
+    /// Picks the best service among candidates sharing a key (VIP, CIDR-VIP, or hostname). Ranking:
+    /// a service in `client_ns` first, then a `canonical` service, then one in `preferred_namespace`,
+    /// then the first seen.
     pub fn find_best_match(
         mut services: impl Iterator<Item = &'a Arc<Service>>,
         client_ns: Option<&Strng>,
@@ -817,6 +911,7 @@ mod tests {
             load_balancer: None,
             ip_families: None,
             canonical: false,
+            visibility: Visibility::Public,
         }
     }
 
@@ -911,6 +1006,145 @@ mod tests {
         assert_eq!(store.num_services(), 0);
         assert!(store.get_by_vip(&nw(shared)).is_none());
         assert!(store.get_by_vip(&nw(only_b)).is_none());
+    }
+
+    #[test]
+    fn namespace_visibility_vip() {
+        let mut store = ServiceStore::default();
+        let ns_a: Strng = "ns-a".into();
+        let ns_b: Strng = "ns-b".into();
+
+        // Exact-VIP path: a NAMESPACE-scoped service.
+        let vip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut nslocal = make_service("nslocal", "ns-a", vec![vip], vec![]);
+        nslocal.visibility = Visibility::Namespace;
+        store.insert(nslocal);
+
+        // Same-namespace client resolves it.
+        assert_eq!(
+            store
+                .get_best_by_vip(&nw(vip), Some(&ns_a))
+                .unwrap()
+                .namespace,
+            ns_a,
+        );
+        // Out-of-namespace client sees no match -> caller falls through to passthrough.
+        assert!(store.get_best_by_vip(&nw(vip), Some(&ns_b)).is_none());
+        // No client namespace (e.g. inbound path) -> visibility is not enforced, so it resolves.
+        assert!(store.get_best_by_vip(&nw(vip), None).is_some());
+
+        // CIDR-VIP path: same behavior.
+        let cidr_vip = IpAddr::V4(Ipv4Addr::new(10, 1, 0, 5));
+        let mut cidr_svc = make_service("cidrlocal", "ns-a", vec![], vec![cidr("10.1.0.0/16")]);
+        cidr_svc.visibility = Visibility::Namespace;
+        store.insert(cidr_svc);
+        assert!(store.get_best_by_vip(&nw(cidr_vip), Some(&ns_a)).is_some());
+        assert!(store.get_best_by_vip(&nw(cidr_vip), Some(&ns_b)).is_none());
+    }
+
+    #[test]
+    fn visibility_filtered_exact_vip_falls_through_to_cidr() {
+        // Regression: when a VIP is present in by_vip but its only service is filtered out by
+        // visibility, the lookup must fall through to the CIDR-VIP path rather than short-circuiting
+        // to None. (A `?` on the exact-VIP match previously returned None and skipped CIDR.)
+        let mut store = ServiceStore::default();
+        let ns_a: Strng = "ns-a".into();
+        let ns_b: Strng = "ns-b".into();
+        let vip = IpAddr::V4(Ipv4Addr::new(10, 2, 0, 5));
+
+        // Exact-VIP service, NAMESPACE-scoped to ns-a.
+        let mut exact = make_service("exactlocal", "ns-a", vec![vip], vec![]);
+        exact.visibility = Visibility::Namespace;
+        store.insert(exact);
+
+        // A PUBLIC service in ns-b whose CIDR-VIP covers the same address.
+        store.insert(make_service(
+            "cidrpublic",
+            "ns-b",
+            vec![],
+            vec![cidr("10.2.0.0/16")],
+        ));
+
+        // Same-namespace client: the visible exact-VIP match wins (checked before CIDR).
+        assert_eq!(
+            store
+                .get_best_by_vip(&nw(vip), Some(&ns_a))
+                .unwrap()
+                .namespace,
+            ns_a,
+        );
+
+        // Cross-namespace client: the exact-VIP service is filtered out, so the lookup must fall
+        // through to the CIDR-VIP and return the PUBLIC service instead of None.
+        assert_eq!(
+            store
+                .get_best_by_vip(&nw(vip), Some(&ns_b))
+                .expect("cross-ns client should fall through to the CIDR-VIP match, not None")
+                .namespace,
+            ns_b,
+        );
+    }
+
+    #[test]
+    fn namespace_visibility_host() {
+        let mut store = ServiceStore::default();
+        let ns_a: Strng = "ns-a".into();
+        let ns_b: Strng = "ns-b".into();
+
+        // NAMESPACE-scoped service, resolvable by hostname.
+        let mut nslocal = make_service("hostlocal", "ns-a", vec![ip(10, 3, 0, 1)], vec![]);
+        nslocal.visibility = Visibility::Namespace;
+        let ns_host = nslocal.hostname.clone();
+        store.insert(nslocal);
+
+        // Same-namespace client resolves it.
+        assert_eq!(
+            store
+                .get_best_by_host(&ns_host, Some(&ns_a))
+                .unwrap()
+                .namespace,
+            ns_a,
+        );
+        // Out-of-namespace client: not visible -> no match (caller gets NoHostname).
+        assert!(store.get_best_by_host(&ns_host, Some(&ns_b)).is_none());
+        // No client namespace (e.g. no verified mTLS peer) -> visibility not enforced.
+        assert!(store.get_best_by_host(&ns_host, None).is_some());
+
+        // A PUBLIC service is resolvable by hostname from any namespace.
+        let pub_svc = make_service("hostpublic", "ns-a", vec![ip(10, 3, 0, 2)], vec![]);
+        let pub_host = pub_svc.hostname.clone();
+        store.insert(pub_svc);
+        assert!(store.get_best_by_host(&pub_host, Some(&ns_b)).is_some());
+
+        // Two services share one hostname across namespaces (SEs may define the same host): a
+        // NAMESPACE service in ns-a and a PUBLIC service in ns-b.
+        let shared_host: Strng = "shared.example.com".into();
+        let mut shared_ns = make_service("sharedlocal", "ns-a", vec![ip(10, 3, 0, 3)], vec![]);
+        shared_ns.hostname = shared_host.clone();
+        shared_ns.visibility = Visibility::Namespace;
+        store.insert(shared_ns);
+        let mut shared_pub = make_service("sharedpublic", "ns-b", vec![ip(10, 3, 0, 4)], vec![]);
+        shared_pub.hostname = shared_host.clone();
+        store.insert(shared_pub);
+
+        // A client in a third namespace: the NAMESPACE candidate is filtered out, so the lookup
+        // returns the surviving PUBLIC service rather than None or the invisible one.
+        let ns_c: Strng = "ns-c".into();
+        assert_eq!(
+            store
+                .get_best_by_host(&shared_host, Some(&ns_c))
+                .expect("cross-ns client should resolve the visible PUBLIC service, not None")
+                .namespace,
+            ns_b,
+        );
+        // A client in ns-a still gets its co-located NAMESPACE service (client_ns ranks first).
+        assert_eq!(
+            store
+                .get_best_by_host(&shared_host, Some(&ns_a))
+                .unwrap()
+                .namespace,
+            ns_a,
+        );
     }
 
     #[test]
@@ -1153,6 +1387,7 @@ mod tests {
             load_balancer: None,
             ip_families: None,
             canonical: false,
+            visibility: Visibility::Public,
         };
         store.insert(svc);
 

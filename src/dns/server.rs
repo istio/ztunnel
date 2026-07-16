@@ -380,6 +380,20 @@ impl Store {
                             .expect("the svc domain must have a trailing '.'");
                         !service.vips.is_empty() || service.hostname.ends_with(domain)
                     })
+                    // Drop services not visible to the client's namespace. If this empties the
+                    // candidate list, we forward upstream as if the service were not in the mesh.
+                    .filter(|service| {
+                        let visible = service.visible_to(&client.namespace);
+                        if !visible {
+                            debug!(
+                                hostname = %service.hostname,
+                                service_namespace = %service.namespace,
+                                client_namespace = %client.namespace,
+                                "visibility filtering: service not visible to client namespace"
+                            );
+                        }
+                        visible
+                    })
                     // Get the service matching the client namespace. If no match exists, just
                     // return the first service.
                     .collect();
@@ -950,6 +964,7 @@ mod tests {
     use crate::xds::istio::workload::PortList as XdsPortList;
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::Workload as XdsWorkload;
+    use crate::xds::istio::workload::service::Visibility as XdsVisibility;
     use crate::xds::istio::workload::{IpFamilies, NetworkAddress as XdsNetworkAddress};
 
     use crate::proxy::DefaultSocketFactory;
@@ -1208,6 +1223,22 @@ mod tests {
                 name: "success: k8s host - non local namespace - fqdn",
                 host: "example.ns2.svc.cluster.local.",
                 expect_answers: vec![a(n("example.ns2.svc.cluster.local."), ipv4("10.10.10.10"))],
+                ..Default::default()
+            },
+            Case {
+                name: "visibility: namespace-scoped svc in another namespace is forwarded",
+                host: "nslocal.ns2.svc.cluster.local.",
+                expect_authoritative: false, // Forwarded — not visible to the NS1 client.
+                expect_code: ResponseCode::NXDomain,
+                ..Default::default()
+            },
+            Case {
+                name: "visibility: namespace-scoped svc in the client namespace resolves",
+                host: "nslocalsame.ns1.svc.cluster.local.",
+                expect_answers: vec![a(
+                    n("nslocalsame.ns1.svc.cluster.local."),
+                    ipv4("10.10.10.241"),
+                )],
                 ..Default::default()
             },
             Case {
@@ -1722,6 +1753,16 @@ mod tests {
             xds_external_service("www.google.com", &[na(NW1, "1.1.1.1")]),
             xds_service("productpage", NS1, &[na(NW1, "9.9.9.9")]),
             xds_service("example", NS2, &[na(NW1, "10.10.10.10")]),
+            // Namespace-scoped services (ServiceEntry visibility). Client is in NS1: the NS2
+            // one must be invisible (forwarded), the NS1 one resolves normally.
+            with_visibility(
+                XdsVisibility::Namespace,
+                xds_service("nslocal", NS2, &[na(NW1, "10.10.10.240")]),
+            ),
+            with_visibility(
+                XdsVisibility::Namespace,
+                xds_service("nslocalsame", NS1, &[na(NW1, "10.10.10.241")]),
+            ),
             // Service with the same name in another namespace
             // This should not be used if the preferred service namespace is set
             xds_namespaced_external_service("everywhere.io", NS2, &[na(NW1, "10.10.10.110")]),
@@ -1877,6 +1918,11 @@ mod tests {
 
     fn with_canonical(canonical: bool, mut svc: XdsService) -> XdsService {
         svc.canonical = canonical;
+        svc
+    }
+
+    fn with_visibility(visibility: XdsVisibility, mut svc: XdsService) -> XdsService {
+        svc.visibility = visibility as i32;
         svc
     }
 
