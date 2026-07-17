@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::error::Error as StdError;
+use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -26,13 +28,13 @@ use hyper::server::conn::http2;
 use hyper_util::rt::TokioIo;
 use itertools::Itertools;
 use prometheus_client::registry::Registry;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Response, Status, Streaming};
 use tracing::{debug, error, info};
 
 use super::{hyper_tower, test_config_with_port_xds_addr_and_root_cert};
-use crate::config::RootCert;
+use crate::config::{self, RootCert};
 use crate::hyper_util::TokioExecutor;
 use crate::metrics::sub_registry;
 use crate::state::{DemandProxyState, ProxyState};
@@ -47,25 +49,70 @@ use crate::xds::{self, AdsClient, ProxyStateUpdater};
 
 pub struct AdsServer {
     tx: mpsc::Sender<AdsConnection>,
+    server_failure_tx: watch::Sender<Option<String>>,
 }
 
 pub struct AdsConnection {
-    pub tx: mpsc::Sender<Result<DeltaDiscoveryResponse, tonic::Status>>,
-    pub rx: mpsc::Receiver<DeltaDiscoveryRequest>,
+    tx: mpsc::Sender<Result<DeltaDiscoveryResponse, tonic::Status>>,
+    rx: mpsc::Receiver<DeltaDiscoveryRequest>,
+    forwarding_failure: watch::Receiver<Option<String>>,
+    server_failure: watch::Receiver<Option<String>>,
+}
+
+impl AdsConnection {
+    pub async fn recv_request(&mut self) -> Option<DeltaDiscoveryRequest> {
+        self.assert_forwarding_healthy();
+        tokio::select! {
+            req = self.rx.recv() => {
+                self.assert_forwarding_healthy();
+                req
+            }
+            changed = self.forwarding_failure.changed() => {
+                if changed.is_err() {
+                    panic!("ADS forwarding task exited while waiting for request");
+                }
+                self.assert_forwarding_healthy();
+                unreachable!("assert_forwarding_healthy panics when failure is present")
+            }
+            changed = self.server_failure.changed() => {
+                if changed.is_err() {
+                    panic!("ADS server task exited while waiting for request");
+                }
+                self.assert_forwarding_healthy();
+                unreachable!("assert_forwarding_healthy panics when failure is present")
+            }
+        }
+    }
+
+    pub async fn send_response(&mut self, response: Result<DeltaDiscoveryResponse, tonic::Status>) {
+        self.assert_forwarding_healthy();
+        self.tx
+            .send(response)
+            .await
+            .expect("failed to send server response");
+        tokio::task::yield_now().await;
+        self.assert_forwarding_healthy();
+    }
+
+    pub fn assert_forwarding_healthy(&self) {
+        if let Some(err) = self.forwarding_failure.borrow().as_ref() {
+            panic!("ADS forwarding task failed: {err}");
+        }
+        if let Some(err) = self.server_failure.borrow().as_ref() {
+            panic!("ADS server task failed: {err}");
+        }
+    }
 }
 
 impl AdsServer {
-    pub async fn spawn(
-        xds_on_demand: bool,
-    ) -> (
-        mpsc::Receiver<AdsConnection>,
-        AdsClient,
-        DemandProxyState,
-        tokio::sync::watch::Receiver<()>,
-    ) {
+    pub async fn spawn_app_server() -> (mpsc::Receiver<AdsConnection>, config::Config) {
         let (tx, rx) = mpsc::channel(100);
+        let (server_failure_tx, _server_failure_rx) = watch::channel(None);
 
-        let server = AdsServer { tx };
+        let server = AdsServer {
+            tx,
+            server_failure_tx: server_failure_tx.clone(),
+        };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
         let certs = tls::mock::generate_test_certs(
@@ -81,6 +128,7 @@ impl AdsServer {
         tokio::spawn(async move {
             while let Some(socket) = tls_stream.next().await {
                 let srv = srv.clone();
+                let server_failure_tx = server_failure_tx.clone();
                 tokio::spawn(async move {
                     if let Err(err) = http2::Builder::new(TokioExecutor)
                         .serve_connection(
@@ -89,11 +137,37 @@ impl AdsServer {
                         )
                         .await
                     {
-                        error!("Error serving connection: {:?}", err);
+                        if is_expected_serve_connection_close(&err) {
+                            debug!("ads_server: serve_connection closed: {:?}", err);
+                        } else {
+                            let failure = format!("serve_connection failed: {err:?}");
+                            error!("ads_server: {failure}");
+                            server_failure_tx.send_replace(Some(failure));
+                        }
                     }
                 });
             }
         });
+
+        let cfg = test_config_with_port_xds_addr_and_root_cert(
+            80,
+            Some(listener_addr_string),
+            Some(root_cert),
+            None,
+        );
+
+        (rx, cfg)
+    }
+
+    pub async fn spawn(
+        xds_on_demand: bool,
+    ) -> (
+        mpsc::Receiver<AdsConnection>,
+        AdsClient,
+        DemandProxyState,
+        tokio::sync::watch::Receiver<()>,
+    ) {
+        let (rx, mut cfg) = Self::spawn_app_server().await;
 
         let mut registry = Registry::default();
         let istio_registry = sub_registry(&mut registry);
@@ -101,12 +175,6 @@ impl AdsServer {
 
         let (block_tx, block_rx) = tokio::sync::watch::channel(());
 
-        let mut cfg = test_config_with_port_xds_addr_and_root_cert(
-            80,
-            Some(listener_addr_string),
-            Some(root_cert),
-            None,
-        );
         cfg.xds_on_demand = xds_on_demand;
 
         let proxy_metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
@@ -128,6 +196,27 @@ impl AdsServer {
             .build(metrics, block_tx);
 
         (rx, xds_client, dstate, block_rx)
+    }
+}
+
+fn is_expected_serve_connection_close(err: &(dyn StdError + 'static)) -> bool {
+    matches!(
+        find_io_error_kind(err),
+        Some(
+            io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::NotConnected
+        )
+    )
+}
+
+fn find_io_error_kind(mut err: &(dyn StdError + 'static)) -> Option<io::ErrorKind> {
+    loop {
+        if let Some(io_err) = err.downcast_ref::<io::Error>() {
+            return Some(io_err.kind());
+        }
+        err = err.source()?;
     }
 }
 
@@ -153,10 +242,13 @@ impl AggregatedDiscoveryService for AdsServer {
         let (req_tx, req_rx) = mpsc::channel(128);
 
         let (tx, rx) = mpsc::channel(128);
+        let (failure_tx, failure_rx) = watch::channel(None);
 
         let conn = AdsConnection {
             rx: req_rx,
             tx: resp_tx,
+            forwarding_failure: failure_rx,
+            server_failure: self.server_failure_tx.subscribe(),
         };
 
         self.tx.send(conn).await.unwrap();
@@ -169,14 +261,17 @@ impl AggregatedDiscoveryService for AdsServer {
                             Some(Ok(req)) => {
                                 info!("received request...",);
                                 debug!(" request {:?}...", req);
-                                req_tx.send(req).await.unwrap();
+                                if let Err(e) = req_tx.send(req).await {
+                                    debug!("ads_server: request channel closed - {:?}", e);
+                                    return;
+                                }
                             }
                             Some(Err(e)) => {
-                                info!("ads_server: stream over - {:?}", e);
+                                debug!("ads_server: stream over - {:?}", e);
                                 return;
                             }
                             None => {
-                                info!("ads_server: stream over");
+                                debug!("ads_server: stream over");
                                 return;
                             }
                         }
@@ -189,13 +284,17 @@ impl AggregatedDiscoveryService for AdsServer {
                                 match tx.send(response).await {
                                     Ok(_) => {}
                                     Err(e) => {
-                                        info!("ads_server: send terminated - {:?} ", e);
+                                        let failure = format!(
+                                            "response stream closed while forwarding server response: {e:?}"
+                                        );
+                                        error!("ads_server: {failure}");
+                                        failure_tx.send_replace(Some(failure));
                                         return;
                                     }
                                 }
                             }
                             None => {
-                                info!("ads_server: response channel closed");
+                                debug!("ads_server: response channel closed");
                                 return;
                             }
                         }
@@ -208,5 +307,102 @@ impl AggregatedDiscoveryService for AdsServer {
         Ok(Response::new(
             Box::pin(output_stream) as Self::DeltaAggregatedResourcesStream
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn panic_message(err: tokio::task::JoinError) -> String {
+        let panic = err.into_panic();
+        panic
+            .downcast_ref::<String>()
+            .map(String::to_string)
+            .or_else(|| panic.downcast_ref::<&str>().map(|msg| (*msg).to_string()))
+            .expect("panic should include a string message")
+    }
+
+    #[test]
+    #[should_panic(expected = "ADS server task failed: boom")]
+    fn ads_connection_reports_serve_connection_failure() {
+        let (resp_tx, _resp_rx) = mpsc::channel(1);
+        let (_req_tx, req_rx) = mpsc::channel(1);
+        let (_forwarding_tx, forwarding_failure) = watch::channel(None);
+        let (server_failure_tx, server_failure) = watch::channel(None);
+
+        let conn = AdsConnection {
+            tx: resp_tx,
+            rx: req_rx,
+            forwarding_failure,
+            server_failure,
+        };
+
+        server_failure_tx.send_replace(Some("boom".to_string()));
+        conn.assert_forwarding_healthy();
+    }
+
+    #[tokio::test]
+    async fn ads_connection_recv_request_reports_server_failure_while_waiting() {
+        let (resp_tx, _resp_rx) = mpsc::channel(1);
+        let (_req_tx, req_rx) = mpsc::channel(1);
+        let (_forwarding_tx, forwarding_failure) = watch::channel(None);
+        let (server_failure_tx, server_failure) = watch::channel(None);
+
+        let mut conn = AdsConnection {
+            tx: resp_tx,
+            rx: req_rx,
+            forwarding_failure,
+            server_failure,
+        };
+
+        let recv = tokio::spawn(async move {
+            conn.recv_request().await;
+        });
+
+        tokio::task::yield_now().await;
+        server_failure_tx.send_replace(Some("boom".to_string()));
+
+        let err = tokio::time::timeout(Duration::from_millis(100), recv)
+            .await
+            .expect("recv_request did not report server failure")
+            .expect_err("recv_request returned instead of panicking");
+        assert!(err.is_panic());
+
+        let panic = err.into_panic();
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("recv_request panic should include a string message");
+        assert!(message.contains("ADS server task failed: boom"));
+    }
+
+    #[tokio::test]
+    async fn ads_connection_recv_request_reports_preexisting_server_failure() {
+        let (resp_tx, _resp_rx) = mpsc::channel(1);
+        let (_req_tx, req_rx) = mpsc::channel(1);
+        let (_forwarding_tx, forwarding_failure) = watch::channel(None);
+        let (_server_failure_tx, server_failure) = watch::channel(Some("boom".to_string()));
+
+        let mut conn = AdsConnection {
+            tx: resp_tx,
+            rx: req_rx,
+            forwarding_failure,
+            server_failure,
+        };
+
+        let recv = tokio::spawn(async move {
+            conn.recv_request().await;
+        });
+
+        let err = tokio::time::timeout(Duration::from_millis(100), recv)
+            .await
+            .expect("recv_request did not report preexisting server failure")
+            .expect_err("recv_request returned instead of panicking");
+        assert!(err.is_panic());
+
+        let message = panic_message(err);
+        assert!(message.contains("ADS server task failed: boom"));
     }
 }

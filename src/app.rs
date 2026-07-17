@@ -36,6 +36,33 @@ pub async fn build_with_cert(
     config: Arc<config::Config>,
     cert_manager: Arc<SecretManager>,
 ) -> anyhow::Result<Bound> {
+    // Startup orchestration overview:
+    //
+    //  ┌─────────────────────────────────────────────────────────────────┐
+    //  │ 1. Bootstrap                                                    │
+    //  │    data plane pool, drain channel, readiness tasks, metrics     │
+    //  └──────────────────────────┬──────────────────────────────────────┘
+    //                             │
+    //  ┌──────────────────────────▼──────────────────────────────────────┐
+    //  │ 2. ProxyStateManager (creates xDS client)                       │
+    //  └──────────────────────────┬──────────────────────────────────────┘
+    //                             │
+    //  ┌──────────────────────────▼──────────────────────────────────────┐
+    //  │ 3. xDS monitoring task                                          │
+    //  │    Phase 1: wait for initial xDS sync → drop "state manager"    │
+    //  │    Phase 2: freshness metrics                                   │
+    //  │             non-Synced ──► record non-fresh period               │
+    //  │             Synced ACK ──► report completed duration             │
+    //  └──────────────────────────┬──────────────────────────────────────┘
+    //                             │
+    //  ┌──────────────────────────▼──────────────────────────────────────┐
+    //  │ 4. Proxy / DNS listeners (wait for xDS sync before accepting)   │
+    //  └──────────────────────────┬──────────────────────────────────────┘
+    //                             │
+    //  ┌──────────────────────────▼──────────────────────────────────────┐
+    //  │ 5. Admin + metrics servers                                      │
+    //  └─────────────────────────────────────────────────────────────────┘
+    //
     // Start the data plane worker pool.
     let (data_plane_pool, data_plane_handle) = new_data_plane_pool(config.num_worker_threads);
 
@@ -81,13 +108,25 @@ pub async fn build_with_cert(
     metrics::tokio_runtime::TokioRuntimeCollector::register(&mut registry, &data_plane_handle);
     let istio_registry = metrics::sub_registry(&mut registry);
     let _ = metrics::meta::Metrics::new(istio_registry);
-    let xds_metrics = xds::Metrics::new(istio_registry);
+    let remote_xds_metrics_enabled = config.xds_address.is_some();
+    let xds_metrics = xds::Metrics::new_with_remote_xds(istio_registry, remote_xds_metrics_enabled);
+    let xds_monitor_metrics =
+        remote_xds_metrics_enabled.then(|| xds::XdsConnectionMonitorMetrics::new(istio_registry));
+    #[cfg(any(test, feature = "testing"))]
+    let xds_freshness_observations_for_test = xds_monitor_metrics
+        .as_ref()
+        .map(|metrics| metrics.non_fresh_observation_receiver());
     let proxy_metrics = Arc::new(proxy::Metrics::new(istio_registry));
     let dns_metrics = if config.dns_proxy {
         Some(dns::Metrics::new(istio_registry))
     } else {
         None
     };
+
+    #[cfg(not(target_os = "linux"))]
+    if config.socket_config.user_timeout_enabled {
+        warn!("TCP user timeout is configured but unsupported on non-Linux; setting is disabled");
+    }
 
     let (xds_tx, xds_rx) = tokio::sync::watch::channel(());
     // Create the manager that updates proxy state from XDS.
@@ -99,10 +138,41 @@ pub async fn build_with_cert(
         cert_manager.clone(),
     )
     .await?;
-    let mut xds_rx_for_task = xds_rx.clone();
+    let xds_connection_state_rx = state_mgr.xds_connection_state();
+    let xds_connection_initial_state = xds_connection_state_rx.as_ref().map(|rx| *rx.borrow());
+    let xds_connection_state_events_rx = state_mgr.xds_connection_state_events();
+    #[cfg(any(test, feature = "testing"))]
+    let xds_connection_state_for_test = xds_connection_state_rx.clone();
+    #[cfg(any(test, feature = "testing"))]
+    let xds_startup_for_test = xds_rx.clone();
+    #[cfg(any(test, feature = "testing"))]
+    let (xds_freshness_monitor_exited_tx, xds_freshness_monitor_exited_for_test) =
+        tokio::sync::watch::channel(false);
+    let xds_rx_for_task = xds_rx.clone();
+    let remote_xds_configured = xds_connection_state_rx.is_some();
+    let ready_for_startup_gate = ready.clone();
+    let readiness_gate = xds::freshness_monitor::XdsStartupReadinessGate::new(
+        ready_for_startup_gate,
+        state_mgr_task,
+    );
+    let readiness_gate_for_panic = readiness_gate.clone();
     tokio::spawn(async move {
-        let _ = xds_rx_for_task.changed().await;
-        std::mem::drop(state_mgr_task);
+        let task = std::panic::AssertUnwindSafe(xds::freshness_monitor::run_xds_monitor_task(
+            xds_connection_initial_state,
+            xds_connection_state_rx,
+            xds_connection_state_events_rx,
+            xds_rx_for_task,
+            readiness_gate,
+            xds_monitor_metrics,
+        ));
+        if futures::FutureExt::catch_unwind(task).await.is_err() {
+            // The gate used for panic recovery is owned outside the unwinding
+            // future, so any existing blocker is replaced with
+            // `xds monitor dead` if the monitor panics.
+            xds::freshness_monitor::park_monitor_dead_after_panic(readiness_gate_for_panic).await;
+        }
+        #[cfg(any(test, feature = "testing"))]
+        xds_freshness_monitor_exited_tx.send_replace(true);
     });
     let state = state_mgr.state();
 
@@ -143,11 +213,21 @@ pub async fn build_with_cert(
         if let Some(inbound) = proxy_gen.create_ztunnel_self_proxy_listener().await? {
             // Run the inbound listener in the data plane worker pool
             let mut xds_rx_for_inbound = xds_rx.clone();
+            let drain_rx_for_inbound = drain_rx.clone();
             data_plane_pool.send(DataPlaneTask {
                 block_shutdown: true,
                 fut: Box::pin(async move {
                     tracing::info!("Starting ztunnel inbound listener task");
-                    let _ = xds_rx_for_inbound.changed().await;
+                    if !wait_for_initial_xds_sync_or_drain(
+                        &mut xds_rx_for_inbound,
+                        remote_xds_configured,
+                        "ztunnel inbound listener",
+                        drain_rx_for_inbound,
+                    )
+                    .await
+                    {
+                        return Ok(());
+                    }
                     tokio::task::spawn(async move {
                         inbound.run().in_current_span().await;
                     })
@@ -167,10 +247,20 @@ pub async fn build_with_cert(
         )?;
 
         let mut xds_rx_for_proxy = xds_rx.clone();
+        let drain_rx_for_proxy = drain_rx.clone();
         data_plane_pool.send(DataPlaneTask {
             block_shutdown: true,
             fut: Box::pin(async move {
-                let _ = xds_rx_for_proxy.changed().await;
+                if !wait_for_initial_xds_sync_or_drain(
+                    &mut xds_rx_for_proxy,
+                    remote_xds_configured,
+                    "in-pod proxy manager",
+                    drain_rx_for_proxy,
+                )
+                .await
+                {
+                    return Ok(());
+                }
                 run_future.in_current_span().await;
                 Ok(())
             }),
@@ -188,10 +278,20 @@ pub async fn build_with_cert(
 
                 // Run the HBONE proxy in the data plane worker pool.
                 let mut xds_rx_for_proxy = xds_rx.clone();
+                let drain_rx_for_proxy = drain_rx.clone();
                 data_plane_pool.send(DataPlaneTask {
                     block_shutdown: true,
                     fut: Box::pin(async move {
-                        let _ = xds_rx_for_proxy.changed().await;
+                        if !wait_for_initial_xds_sync_or_drain(
+                            &mut xds_rx_for_proxy,
+                            remote_xds_configured,
+                            "dedicated proxy listener",
+                            drain_rx_for_proxy,
+                        )
+                        .await
+                        {
+                            return Ok(());
+                        }
                         proxy.run().in_current_span().await;
                         Ok(())
                     }),
@@ -212,10 +312,20 @@ pub async fn build_with_cert(
 
                 // Run the DNS proxy in the data plane worker pool.
                 let mut xds_rx_for_dns_proxy = xds_rx.clone();
+                let drain_rx_for_dns_proxy = drain_rx.clone();
                 data_plane_pool.send(DataPlaneTask {
                     block_shutdown: true,
                     fut: Box::pin(async move {
-                        let _ = xds_rx_for_dns_proxy.changed().await;
+                        if !wait_for_initial_xds_sync_or_drain(
+                            &mut xds_rx_for_dns_proxy,
+                            remote_xds_configured,
+                            "DNS proxy listener",
+                            drain_rx_for_dns_proxy,
+                        )
+                        .await
+                        {
+                            return Ok(());
+                        }
                         dns_proxy.run().in_current_span().await;
                         Ok(())
                     }),
@@ -249,12 +359,62 @@ pub async fn build_with_cert(
         proxy_addresses,
         tcp_dns_proxy_address,
         udp_dns_proxy_address,
+        #[cfg(any(test, feature = "testing"))]
+        xds_connection_state: xds_connection_state_for_test,
+        #[cfg(any(test, feature = "testing"))]
+        xds_startup: xds_startup_for_test,
+        #[cfg(any(test, feature = "testing"))]
+        xds_freshness_monitor_exited: xds_freshness_monitor_exited_for_test,
+        #[cfg(any(test, feature = "testing"))]
+        xds_freshness_observations: xds_freshness_observations_for_test,
     })
 }
 
 fn register_process_metrics(registry: &mut Registry) {
     #[cfg(unix)]
     registry.register_collector(Box::new(metrics::process::ProcessMetrics::new()));
+}
+
+async fn wait_for_initial_xds_sync(
+    xds_rx: &mut tokio::sync::watch::Receiver<()>,
+    remote_xds_configured: bool,
+    component: &'static str,
+) -> bool {
+    match xds_rx.changed().await {
+        Ok(()) => true,
+        Err(_) if remote_xds_configured => {
+            tracing::error!(
+                component,
+                "xDS startup signal sender dropped before initial sync; not starting listener"
+            );
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+async fn wait_for_initial_xds_sync_or_drain(
+    xds_rx: &mut tokio::sync::watch::Receiver<()>,
+    remote_xds_configured: bool,
+    component: &'static str,
+    drain_rx: drain::DrainWatcher,
+) -> bool {
+    tokio::select! {
+        waited_for_startup =
+            wait_for_initial_xds_sync(xds_rx, remote_xds_configured, component) => {
+                if waited_for_startup {
+                    return true;
+                }
+            }
+        drain = drain_rx.clone().wait_for_drain() => {
+            drop(drain);
+            return false;
+        }
+    }
+
+    let drain = drain_rx.wait_for_drain().await;
+    drop(drain);
+    false
 }
 
 struct DataPlaneTask {
@@ -385,6 +545,15 @@ pub struct Bound {
 
     pub shutdown: signal::Shutdown,
     drain_tx: drain::DrainTrigger,
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) xds_connection_state: Option<tokio::sync::watch::Receiver<xds::XdsConnectionState>>,
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) xds_startup: tokio::sync::watch::Receiver<()>,
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) xds_freshness_monitor_exited: tokio::sync::watch::Receiver<bool>,
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) xds_freshness_observations: Option<tokio::sync::watch::Receiver<u64>>,
 }
 
 impl Bound {
@@ -399,5 +568,92 @@ impl Bound {
             .await;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn remote_xds_startup_wait_fails_closed_when_sender_drops() {
+        let (tx, mut rx) = tokio::sync::watch::channel(());
+        drop(tx);
+
+        assert!(!wait_for_initial_xds_sync(&mut rx, true, "test proxy").await);
+    }
+
+    #[tokio::test]
+    async fn local_xds_startup_wait_allows_sender_drop() {
+        let (tx, mut rx) = tokio::sync::watch::channel(());
+        drop(tx);
+
+        assert!(wait_for_initial_xds_sync(&mut rx, false, "test proxy").await);
+    }
+
+    #[tokio::test]
+    async fn remote_xds_startup_failure_waits_for_drain() {
+        let (xds_tx, mut xds_rx) = tokio::sync::watch::channel(());
+        let (drain_tx, drain_rx) = drain::new();
+        drop(xds_tx);
+
+        let wait = tokio::spawn(async move {
+            wait_for_initial_xds_sync_or_drain(&mut xds_rx, true, "test proxy", drain_rx).await
+        });
+        tokio::task::yield_now().await;
+
+        assert!(
+            !wait.is_finished(),
+            "remote xDS startup failure should keep the data-plane task alive until drain"
+        );
+
+        let drain = tokio::spawn(async move {
+            drain_tx
+                .start_drain_and_wait(drain::DrainMode::Graceful)
+                .await;
+        });
+
+        let waited_for_startup = tokio::time::timeout(Duration::from_secs(2), wait)
+            .await
+            .expect("startup failure task did not finish after drain")
+            .expect("startup failure task panicked");
+        assert!(!waited_for_startup);
+        tokio::time::timeout(Duration::from_secs(2), drain)
+            .await
+            .expect("drain did not finish after startup failure task released")
+            .expect("drain task panicked");
+    }
+
+    #[tokio::test]
+    async fn remote_xds_startup_wait_observes_drain_before_sender_drops() {
+        let (_xds_tx, mut xds_rx) = tokio::sync::watch::channel(());
+        let (drain_tx, drain_rx) = drain::new();
+
+        let wait = tokio::spawn(async move {
+            wait_for_initial_xds_sync_or_drain(&mut xds_rx, true, "test proxy", drain_rx).await
+        });
+        tokio::task::yield_now().await;
+
+        assert!(
+            !wait.is_finished(),
+            "remote xDS startup wait should stay pending before initial sync or drain"
+        );
+
+        let drain = tokio::spawn(async move {
+            drain_tx
+                .start_drain_and_wait(drain::DrainMode::Graceful)
+                .await;
+        });
+
+        let waited_for_startup = tokio::time::timeout(Duration::from_secs(2), wait)
+            .await
+            .expect("startup wait did not finish after drain")
+            .expect("startup wait task panicked");
+        assert!(!waited_for_startup);
+        tokio::time::timeout(Duration::from_secs(2), drain)
+            .await
+            .expect("drain did not finish after startup wait released")
+            .expect("drain task panicked");
     }
 }

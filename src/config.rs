@@ -54,6 +54,7 @@ const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
 const LOCAL_XDS: &str = "LOCAL_XDS";
 const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
 const XDS_ADDRESS: &str = "XDS_ADDRESS";
+
 const PREFERED_SERVICE_NAMESPACE: &str = "PREFERED_SERVICE_NAMESPACE";
 const CA_ADDRESS: &str = "CA_ADDRESS";
 const SECRET_TTL: &str = "SECRET_TTL";
@@ -362,6 +363,19 @@ impl Default for SocketConfig {
     }
 }
 
+impl SocketConfig {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn tcp_user_timeout(self) -> Option<Duration> {
+        if !self.user_timeout_enabled {
+            return None;
+        }
+
+        self.keepalive_interval
+            .checked_mul(self.keepalive_retries)
+            .and_then(|retry_window| self.keepalive_time.checked_add(retry_window))
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("invalid env var {0}={1} ({2})")]
@@ -405,7 +419,11 @@ where
 }
 
 fn parse_duration(env: &str) -> Result<Option<Duration>, Error> {
-    parse::<String>(env)?
+    parse_duration_value(env, parse::<String>(env)?)
+}
+
+fn parse_duration_value(env: &str, value: Option<String>) -> Result<Option<Duration>, Error> {
+    value
         .map(|ds| {
             duration_str::parse(&ds).map_err(|e| Error::EnvVar(env.to_string(), ds, e.to_string()))
         })
@@ -969,6 +987,13 @@ fn validate_config(cfg: Config) -> Result<Config, Error> {
         )));
     }
 
+    #[cfg(target_os = "linux")]
+    if cfg.socket_config.user_timeout_enabled && cfg.socket_config.tcp_user_timeout().is_none() {
+        return Err(Error::InvalidState(
+            "TCP user timeout overflows Duration; reduce KEEPALIVE_TIME, KEEPALIVE_INTERVAL, or KEEPALIVE_RETRIES".to_string(),
+        ));
+    }
+
     Ok(cfg)
 }
 
@@ -1160,6 +1185,7 @@ pub mod tests {
 
     #[test]
     fn config_from_proxyconfig() {
+        let _guard = crate::test_helpers::lock_test_env();
         use crate::test_helpers::{MESH_CONFIG_YAML, temp_file_with_content};
 
         let default_config = construct_config(ProxyConfig::default())
@@ -1260,7 +1286,63 @@ pub mod tests {
     }
 
     #[test]
+    fn test_socket_config_tcp_user_timeout_detects_overflow() {
+        let cfg = SocketConfig {
+            keepalive_time: std::time::Duration::MAX,
+            keepalive_interval: std::time::Duration::from_secs(1),
+            keepalive_retries: 1,
+            keepalive_enabled: false,
+            user_timeout_enabled: true,
+        };
+
+        assert_eq!(cfg.tcp_user_timeout(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_validate_config_rejects_overflowing_user_timeout() {
+        let mut cfg = crate::test_helpers::test_config();
+        cfg.socket_config.keepalive_time = std::time::Duration::MAX;
+        cfg.socket_config.keepalive_interval = std::time::Duration::from_secs(1);
+        cfg.socket_config.keepalive_retries = 1;
+        cfg.socket_config.user_timeout_enabled = true;
+
+        let err = validate_config(cfg).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::InvalidState(ref msg) if msg.contains("TCP user timeout")
+            ),
+            "expected TCP user timeout validation error, got {err}"
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_validate_config_allows_overflowing_user_timeout_when_unsupported() {
+        let mut cfg = crate::test_helpers::test_config();
+        cfg.socket_config.keepalive_time = std::time::Duration::MAX;
+        cfg.socket_config.keepalive_interval = std::time::Duration::from_secs(1);
+        cfg.socket_config.keepalive_retries = 1;
+        cfg.socket_config.user_timeout_enabled = true;
+
+        validate_config(cfg)
+            .expect("unsupported TCP user timeout should remain inert on non-Linux");
+    }
+
+    #[test]
+    fn test_parse_config_ignores_removed_xds_non_fresh_threshold_env() {
+        let _guard = crate::test_helpers::lock_test_env();
+        let _proxy_config = crate::test_helpers::EnvVarRestore::remove(PROXY_CONFIG);
+        let _xds_non_fresh_threshold =
+            crate::test_helpers::EnvVarRestore::set("XDS_NON_FRESH_THRESHOLD", "0s");
+
+        parse_config().expect("removed XDS_NON_FRESH_THRESHOLD should be ignored");
+    }
+
+    #[test]
     fn test_parse_worker_threads() {
+        let _guard = crate::test_helpers::lock_test_env();
         unsafe {
             // Test fixed number
             env::set_var(ZTUNNEL_WORKER_THREADS, "4");

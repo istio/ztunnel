@@ -558,3 +558,261 @@ async fn admin_shutdown(addr: SocketAddr) {
     let resp = client.request(req).await.expect("admin shutdown request");
     assert_eq!(resp.status(), hyper::StatusCode::OK);
 }
+
+mod xds_freshness_metrics {
+    //! End-to-end tests for the xDS freshness metric surface. These drive a
+    //! real ztunnel against the in-process ADS test server and assert behavior
+    //! through `/healthz/ready` and `/metrics`.
+
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use textnonce::TextNonce;
+    use ztunnel::identity::mock::new_secret_manager;
+    use ztunnel::test_helpers::app::XdsTestSignals;
+    use ztunnel::test_helpers::helpers::initialize_telemetry;
+    use ztunnel::test_helpers::xds::{AdsConnection, AdsServer};
+    use ztunnel::xds::service::discovery::v3::{DeltaDiscoveryRequest, DeltaDiscoveryResponse};
+    use ztunnel::xds::{ADDRESS_TYPE, AUTHORIZATION_TYPE};
+
+    async fn ack_each_watched_type(conn: &mut AdsConnection) {
+        let mut addr_acked = false;
+        let mut auth_acked = false;
+        while !(addr_acked && auth_acked) {
+            let req = tokio::time::timeout(Duration::from_secs(2), conn.recv_request())
+                .await
+                .expect("timed out waiting for xDS request")
+                .expect("ADS request channel closed");
+            if req.type_url == *ADDRESS_TYPE && !addr_acked {
+                send_empty_response(conn, &ADDRESS_TYPE).await;
+                addr_acked = true;
+            } else if req.type_url == *AUTHORIZATION_TYPE && !auth_acked {
+                send_empty_response(conn, &AUTHORIZATION_TYPE).await;
+                auth_acked = true;
+            }
+        }
+    }
+
+    async fn send_empty_response(conn: &mut AdsConnection, type_url: &str) {
+        conn.send_response(Ok(DeltaDiscoveryResponse {
+            resources: vec![],
+            nonce: TextNonce::new().to_string(),
+            system_version_info: "1.0.0".to_string(),
+            type_url: type_url.to_string(),
+            removed_resources: vec![],
+        }))
+        .await;
+    }
+
+    async fn ack_watched_request(conn: &mut AdsConnection, req: &DeltaDiscoveryRequest) {
+        match req.type_url.as_str() {
+            t if t == &*ADDRESS_TYPE => send_empty_response(conn, &ADDRESS_TYPE).await,
+            t if t == &*AUTHORIZATION_TYPE => send_empty_response(conn, &AUTHORIZATION_TYPE).await,
+            other => panic!("unexpected reconnect xDS request type {other}"),
+        }
+    }
+
+    async fn readiness_status(addr: SocketAddr) -> hyper::StatusCode {
+        let req = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(format!("http://localhost:{}/healthz/ready", addr.port()))
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .unwrap();
+        let client =
+            ::hyper_util::client::legacy::Client::builder(::hyper_util::rt::TokioExecutor::new())
+                .build_http();
+        client
+            .request(req)
+            .await
+            .expect("readiness request")
+            .status()
+    }
+
+    async fn metrics_text(addr: SocketAddr) -> String {
+        let req = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(format!("http://{addr}/metrics"))
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .unwrap();
+        let client =
+            ::hyper_util::client::legacy::Client::builder(::hyper_util::rt::TokioExecutor::new())
+                .build_http();
+        let body = client
+            .request(req)
+            .await
+            .expect("metrics request")
+            .into_body();
+        let body = http_body_util::BodyExt::collect(body)
+            .await
+            .expect("metrics body")
+            .to_bytes();
+        String::from_utf8(body.to_vec()).expect("metrics body utf-8")
+    }
+
+    fn metric_value_u64(metrics: &str, line_prefix: &str) -> Option<u64> {
+        metrics
+            .lines()
+            .find(|l| l.starts_with(line_prefix))
+            .and_then(|l| l.strip_prefix(line_prefix))
+            .and_then(|rest| rest.trim().parse::<u64>().ok())
+    }
+
+    async fn wait_for_readiness(readiness_address: SocketAddr, ready: bool, reason: &str) {
+        let mut last_status = None;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = readiness_status(readiness_address).await;
+                last_status = Some(status);
+                if (status == hyper::StatusCode::OK) == ready {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("timed out waiting for {reason}; last readiness status: {last_status:?}")
+        });
+    }
+
+    fn assert_no_policy_threshold_metrics(metrics: &str) {
+        assert!(
+            !metrics.contains("istio_xds_config_non_fresh_over_threshold"),
+            "ztunnel should not export a built-in xDS non-fresh threshold gauge:\n{metrics}"
+        );
+        assert!(
+            !metrics.contains("istio_xds_config_non_fresh_threshold_exceeded"),
+            "ztunnel should not export a built-in xDS non-fresh threshold counter:\n{metrics}"
+        );
+    }
+
+    async fn assert_readiness_ready_with_freshness_metrics(
+        readiness_address: SocketAddr,
+        metrics_address: SocketAddr,
+        reason: &str,
+    ) {
+        assert_eq!(
+            readiness_status(readiness_address).await,
+            hyper::StatusCode::OK,
+            "readiness became unhealthy while {reason}"
+        );
+
+        let metrics = metrics_text(metrics_address).await;
+        assert_eq!(
+            metric_value_u64(&metrics, "istio_xds_config_fresh "),
+            Some(0),
+            "freshness gauge should be 0 while {reason}:\n{metrics}"
+        );
+        assert_no_policy_threshold_metrics(&metrics);
+    }
+
+    #[tokio::test]
+    async fn records_freshness_facts_without_rearming_readiness() {
+        initialize_telemetry();
+
+        let (mut conn_receiver, cfg) = AdsServer::spawn_app_server().await;
+
+        let cert_manager = new_secret_manager(Duration::from_secs(10));
+        let app = ztunnel::app::build_with_cert(Arc::new(cfg), cert_manager)
+            .await
+            .expect("ztunnel builds");
+        let shutdown = app.shutdown.trigger().clone();
+        let readiness_address = app.readiness_address;
+        let metrics_address = app.metrics_address;
+        let mut xds_signals =
+            XdsTestSignals::from_bound(&app).expect("remote xDS app exposes test signals");
+        let app_task = tokio::spawn(app.wait_termination());
+
+        let mut conn = tokio::time::timeout(Duration::from_secs(5), conn_receiver.recv())
+            .await
+            .expect("timed out waiting for initial xDS connection")
+            .expect("ADS connection channel closed");
+        let initial_observation_count = xds_signals.freshness_observation_count();
+        ack_each_watched_type(&mut conn).await;
+        xds_signals.wait_for_startup_sync().await;
+        let synced_epoch = xds_signals.wait_for_synced("initial xDS sync").await;
+        wait_for_readiness(readiness_address, true, "initial readiness").await;
+        xds_signals
+            .wait_for_freshness_observation_after(
+                initial_observation_count,
+                "initial xDS freshness duration metric",
+            )
+            .await;
+        let metrics = metrics_text(metrics_address).await;
+        assert_eq!(
+            metric_value_u64(&metrics, "istio_xds_config_fresh "),
+            Some(1),
+            "freshness gauge should be 1 after initial sync:\n{metrics}"
+        );
+        assert!(
+            metric_value_u64(
+                &metrics,
+                "istio_xds_config_non_fresh_duration_seconds_count ",
+            )
+            .unwrap_or_default()
+                >= 1,
+            "freshness duration histogram should include initial sync:\n{metrics}"
+        );
+        assert_no_policy_threshold_metrics(&metrics);
+        let initial_duration_count = metric_value_u64(
+            &metrics,
+            "istio_xds_config_non_fresh_duration_seconds_count ",
+        )
+        .unwrap_or_default();
+
+        conn.send_response(Err(tonic::Status::aborted("simulated disconnect")))
+            .await;
+        let mut reconnect = tokio::time::timeout(Duration::from_secs(5), conn_receiver.recv())
+            .await
+            .expect("timed out waiting for reconnect")
+            .expect("ADS connection channel closed");
+        xds_signals
+            .wait_for_connected_at_epoch(synced_epoch, "raw reconnect before ACK")
+            .await;
+        let first_req = tokio::time::timeout(Duration::from_secs(5), reconnect.recv_request())
+            .await
+            .expect("timed out waiting for reconnect's first request")
+            .expect("ADS request channel closed");
+
+        assert_readiness_ready_with_freshness_metrics(
+            readiness_address,
+            metrics_address,
+            "reconnect remains unACKed",
+        )
+        .await;
+
+        let reconnect_observation_count = xds_signals.freshness_observation_count();
+        ack_watched_request(&mut reconnect, &first_req).await;
+        xds_signals
+            .wait_for_synced_after(synced_epoch, "post-reconnect xDS ACK")
+            .await;
+        xds_signals
+            .wait_for_freshness_observation_after(
+                reconnect_observation_count,
+                "xDS freshness restoration metric",
+            )
+            .await;
+        let metrics = metrics_text(metrics_address).await;
+        assert_eq!(
+            metric_value_u64(&metrics, "istio_xds_config_fresh "),
+            Some(1),
+            "freshness gauge should be 1 after reconnect ACK:\n{metrics}"
+        );
+        assert!(
+            metric_value_u64(
+                &metrics,
+                "istio_xds_config_non_fresh_duration_seconds_count ",
+            )
+            .unwrap_or_default()
+                > initial_duration_count,
+            "freshness duration histogram should record reconnect restoration:\n{metrics}"
+        );
+        assert_no_policy_threshold_metrics(&metrics);
+
+        shutdown.shutdown_now().await;
+        app_task
+            .await
+            .expect("app task joins")
+            .expect("app exits clean");
+    }
+}
