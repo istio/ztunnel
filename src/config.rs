@@ -449,10 +449,14 @@ fn get_cpu_count() -> Result<usize, Error> {
     // Note the downward API will return the total thread count ("logical cores") if no limit is set,
     // so it is really the same as num_cpus.
     // We allow num_cpus for cases its not set (not on Kubernetes, etc).
-    match parse::<usize>(ZTUNNEL_CPU_LIMIT)? {
+    // An explicit resource limit is the most precise answer, when present.
+    match parse_cpu_quantity(ZTUNNEL_RESOURCE_CPU_LIMIT)? {
         Some(limit) => Ok(limit),
-        // This is *logical cores*
-        None => Ok(num_cpus::get()),
+        None => match parse::<usize>(ZTUNNEL_CPU_LIMIT)? {
+            Some(limit) => Ok(limit),
+            // This is *logical cores*
+            None => Ok(num_cpus::get()),
+        },
     }
 }
 
@@ -1289,6 +1293,11 @@ pub mod tests {
             // Test with CPU limit
             env::set_var(ZTUNNEL_CPU_LIMIT, "12");
             assert_eq!(get_cpu_count().unwrap(), 12);
+
+            // An explicit resource limit takes precedence over ZTUNNEL_CPU_LIMIT.
+            env::set_var(ZTUNNEL_RESOURCE_CPU_LIMIT, "3");
+            assert_eq!(get_cpu_count().unwrap(), 3);
+            env::remove_var(ZTUNNEL_RESOURCE_CPU_LIMIT);
 
             // Clean up
             env::remove_var(ZTUNNEL_WORKER_THREADS);
