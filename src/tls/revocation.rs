@@ -1052,6 +1052,96 @@ mod tests {
         .expect("navigation must close the connection after its leaf is revoked");
     }
 
+    /// A CRL reload closes an existing connection when it revokes an intermediate.
+    /// Exercises [`ConnRegistration::from_conn`] capturing a multi-cert peer chain from a live TLS session,
+    /// and drives IA bulk-drop path through handshake + reload + navigate.
+    /// If `from_conn` ever dropped or reordered intermediates,
+    /// the index would build the wrong tree and this revocation would be missed.
+    #[tokio::test]
+    async fn wait_for_revocation_resolves_on_intermediate_revocation() {
+        initialize_telemetry();
+
+        let id = Identity::from_str("spiffe://td/ns/n/sa/a").unwrap();
+        // An intermediate CA signed by TEST_ROOT, and a leaf signed by that intermediate.
+        let (ia_key, ia_cert, ia_serial) =
+            crate::tls::mock::generate_intermediate_ca(TEST_ROOT_KEY);
+        let build_wl = |id: &Identity| {
+            let (leaf_key, leaf_cert) = crate::tls::mock::generate_test_certs_with_root(
+                &TestIdentity::Identity(id.clone()),
+                SystemTime::now(),
+                SystemTime::now() + Duration::from_secs(3600),
+                None,
+                ia_key.as_bytes(),
+            );
+            // chain = [intermediate, root]; the presented peer chain is therefore [leaf, IA].
+            WorkloadCertificate::new(
+                leaf_key.as_bytes(),
+                leaf_cert.as_bytes(),
+                vec![ia_cert.as_bytes(), TEST_ROOT],
+            )
+            .unwrap()
+        };
+        let server_wl = build_wl(&id);
+        let client_wl = build_wl(&id);
+
+        // Start with an empty (non-revoking) CRL so the handshake succeeds.
+        let (mut crl_file, crl_mgr) = crl_manager_empty();
+
+        let server_tls = TlsAcceptor::from(Arc::new(
+            server_wl.server_config(Some(crl_mgr.clone())).unwrap(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            server_tls.accept(stream).await.unwrap()
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let connector = client_wl
+            .outbound_connector(vec![id], Some(crl_mgr.clone()))
+            .unwrap();
+        let client_tls = connector.connect(stream).await.unwrap();
+        let _server_tls_stream = accept.await.unwrap();
+
+        let (_, ssl) = client_tls.get_ref();
+        let reg = ConnRegistration::from_conn(
+            ssl,
+            server_wl.root_store(),
+            KeyUsage::server_auth(),
+            crate::proxy::metrics::Reporter::source,
+        );
+        // The peer chain captured from the live session must include the intermediate.
+        assert_eq!(
+            reg.chain.len(),
+            2,
+            "from_conn must capture the full [leaf, intermediate] peer chain"
+        );
+        let mut revocation = Some(crl_mgr.register(reg));
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                wait_for_revocation(revocation.as_mut())
+            )
+            .await
+            .is_err(),
+            "must not resolve before the CRL revokes the intermediate"
+        );
+
+        // Revoke the intermediate (by its serial); the leaf's own serial is never listed, so this
+        // can only close the connection via the IA bulk-drop path.
+        write_crl(&mut crl_file, &crl_pem_revoking_cert(&ia_serial));
+        crl_mgr.load_crl().unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_revocation(revocation.as_mut()),
+        )
+        .await
+        .expect("bulk-drop must close the connection once its intermediate is revoked");
+    }
+
     /// Register-time self-check closes a connection whose cert is revoked after initial handshake.
     /// Validates that a CRL is loaded after new connection handshake but before conn registration is enforced.
     #[tokio::test]
