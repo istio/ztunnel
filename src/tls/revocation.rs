@@ -251,8 +251,8 @@ struct NavWork {
     ca_probes: Vec<CaProbe>,
 }
 
-/// Index of every existing connection, owned by [`CrlManager`].
-/// Navigation walks only connections under CRL issuing CA(s).
+/// Index of every tracked leaf, owned by [`CrlManager`].
+/// Navigation walks only leaves under CRL-issuing CA(s).
 /// Root/IA revocation bulk-drops its whole subtree after one confirming webpki call.
 /// Leaf revocation re-checks just the leaves whose serial the CRL lists.
 /// webpki remains the sole judge of revocation.
@@ -282,7 +282,11 @@ impl RevocationIndex {
         let (tx, rx) = watch::channel(false);
         let tx = Arc::new(tx);
 
-        let tracked = self.inner.write().unwrap().insert(&conn, tx.clone()); // None if IA parsing fails
+        let tracked = self
+            .inner
+            .write()
+            .unwrap()
+            .insert(&conn, tx.clone(), &self.metrics); // None if the chain can't be parsed
 
         // Since the CRL could have been updated since new connection handshake verified,
         // we immediately self-check against the *current* CRLs before the tunnel serves.
@@ -380,6 +384,7 @@ impl IndexInner {
         &mut self,
         conn: &ConnRegistration,
         tx: Arc<watch::Sender<bool>>,
+        metrics: &Metrics,
     ) -> Option<(NodeId, LeafId)> {
         // split the connection's peer cert chain into leaf + IA(s)
         let Some((leaf_der, ia_ders)) = conn.chain.split_first() else {
@@ -389,11 +394,12 @@ impl IndexInner {
             );
             return None;
         };
-        let Some(leaf) = parse_cert(leaf_der.as_ref()) else {
+        let Some(leaf) = parse_cert(leaf_der) else {
             warn!(
                 peer = conn.peer(),
                 "crl index: could not parse leaf cert; connection not tracked"
             );
+            metrics.record_crl_untracked_connection(conn.reporter);
             return None;
         };
 
@@ -401,11 +407,12 @@ impl IndexInner {
         // themselves are retained in the leaf's `chain`. Any parse failure aborts tracking.
         let mut ias: Vec<CertInfo> = Vec::with_capacity(ia_ders.len());
         for der in ia_ders {
-            let Some(info) = parse_cert(der.as_ref()) else {
+            let Some(info) = parse_cert(der) else {
                 warn!(
                     peer = conn.peer(),
                     "crl index: could not parse intermediate cert; connection not tracked"
                 );
+                metrics.record_crl_untracked_connection(conn.reporter);
                 return None;
             };
             ias.push(info);
@@ -649,37 +656,17 @@ struct CertInfo {
     serial: Serial,
 }
 
-/// Parse a cert's subject/issuer DNs and serial via x509-parser.
+/// Parse a cert's subject/issuer DNs and serial via webpki.
 /// Subject and issuer DNs are the `Name` SEQUENCE content (webpki's encoding),
 /// and the serial is the DER `INTEGER` content (webpki's `find_serial` form).
 /// Contents only used for index navigation and pre-checks — webpki remains the sole judge of revocation.
-fn parse_cert(der: &[u8]) -> Option<CertInfo> {
-    use x509_parser::prelude::*;
-    let (_, cert) = X509Certificate::from_der(der).ok()?;
+fn parse_cert(der: &CertificateDer) -> Option<CertInfo> {
+    let cert = webpki::EndEntityCert::try_from(der).ok()?;
     Some(CertInfo {
-        subject_dn: der_sequence_content(cert.subject().as_raw())?.to_vec(),
-        issuer_dn: der_sequence_content(cert.issuer().as_raw())?.to_vec(),
-        serial: cert.raw_serial().to_vec(),
+        subject_dn: cert.subject().to_vec(),
+        issuer_dn: cert.issuer().to_vec(),
+        serial: cert.serial().to_vec(),
     })
-}
-
-/// Return a DER `SEQUENCE`'s content (drop the outer tag + length header), or
-/// `None` if `tlv` isn't a SEQUENCE.
-/// Matches webpki's `Name` encoding, which stores the SEQUENCE value only.
-fn der_sequence_content(tlv: &[u8]) -> Option<&[u8]> {
-    // verify tag
-    if tlv.first().copied()? != 0x30 {
-        return None; // not a SEQUENCE
-    }
-    let len_prefix = *tlv.get(1)?; // first byte of length field to determine content len
-    // DER length: short form (<0x80) is a 2-byte header;
-    // long form encodes the byte-count in the low 7 bits of `len0`.
-    let header = if len_prefix < 0x80 {
-        2
-    } else {
-        2 + (len_prefix & 0x7f) as usize // 0x7f represents low 7 bits
-    };
-    tlv.get(header..) // return content bytes since this is what webpki uses
 }
 
 #[cfg(test)]
@@ -836,11 +823,9 @@ mod tests {
 
     // ---- encoding parity between x509-parser and webpki crates ----
 
-    /// `parse_cert` (x509-parser) derives index routing keys, but
-    /// `navigate` matches them against webpki's `CertRevocationList`.
+    /// `parse_cert` derives index routing keys, `navigate` matches them against webpki's `CertRevocationList`.
     /// If the byte encodings diverge, `collect_work`'s issuer-DN lookup and
     /// `serial_in_any`'s serial match miss silently and a revoked cert keeps serving (false negative).
-    /// This test pins both joins so a crate bump that shifts an encoding fails loudly here.
     #[test]
     fn parse_cert_matches_webpki_crl_encoding() {
         let ca = gen_ca("parity-ca", 1);
@@ -850,31 +835,30 @@ mod tests {
         // The CRL `navigate` would inspect: signed by `ca`, revoking the leaf's serial (99).
         let crl = webpki_crl(&ca, 1, &[99]);
 
-        // x509 parser crate
-        let ca_info = parse_cert(ca_der.as_ref()).expect("parse ca cert");
-        let leaf_info = parse_cert(leaf_der.as_ref()).expect("parse leaf cert");
+        let ca_info = parse_cert(&ca_der).expect("parse ca cert");
+        let leaf_info = parse_cert(&leaf_der).expect("parse leaf cert");
 
         // subject <-> issuer DN join (what collect_work does):
         // the x509-parser DN (SEQUENCE content) must byte-match webpki's crl.issuer()
         assert_eq!(
             ca_info.subject_dn.as_slice(),
             crl.issuer(),
-            "CA subject DN (x509-parser) must byte-match webpki CRL issuer()"
+            "CA subject DN must byte-match webpki CRL issuer()"
         );
         assert_eq!(
             leaf_info.issuer_dn.as_slice(),
             crl.issuer(),
-            "leaf issuer DN (x509-parser) must byte-match its issuing CA's webpki CRL issuer()"
+            "leaf issuer DN must byte-match its issuing CA's webpki CRL issuer()"
         );
 
-        // x509 parsed leaf serial must be findable in the webpki CRL listing it.
+        // parsed leaf serial must be findable in the webpki CRL listing it.
         assert!(
             matches!(crl.find_serial(leaf_info.serial.as_slice()), Ok(Some(_))),
             "leaf serial (x509-parser raw_serial) must be findable via webpki find_serial"
         );
 
         // a serial the CRL does not list must not match.
-        let other = parse_cert(signed_by(&gen_leaf("spiffe://td/ns/n/sa/b", 100), &ca).as_ref())
+        let other = parse_cert(&signed_by(&gen_leaf("spiffe://td/ns/n/sa/b", 100), &ca))
             .expect("parse other leaf");
         assert!(
             matches!(crl.find_serial(other.serial.as_slice()), Ok(None)),
@@ -934,7 +918,6 @@ mod tests {
         });
 
         let stream = TcpStream::connect(addr).await.unwrap();
-        // avoid the
         let connector = client_wl
             .outbound_connector(vec![id], Some(crl_mgr.clone()))
             .unwrap();
@@ -1489,6 +1472,32 @@ mod tests {
             .await
             .is_err(),
             "a connection registering against a non-revoking CRL must stay up"
+        );
+    }
+
+    /// A peer chain whose leaf certificate cannot be parsed leaves the connection untracked for
+    /// existing-connection CRL enforcement, and must increment `crl_untracked_connections`.
+    #[tokio::test]
+    async fn insert_unparseable_cert_increments_untracked_metric() {
+        initialize_telemetry();
+        let metrics = test_proxy_metrics();
+        let file = NamedTempFile::new().unwrap();
+        let crl_mgr = CrlManager::new(file.path().to_path_buf(), metrics.clone()).unwrap();
+
+        // Not a valid X.509 certificate, so `parse_cert` fails during index insertion.
+        let bad_leaf = CertificateDer::from(vec![0x30, 0x00]);
+        let _handle = crl_mgr.register(conn_reg(vec![bad_leaf], Arc::new(RootCertStore::empty())));
+
+        // conn_reg registers with reporter=source.
+        let count = metrics
+            .crl_untracked_connections
+            .get_or_create(&crate::proxy::metrics::CrlLabels {
+                reporter: crate::proxy::metrics::Reporter::source,
+            })
+            .get();
+        assert_eq!(
+            count, 1,
+            "an unparseable leaf cert must increment crl_untracked_connections"
         );
     }
 }

@@ -1756,25 +1756,28 @@ mod namespaced {
         crl_file.write_all(crl_pem.as_bytes())?;
         crl_file.flush()?;
 
-        // wait for the CRL file-watcher debounce (~2s) + reload + abrupt GOAWAY teardown to propagate
-        tokio::time::sleep(Duration::from_secs(4)).await;
-
-        // server ztunnel should have incremented CRL rejection metric counter via the existing-connection teardown path (reporter=destination)
-        info!("verifying CRL metric incremented bc of existing connection using a revoked cert");
-        verify_metric_exists(
-            &server_zt,
-            "istio_crl_policy_rejections_total",
-            &destination_labels(),
+        // Eventually (after the CRL file-watcher debounce (~2s) + reload + teardown propagation),
+        // the server ztunnel records the rejection via the existing-connection teardown path
+        // (reporter=destination).
+        info!("verifying CRL metric eventually increments for the existing revoked connection");
+        let metric_labels = destination_labels();
+        assert_eventually(
+            Duration::from_secs(10),
+            || async {
+                server_zt
+                    .metrics()
+                    .await
+                    .unwrap()
+                    .query_sum("istio_crl_policy_rejections_total", &metric_labels)
+                    > 0
+            },
+            true,
         )
         .await;
 
-        // existing connection should be closed, next round-trip fails
+        // ...and the held connection is eventually torn down (a round-trip fails).
         info!("existing connection should be closed due to detected revoked cert");
-        let res = tx.send_and_wait(()).await;
-        assert!(
-            res.is_err(),
-            "existing inbound connection should be terminated after its cert is revoked"
-        );
+        assert_connection_closed_eventually(&mut tx, Duration::from_secs(10)).await;
         drop(tx);
         assert!(client_join_handle.join().unwrap().is_err());
 
@@ -1851,26 +1854,28 @@ mod namespaced {
         crl_file.write_all(crl_pem.as_bytes())?;
         crl_file.flush()?;
 
-        // wait for the CRL file-watcher debounce (~2s) + reload + abrupt teardown to propagate
-        tokio::time::sleep(Duration::from_secs(4)).await;
-
-        // client ztunnel should have incremented the CRL rejection metric via the existing-connection
-        // teardown path (reporter=source)
-        info!("verifying CRL metric incremented bc of existing connection using a revoked cert");
-        verify_metric_exists(
-            &client_zt,
-            "istio_crl_policy_rejections_total",
-            &source_labels(),
+        // Eventually (after the CRL file-watcher debounce (~2s) + reload + teardown propagation),
+        // the client ztunnel records the rejection via the existing-connection teardown path
+        // (reporter=source).
+        info!("verifying CRL metric eventually increments for the existing revoked tunnel");
+        let metric_labels = source_labels();
+        assert_eventually(
+            Duration::from_secs(10),
+            || async {
+                client_zt
+                    .metrics()
+                    .await
+                    .unwrap()
+                    .query_sum("istio_crl_policy_rejections_total", &metric_labels)
+                    > 0
+            },
+            true,
         )
         .await;
 
-        // existing tunnel should be closed, next round-trip fails
+        // ...and the held tunnel is eventually torn down (a round-trip fails).
         info!("existing connection should be closed due to detected revoked cert");
-        let res = tx.send_and_wait(()).await;
-        assert!(
-            res.is_err(),
-            "existing outbound connection should be terminated after the upstream cert is revoked"
-        );
+        assert_connection_closed_eventually(&mut tx, Duration::from_secs(10)).await;
         drop(tx);
         assert!(client_join_handle.join().unwrap().is_err());
 
@@ -2035,6 +2040,24 @@ mod namespaced {
                 want.insert("dst.identity", "");
             }
             telemetry::testing::assert_contains(want);
+        }
+    }
+
+    /// Drives round-trips on a held connection until one fails (the connection has been torn down),
+    /// or panics after `dur`. Polling is required because the idle long-running client only observes
+    /// a server-side teardown when it next attempts a round-trip. `send_and_wait` takes `&mut self`,
+    /// so this can't be expressed via the `Fn`-based `assert_eventually` helper.
+    async fn assert_connection_closed_eventually(tx: &mut MpscAckSender<()>, dur: Duration) {
+        let deadline = tokio::time::Instant::now() + dur;
+        loop {
+            if tx.send_and_wait(()).await.is_err() {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "held connection was not torn down within {dur:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
