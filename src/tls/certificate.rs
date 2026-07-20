@@ -22,6 +22,7 @@ use std::{cmp, iter};
 use rustls::client::Resumption;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
+use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, CommonState, RootCertStore, ServerConfig};
 use rustls_pemfile::Item;
 use std::io::Cursor;
@@ -317,14 +318,25 @@ impl WorkloadCertificate {
             Identity::Spiffe { trust_domain, .. } => trust_domain,
         });
 
-        // Custom client-cert verifier that shares the webpki chain + CRL logic with the outbound verifier.
-        // CRLs are read from the manager on every handshake, so CRL updates apply to new inbound connections immediately.
-        // TODO: check if our own certificate is revoked in the CRL and log warning
-        let client_cert_verifier = crate::tls::workload::WorkloadClientVerifier::new(
+        // build the base client cert verifier with optional CRL support
+        let mut builder = WebPkiClientVerifier::builder_with_provider(
             self.root_store.clone(),
-            td,
-            crl_manager,
+            crate::tls::lib::provider(),
         );
+
+        // add CRLs if available
+        if let Some(ref mgr) = crl_manager {
+            let crls = mgr.get_crl_ders();
+            if !crls.is_empty() {
+                builder = builder.with_crls(crls).allow_unknown_revocation_status(); // fail-open for unknown status
+            }
+        }
+
+        // TODO: check if our own certificate is revoked in the CRL and log warning
+        let raw_client_cert_verifier = builder.build()?;
+
+        let client_cert_verifier =
+            crate::tls::workload::TrustDomainVerifier::new(raw_client_cert_verifier, td);
         let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
             .with_protocol_versions(tls::tls_versions())
             .expect("server config must be valid")

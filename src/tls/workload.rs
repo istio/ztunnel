@@ -16,7 +16,7 @@ use crate::identity::Identity;
 use std::error::Error;
 use std::fmt::{Debug, Display};
 
-use crate::tls::verifier;
+use crate::tls::lib::provider;
 use crate::tls::{ServerCertProvider, TlsError};
 use futures_util::TryFutureExt;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -30,12 +30,15 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use tls::verifier::webpki_error_to_rustls;
 use tokio::io::{AsyncRead, AsyncWrite};
-use webpki::KeyUsage;
+use webpki::{
+    CertRevocationList, EndEntityCert, ExpirationPolicy, KeyUsage, RevocationCheckDepth,
+    RevocationOptionsBuilder, UnknownStatusPolicy,
+};
 
 use crate::strng::Strng;
 use crate::tls;
-use crate::tls::crl::CrlManager;
 use tokio::net::TcpStream;
 use tokio_rustls::client;
 use tracing::{debug, trace};
@@ -51,36 +54,15 @@ impl<F: ServerCertProvider> InboundAcceptor<F> {
     }
 }
 
-/// Inbound mesh-TLS client-certificate verifier.
-///
-/// Verifies that the client certificate chains to a trusted root and is not revoked using
-/// the shared webpki routine ([`verifier::verify_cert_chain`]),
-/// then enforces that the client's SPIFFE identity belongs to the expected trust domain.
-///
-/// CRLs are read from the [`CrlManager`] on every handshake, so CRL file updates take effect on new
-/// inbound connections immediately (matching outbound).
 #[derive(Debug)]
-pub(super) struct WorkloadClientVerifier {
-    roots: Arc<RootCertStore>,
+pub(super) struct TrustDomainVerifier {
+    base: Arc<dyn ClientCertVerifier>,
     trust_domain: Option<Strng>,
-    crl_manager: Option<Arc<CrlManager>>,
-    /// Trust-anchor subject DNs advertised to clients in the TLS CertificateRequest
-    root_hint_subjects: Vec<DistinguishedName>,
 }
 
-impl WorkloadClientVerifier {
-    pub fn new(
-        roots: Arc<RootCertStore>,
-        trust_domain: Option<Strng>,
-        crl_manager: Option<Arc<CrlManager>>,
-    ) -> Arc<Self> {
-        let root_hint_subjects = roots.subjects();
-        Arc::new(Self {
-            roots,
-            trust_domain,
-            crl_manager,
-            root_hint_subjects,
-        })
+impl TrustDomainVerifier {
+    pub fn new(base: Arc<dyn ClientCertVerifier>, trust_domain: Option<Strng>) -> Arc<Self> {
+        Arc::new(Self { base, trust_domain })
     }
 
     fn verify_trust_domain(&self, client_cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
@@ -117,11 +99,11 @@ impl WorkloadClientVerifier {
     }
 }
 
-// Custom ClientCertVerifier: chain + CRL verification via the shared webpki routine, plus our
-// trust-domain identity check. The signature/scheme methods delegate to the active crypto provider.
-impl ClientCertVerifier for WorkloadClientVerifier {
+// Implement our custom ClientCertVerifier logic. We only want to add an extra check, but
+// need a decent amount of boilerplate to do so.
+impl ClientCertVerifier for TrustDomainVerifier {
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        &self.root_hint_subjects
+        self.base.root_hint_subjects()
     }
 
     fn verify_client_cert(
@@ -130,18 +112,11 @@ impl ClientCertVerifier for WorkloadClientVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        // CRLs are read per handshake inside verify_cert_chain, so updates apply to new connections
-        // without waiting for cert rotation.
-        verifier::verify_cert_chain(
-            end_entity,
-            intermediates,
-            &self.roots,
-            now,
-            KeyUsage::client_auth(),
-            self.crl_manager.as_deref(),
-        )?;
+        let res = self
+            .base
+            .verify_client_cert(end_entity, intermediates, now)?;
         self.verify_trust_domain(end_entity)?;
-        Ok(ClientCertVerified::assertion())
+        Ok(res)
     }
 
     fn verify_tls12_signature(
@@ -150,7 +125,7 @@ impl ClientCertVerifier for WorkloadClientVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verifier::verify_tls12_signature(message, cert, dss)
+        self.base.verify_tls12_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
@@ -159,11 +134,11 @@ impl ClientCertVerifier for WorkloadClientVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verifier::verify_tls13_signature(message, cert, dss)
+        self.base.verify_tls13_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        verifier::supported_verify_schemes()
+        self.base.supported_verify_schemes()
     }
 }
 
@@ -270,7 +245,7 @@ impl ServerCertVerifier for IdentityVerifier {
     /// Will verify the certificate is valid in the following ways:
     /// - Signed by a trusted `RootCertStore` CA
     /// - Not expired
-    /// - Optional CRL checking (shared webpki policy with inbound when enabled)
+    /// - Optional CRL checking (same webpki policy as inbound `WebPkiClientVerifier` when enabled)
     /// - SPIFFE URI SAN matches expected identities (not DNS `ServerName`)
     fn verify_server_cert(
         &self,
@@ -280,14 +255,37 @@ impl ServerCertVerifier for IdentityVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        verifier::verify_cert_chain(
-            end_entity,
+        let algs = provider().signature_verification_algorithms;
+        let ee = EndEntityCert::try_from(end_entity).map_err(webpki_error_to_rustls)?;
+
+        // must convert from get_crls() returned OwnedCertRevocationList into CertRevocationList<'_> before passing to RevocationOptionsBuilder.
+        let crls: Arc<Vec<CertRevocationList<'static>>> = self
+            .crl_manager
+            .as_deref()
+            .map(|mgr| mgr.get_crls())
+            .unwrap_or_default();
+        let crl_refs: Vec<&CertRevocationList<'_>> = crls.iter().collect();
+
+        let revocation = (!crl_refs.is_empty()).then(|| {
+            RevocationOptionsBuilder::new(&crl_refs)
+                .expect("non-empty CRL list")
+                .with_depth(RevocationCheckDepth::Chain)
+                .with_status_policy(UnknownStatusPolicy::Allow)
+                .with_expiration_policy(ExpirationPolicy::Ignore)
+                .build()
+        });
+
+        // verifies cert chain
+        ee.verify_for_usage(
+            algs.all,
+            &self.roots.roots,
             intermediates,
-            &self.roots,
             now,
             KeyUsage::server_auth(),
-            self.crl_manager.as_deref(),
-        )?;
+            revocation,
+            None,
+        )
+        .map_err(webpki_error_to_rustls)?;
 
         if !ocsp_response.is_empty() {
             trace!("Unvalidated OCSP response: {ocsp_response:?}");
@@ -306,7 +304,12 @@ impl ServerCertVerifier for IdentityVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verifier::verify_tls12_signature(message, cert, dss)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &provider().signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -315,10 +318,17 @@ impl ServerCertVerifier for IdentityVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verifier::verify_tls13_signature(message, cert, dss)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &provider().signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        verifier::supported_verify_schemes()
+        provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }

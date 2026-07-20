@@ -21,12 +21,8 @@
 
 use crate::tls::crl::CrlManager;
 use crate::tls::lib::provider;
-use rustls::client::danger::HandshakeSignatureValid;
 use rustls::pki_types::{CertificateDer, UnixTime};
-use rustls::{
-    CertRevocationListError, CertificateError, DigitallySignedStruct, OtherError, RootCertStore,
-    SignatureScheme,
-};
+use rustls::{CertRevocationListError, CertificateError, OtherError, RootCertStore};
 use std::sync::Arc;
 use webpki::{
     CertRevocationList, EndEntityCert, ExpirationPolicy, KeyUsage, RevocationCheckDepth,
@@ -82,48 +78,13 @@ pub fn verify_cert_chain(
     Ok(())
 }
 
-// The signature-verification helpers below are identical for inbound and outbound:
-// both delegate to the active crypto provider's algorithms.
-
-pub(crate) fn verify_tls12_signature(
-    message: &[u8],
-    cert: &CertificateDer<'_>,
-    dss: &DigitallySignedStruct,
-) -> Result<HandshakeSignatureValid, rustls::Error> {
-    rustls::crypto::verify_tls12_signature(
-        message,
-        cert,
-        dss,
-        &provider().signature_verification_algorithms,
-    )
-}
-
-pub(crate) fn verify_tls13_signature(
-    message: &[u8],
-    cert: &CertificateDer<'_>,
-    dss: &DigitallySignedStruct,
-) -> Result<HandshakeSignatureValid, rustls::Error> {
-    rustls::crypto::verify_tls13_signature(
-        message,
-        cert,
-        dss,
-        &provider().signature_verification_algorithms,
-    )
-}
-
-pub(crate) fn supported_verify_schemes() -> Vec<SignatureScheme> {
-    provider()
-        .signature_verification_algorithms
-        .supported_schemes()
-}
-
 /// Maps `rustls-webpki` errors to `rustls::Error`.
 ///
 /// We map the variants that carry structured `CertificateError` / CRL types used by rustls for
 /// handshake reporting; everything else (signature-algorithm context, uncommon path failures, and
 /// future `#[non_exhaustive]` variants) is wrapped in [`CertificateError::Other`] while preserving
 /// the original `webpki::Error` for logs.
-fn webpki_error_to_rustls(error: webpki::Error) -> rustls::Error {
+pub fn webpki_error_to_rustls(error: webpki::Error) -> rustls::Error {
     use webpki::Error;
 
     match error {
