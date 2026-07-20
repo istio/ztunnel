@@ -41,16 +41,8 @@ pub enum CrlError {
 }
 
 #[derive(Clone)]
-/// **Outbound** mesh TLS verifiers call [`CrlManager::get_crls`] on every
-/// handshake, so CRL file updates apply to new connections immediately.
-///
-/// **Inbound** `ServerConfig` creation calls [`CrlManager::get_crl_ders`] and
-/// is rebuilt when the workload certificate refreshes (~12h),
-/// so CRL changes apply on that cadence for new connection handshakes unless the server config path changes.
-///
-/// For *existing* connections, the manager owns a [`RevocationIndex`]: [`CrlManager::register`] tracks
-/// a connection at handshake, and every successful (re)load re-evaluates the tracked connections
-/// against the updated CRL set via [`RevocationIndex::navigate`].
+/// CRLs are enforced on both inbound and outbound connections.
+/// Existing connections are tracked in the index and applicable ones are re-verified after a CRL load event.
 pub struct CrlManager {
     inner: Arc<RwLock<CrlManagerInner>>,
     /// Existing connection enforcement index. CRL reload path drives navigation.
