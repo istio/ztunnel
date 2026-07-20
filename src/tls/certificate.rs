@@ -328,7 +328,9 @@ impl WorkloadCertificate {
         if let Some(ref mgr) = crl_manager {
             let crls = mgr.get_crl_ders();
             if !crls.is_empty() {
-                builder = builder.with_crls(crls).allow_unknown_revocation_status(); // fail-open for unknown status
+                builder = builder
+                    .with_crls(crls.iter().cloned())
+                    .allow_unknown_revocation_status(); // fail-open for unknown status
             }
         }
 
