@@ -26,9 +26,8 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response, header::CONTENT_TYPE, header::HeaderValue};
+use std::borrow::Borrow;
 use std::collections::HashMap;
-use tower::ServiceBuilder;
-use tower_http::compression::CompressionLayer;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -57,8 +56,7 @@ struct State {
 }
 
 pub struct Service {
-    s: Server,
-    state: State,
+    s: Server<State>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -99,16 +97,20 @@ impl Service {
         drain_rx: DrainWatcher,
         cert_manager: Arc<SecretManager>,
     ) -> anyhow::Result<Self> {
-        let state = State {
-            config: config.clone(),
-            proxy_state,
-            shutdown_trigger,
-            cert_manager,
-            handlers: vec![],
-        };
-        Server::bind("admin", config.admin_addr, drain_rx)
-            .await
-            .map(|s| Service { s, state })
+        Server::<State>::bind(
+            "admin",
+            config.admin_addr,
+            drain_rx,
+            State {
+                config,
+                proxy_state,
+                shutdown_trigger,
+                cert_manager,
+                handlers: vec![],
+            },
+        )
+        .await
+        .map(|s| Service { s })
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -116,47 +118,40 @@ impl Service {
     }
 
     pub fn add_handler(&mut self, handler: Arc<dyn AdminHandler>) {
-        self.state.handlers.push(handler);
+        self.s.state_mut().handlers.push(handler);
     }
 
     pub fn spawn(self) {
-        let state = Arc::new(self.state);
-        let service = ServiceBuilder::new()
-            .layer(CompressionLayer::new())
-            .service_fn(move |req: Request<Incoming>| {
-                let state = state.clone();
-                async move {
-                    match req.uri().path() {
-                        #[cfg(target_os = "linux")]
-                        "/debug/pprof/profile" => handle_pprof(req).await,
-                        #[cfg(target_os = "linux")]
-                        "/debug/pprof/heap" => handle_jemalloc_pprof_heapgen(req).await,
-                        "/quitquitquit" => Ok(handle_server_shutdown(
-                            state.shutdown_trigger.clone(),
-                            req,
-                            state.config.self_termination_deadline,
-                        )
-                        .await),
-                        "/config_dump" => {
-                            handle_config_dump(
-                                &state.handlers,
-                                ConfigDump {
-                                    proxy_state: state.proxy_state.clone(),
-                                    static_config: Default::default(),
-                                    version: BuildInfo::new(),
-                                    config: state.config.clone(),
-                                    certificates: dump_certs(&state.cert_manager).await,
-                                },
-                            )
-                            .await
-                        }
-                        "/logging" => Ok(handle_logging(req).await),
-                        "/" => Ok(handle_dashboard(req).await),
-                        _ => Ok(empty_response(hyper::StatusCode::NOT_FOUND)),
-                    }
+        self.s.spawn(|state, req| async move {
+            match req.uri().path() {
+                #[cfg(target_os = "linux")]
+                "/debug/pprof/profile" => handle_pprof(req).await,
+                #[cfg(target_os = "linux")]
+                "/debug/pprof/heap" => handle_jemalloc_pprof_heapgen(req).await,
+                "/quitquitquit" => Ok(handle_server_shutdown(
+                    state.shutdown_trigger.clone(),
+                    req,
+                    state.config.self_termination_deadline,
+                )
+                .await),
+                "/config_dump" => {
+                    handle_config_dump(
+                        &state.handlers,
+                        ConfigDump {
+                            proxy_state: state.proxy_state.clone(),
+                            static_config: Default::default(),
+                            version: BuildInfo::new(),
+                            config: state.config.clone(),
+                            certificates: dump_certs(state.cert_manager.borrow()).await,
+                        },
+                    )
+                    .await
                 }
-            });
-        self.s.spawn(service)
+                "/logging" => Ok(handle_logging(req).await),
+                "/" => Ok(handle_dashboard(req).await),
+                _ => Ok(empty_response(hyper::StatusCode::NOT_FOUND)),
+            }
+        })
     }
 }
 

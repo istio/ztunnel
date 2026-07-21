@@ -12,25 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ::hyper_util::service::TowerToHyperService;
 use bytes::Bytes;
 use std::sync::Mutex;
 use std::{net::SocketAddr, sync::Arc};
+use tower::ServiceBuilder;
+use tower_http::compression::CompressionLayer;
 
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response};
 use prometheus_client::encoding::text::encode;
 use prometheus_client::registry::Registry;
-use tower::ServiceBuilder;
-use tower_http::compression::CompressionLayer;
 
 use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::hyper_util;
 
 pub struct Server {
-    s: hyper_util::Server,
-    registry: Mutex<Registry>,
+    s: hyper_util::Server<Mutex<Registry>>,
 }
 
 impl Server {
@@ -39,12 +39,14 @@ impl Server {
         drain_rx: DrainWatcher,
         registry: Registry,
     ) -> anyhow::Result<Self> {
-        hyper_util::Server::bind("stats", config.stats_addr, drain_rx)
-            .await
-            .map(|s| Server {
-                s,
-                registry: Mutex::new(registry),
-            })
+        hyper_util::Server::<Mutex<Registry>>::bind(
+            "stats",
+            config.stats_addr,
+            drain_rx,
+            Mutex::new(registry),
+        )
+        .await
+        .map(|s| Server { s })
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -52,22 +54,20 @@ impl Server {
     }
 
     pub fn spawn(self) {
-        let state = Arc::new(self.registry);
-        let service = ServiceBuilder::new()
-            .layer(CompressionLayer::new())
-            .service_fn(move |req: Request<Incoming>| {
-                let state = state.clone();
-                async move {
-                    match req.uri().path() {
-                        "/metrics" | "/stats/prometheus" => {
-                            Ok::<_, tower::BoxError>(handle_metrics(state, req).await)
-                        }
-                        _ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
+        self.s.spawn_service(|registry: Arc<Mutex<Registry>>| {
+            let service = ServiceBuilder::new()
+                .layer(CompressionLayer::new())
+                .service_fn(move |req: Request<Incoming>| {
+                    let registry = registry.clone();
+                    async move {
+                        Ok::<_, std::convert::Infallible>(match req.uri().path() {
+                            "/metrics" | "/stats/prometheus" => handle_metrics(registry, req).await,
+                            _ => hyper_util::empty_response(hyper::StatusCode::NOT_FOUND),
+                        })
                     }
-                }
-            });
-
-        self.s.spawn(service)
+                });
+            TowerToHyperService::new(service)
+        })
     }
 }
 
