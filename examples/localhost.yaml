@@ -9,34 +9,19 @@ workloads:
   protocol: HBONE
   node: local
   network: ""
-  services:
-    "default/example.com":
-      80: 8080
-    "default/example2.com":
-      80: 8080
-# Define another local address, but this one uses TCP. This allows testing HBONE and TCP with one config.
+  services: {}
 - uid: cluster1//v1/Pod/default/local-tcp
-  name: local-tcp
+  name: dns
   namespace: default
   serviceAccount: default
-  workloadIps: ["127.0.0.2"]
+  workloadIps: []
+  hostname: example.com
   protocol: TCP
   node: local
   network: ""
   services:
     "default/example.com":
-      80: 8080
-    "default/example2.com":
-      80: 8080
-policies:
-  - action: Allow
-    rules:
-    - - - notDestinationPorts:
-          - 9999
-    name: deny-9999
-    namespace: default
-    scope: Namespace
-    dryRun: false
+      8000: 8000
 services:
 - name: local
   namespace: default
@@ -44,15 +29,10 @@ services:
   vips:
     - /127.10.0.1
   ports:
-    80: 8080
-  subjectAltNames:
-   - spiffe://cluster.local/ns/default/sa/local
+    8000: 8000
   canonical: true
-- name: remote
-  namespace: default
-  hostname: example2.com
-  vips:
-    - remote/127.10.0.2
-  ports:
-    80: 8080
-  canonical: true
+  loadBalancer:
+    routingPreferences: []
+    healthPolicy: AllowAll
+    mode: Standard
+    connectStrategy: FirstHealthyRace
