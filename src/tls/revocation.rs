@@ -338,6 +338,7 @@ impl RevocationIndex {
         // Verify again to obtain the verified path, and route the index by that instead of the peer's presented chain order.
         // Presented chains can be compromised or non-conforming that still handshake (webpki ignores unused ones)
         // and corrupt index structure causing a missed connection revocation.
+        let mut verified_chain: Option<Vec<CertificateDer<'static>>> = None;
         let tracked = match conn.presented_chain.split_first() {
             None => {
                 warn!(
@@ -361,10 +362,14 @@ impl RevocationIndex {
                         let mut chain = Vec::with_capacity(verified.intermediates.len() + 1);
                         chain.push(leaf.clone());
                         chain.extend(verified.intermediates);
-                        self.inner
-                            .write()
-                            .unwrap()
-                            .insert(&conn, &chain, tx.clone(), &self.metrics)
+                        let tracked = self.inner.write().unwrap().insert(
+                            &conn,
+                            &chain,
+                            tx.clone(),
+                            &self.metrics,
+                        );
+                        verified_chain = Some(chain);
+                        tracked
                     }
                     // already revoked by current CRLs: drop the connection
                     Err(webpki::Error::CertRevoked) => {
@@ -386,12 +391,13 @@ impl RevocationIndex {
         };
 
         // changed generation means a crl reload happened since verify and insert above executed.
-        // re-check against the current set now that we're inserted.
+        // re-check with the verified chain against the current set now that we're inserted.
         if tracked.is_some()
             && crl_manager.generation() != gen_before
+            && let Some(chain) = verified_chain.as_deref()
             && chain_is_revoked(
                 crl_manager,
-                &conn.presented_chain,
+                chain,
                 &conn.roots,
                 conn.key_usage,
                 conn.established,
