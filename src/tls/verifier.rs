@@ -29,6 +29,11 @@ use webpki::{
     RevocationOptionsBuilder, UnknownStatusPolicy,
 };
 
+pub struct VerifiedChain {
+    /// Verified intermediates, leaf-adjacent first. Excludes the end-entity and the trust anchor.
+    pub intermediates: Vec<CertificateDer<'static>>,
+}
+
 /// Verifies the peer's certificate chains to a trusted root and, when CRLs are supplied, is not revoked.
 /// Shared by inbound ([`KeyUsage::client_auth`]) and outbound ([`KeyUsage::server_auth`]) mesh TLS.
 ///
@@ -47,13 +52,13 @@ pub fn verify_cert_chain(
     roots: &RootCertStore,
     now: UnixTime,
     key_usage: KeyUsage,
-    crl_manager: Option<&CrlManager>,
-) -> Result<(), rustls::Error> {
+    crl_manager: &CrlManager,
+) -> Result<VerifiedChain, rustls::Error> {
     let algs = provider().signature_verification_algorithms;
     let ee = EndEntityCert::try_from(end_entity).map_err(webpki_error_to_rustls)?;
 
     // get_crls() returns pre-parsed CRLs; the Arc must outlive the borrowed refs below.
-    let crls = crl_manager.map(|mgr| mgr.get_crls()).unwrap_or_default();
+    let crls = crl_manager.get_crls();
     let crl_refs: Vec<&CertRevocationList<'_>> = crls.iter().collect();
 
     let revocation = (!crl_refs.is_empty()).then(|| {
@@ -65,17 +70,26 @@ pub fn verify_cert_chain(
             .build()
     });
 
-    ee.verify_for_usage(
-        algs.all,
-        &roots.roots,
-        intermediates,
-        now,
-        key_usage,
-        revocation,
-        None,
-    )
-    .map_err(webpki_error_to_rustls)?;
-    Ok(())
+    let path = ee
+        .verify_for_usage(
+            algs.all,
+            &roots.roots,
+            intermediates,
+            now,
+            key_usage,
+            revocation,
+            None,
+        )
+        .map_err(webpki_error_to_rustls)?;
+
+    // webpki builds the path from the end-entity upward, so `intermediate_certificates()` yields
+    // the used intermediates leaf-adjacent first — the order the CRL index expects.
+    Ok(VerifiedChain {
+        intermediates: path
+            .intermediate_certificates()
+            .map(|cert| cert.der().into_owned())
+            .collect(),
+    })
 }
 
 /// Maps `rustls-webpki` errors to `rustls::Error`.

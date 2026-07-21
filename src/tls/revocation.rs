@@ -43,9 +43,8 @@ use crate::tls::verifier::verify_cert_chain;
 /// Inputs captured at handshake time to enforce CRL revocation on one HBONE tunnel.
 /// Captured because the peer chain is no longer retrievable once the h2 handshake consumes the `TlsStream`.
 pub struct ConnRegistration {
-    /// peer chain (leaf first).
-    /// re-verified via [`verify_cert_chain`] — same webpki path used at handshake time
-    chain: Vec<CertificateDer<'static>>,
+    /// presented peer chain (leaf first)
+    presented_chain: Vec<CertificateDer<'static>>,
     /// Trust anchors the peer chain is verified against, matching what the handshake-time verifier used.
     roots: Arc<RootCertStore>,
     /// `client_auth` for an inbound peer (client) chain, `server_auth` for an outbound peer (server) chain.
@@ -67,13 +66,13 @@ impl ConnRegistration {
         key_usage: KeyUsage,
         reporter: Reporter,
     ) -> Self {
-        let chain = conn_state
+        let presented_chain = conn_state
             .peer_certificates()
             .map(|certs| certs.iter().map(|c| c.clone().into_owned()).collect())
             .unwrap_or_default();
         let peer_identity = crate::tls::identity_from_connection(conn_state);
         Self {
-            chain,
+            presented_chain,
             roots,
             key_usage,
             reporter,
@@ -147,7 +146,7 @@ fn chain_is_revoked(
             roots,
             established, // use conn established time instead of current to avoid supurious CertExpired errors
             key_usage,
-            Some(crl_manager)
+            crl_manager
         ),
         Err(rustls::Error::InvalidCertificate(CertificateError::Revoked))
     )
@@ -275,25 +274,71 @@ impl RevocationIndex {
     }
 
     /// Track a connection at handshake and return its [`RevocationHandle`].
-    /// Inserts the leaf + its CA path into the index,
-    /// then runs an immediate self-check against the current CRLs
-    /// so a connection registering during/after a reload is still caught.
+    /// Inserts the leaf + its verified CA path into the index.
     pub fn register(&self, crl_manager: &CrlManager, conn: ConnRegistration) -> RevocationHandle {
         let (tx, rx) = watch::channel(false);
         let tx = Arc::new(tx);
 
-        let tracked = self
-            .inner
-            .write()
-            .unwrap()
-            .insert(&conn, tx.clone(), &self.metrics); // None if the chain can't be parsed
+        // grab CRL-reload generation before verifying
+        let gen_before = crl_manager.generation();
 
-        // Since the CRL could have been updated since new connection handshake verified,
-        // we immediately self-check against the *current* CRLs before the tunnel serves.
-        if !crl_manager.get_crls().is_empty()
+        // Verify again to obtain the verified path, and route the index by that instead of the peer's presented chain order.
+        // Presented chains can be compromised or non-conforming that still handshake (webpki ignores unused ones)
+        // and corrupt index structure causing a missed connection revocation.
+        let tracked = match conn.presented_chain.split_first() {
+            None => {
+                warn!(
+                    peer = conn.peer(),
+                    "crl index: peer presented no certificates; connection not tracked"
+                );
+                self.metrics.record_crl_untracked_connection(conn.reporter);
+                None
+            }
+            Some((leaf, presented_ias)) => {
+                match verify_cert_chain(
+                    leaf,
+                    presented_ias,
+                    &conn.roots,
+                    conn.established,
+                    conn.key_usage,
+                    crl_manager,
+                ) {
+                    // insert with the verified chain
+                    Ok(verified) => {
+                        let mut chain = Vec::with_capacity(verified.intermediates.len() + 1);
+                        chain.push(leaf.clone());
+                        chain.extend(verified.intermediates);
+                        self.inner
+                            .write()
+                            .unwrap()
+                            .insert(&conn, &chain, tx.clone(), &self.metrics)
+                    }
+                    // already revoked by current CRLs: drop the connection
+                    Err(rustls::Error::InvalidCertificate(CertificateError::Revoked)) => {
+                        drop_revoked(&self.metrics, conn.reporter, &tx);
+                        None
+                    }
+                    // handshake already verified this chain, so a failure here is unexpected
+                    Err(e) => {
+                        warn!(
+                            peer = conn.peer(),
+                            error = %e,
+                            "crl index: re-verification failed; connection not tracked"
+                        );
+                        self.metrics.record_crl_untracked_connection(conn.reporter);
+                        None
+                    }
+                }
+            }
+        };
+
+        // changed generation means a crl reload happened since verify and insert above executed.
+        // re-check against the current set now that we're inserted.
+        if tracked.is_some()
+            && crl_manager.generation() != gen_before
             && chain_is_revoked(
                 crl_manager,
-                &conn.chain,
+                &conn.presented_chain,
                 &conn.roots,
                 conn.key_usage,
                 conn.established,
@@ -383,11 +428,12 @@ impl IndexInner {
     fn insert(
         &mut self,
         conn: &ConnRegistration,
+        verified_chain: &[CertificateDer<'static>],
         tx: Arc<watch::Sender<bool>>,
         metrics: &Metrics,
     ) -> Option<(NodeId, LeafId)> {
-        // split the connection's peer cert chain into leaf + IA(s)
-        let Some((leaf_der, ia_ders)) = conn.chain.split_first() else {
+        // split the connection's verified cert chain into leaf + IA(s)
+        let Some((leaf_der, ia_ders)) = verified_chain.split_first() else {
             warn!(
                 peer = conn.peer(),
                 "crl index: peer presented no certificates; connection not tracked"
@@ -435,7 +481,7 @@ impl IndexInner {
         self.nodes.get_mut(&cur)?.child_leaves.insert(
             leaf_id,
             Leaf {
-                chain: conn.chain.clone(),
+                chain: verified_chain.to_vec(),
                 roots: conn.roots.clone(),
                 key_usage: conn.key_usage,
                 established: conn.established,
@@ -704,7 +750,7 @@ mod tests {
         roots: Arc<RootCertStore>,
     ) -> ConnRegistration {
         ConnRegistration {
-            chain,
+            presented_chain: chain,
             roots,
             key_usage: KeyUsage::server_auth(),
             reporter: crate::proxy::metrics::Reporter::source,
@@ -933,7 +979,7 @@ mod tests {
         );
         // Retain what the expiry-masking regression check at the end needs,
         // since `register` consumes the conn registration.
-        let chain = reg.chain.clone();
+        let chain = reg.presented_chain.clone();
         let roots = reg.roots.clone();
         let established = reg.established;
         // populate index by registering the connection
@@ -1096,7 +1142,7 @@ mod tests {
         );
         // The peer chain captured from the live session must include the intermediate.
         assert_eq!(
-            reg.chain.len(),
+            reg.presented_chain.len(),
             2,
             "from_conn must capture the full [leaf, intermediate] peer chain"
         );
@@ -1499,5 +1545,54 @@ mod tests {
             count, 1,
             "an unparseable leaf cert must increment crl_untracked_connections"
         );
+    }
+
+    /// Presented cert chains that are compromised or non-conforming can still handshake successfully,
+    /// but must not evade a revocation event. webpki ignores the unused intermediates at handshake,
+    /// and `register` populates the index by the verified path, so a CRL revoking the leaf still
+    /// tears the connection down.
+    #[tokio::test]
+    async fn index_routes_by_verified_path_ignoring_presented_junk_intermediate() {
+        initialize_telemetry();
+        let root = gen_ca("test-root", 1);
+        let real_ia = gen_ca("test-ia", 2);
+        let leaf = gen_leaf("spiffe://td/ns/n/sa/a", 3);
+        // A CA the leaf was NOT issued by; the peer inserts it ahead of the real IA in the chain.
+        let junk_ia = gen_ca("junk-ia", 99);
+
+        let mut roots = RootCertStore::empty();
+        roots.add(self_signed(&root)).unwrap();
+
+        let chain = vec![
+            signed_by(&leaf, &real_ia),
+            self_signed(&junk_ia),
+            signed_by(&real_ia, &root),
+        ];
+
+        let (mut crl_file, crl_mgr) = crl_manager_empty();
+        let mut handle = crl_mgr.register(conn_reg(chain, Arc::new(roots)));
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                wait_for_revocation(Some(&mut handle))
+            )
+            .await
+            .is_err(),
+            "not revoked before the CRL lists the leaf"
+        );
+
+        // real IA revokes the leaf by serial.
+        // Only reachable if the leaf is a direct child of the real IA node.
+        // i.e. routed by the verified path, not the presented junk.
+        write_crl(&mut crl_file, &crl_pem_signed(&real_ia, 1, &[3]));
+        crl_mgr.load_crl().unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_for_revocation(Some(&mut handle)),
+        )
+        .await
+        .expect("verified-path routing must drop the leaf despite the presented junk intermediate");
     }
 }

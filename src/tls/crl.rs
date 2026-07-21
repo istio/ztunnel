@@ -20,6 +20,7 @@ use rustls::pki_types::CertificateRevocationListDer;
 use rustls_pemfile::Item;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -47,6 +48,8 @@ pub struct CrlManager {
     inner: Arc<RwLock<CrlManagerInner>>,
     /// Existing connection enforcement index. CRL reload path drives navigation.
     index: RevocationIndex,
+    /// Monotonic counter bumped on every CRL set reload
+    generation: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for CrlManager {
@@ -85,6 +88,7 @@ impl CrlManager {
                 _debouncer: None,
             })),
             index: RevocationIndex::new(metrics),
+            generation: Arc::new(AtomicU64::new(0)),
         };
 
         // try to load the CRL, but don't fail if the file doesn't exist yet
@@ -134,7 +138,15 @@ impl CrlManager {
             inner.crls = Some(Arc::new(crls));
             inner.crl_ders = Some(Arc::new(crl_ders));
         }
+        // bump generation so connections being simultaneously registered re-verify
+        self.generation.fetch_add(1, Ordering::Release);
         Ok(())
+    }
+
+    /// Current CRL-reload generation.
+    /// Bumped by [`Self::reload_crl_data`] on every reload.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     /// Reads and parses the CRL file into webpki's pre-parsed form.
