@@ -328,6 +328,8 @@ impl RevocationIndex {
 
     /// Track a connection at handshake and return its [`RevocationHandle`].
     /// Inserts the leaf + its verified CA path into the index.
+    /// For both inbound and outbound, register owns the final decision for revocation.
+    /// All other decisions are owned by the handshake.
     pub fn register(&self, crl_manager: &CrlManager, conn: ConnRegistration) -> RevocationHandle {
         let (tx, rx) = watch::channel(false);
         let tx = Arc::new(tx);
@@ -375,7 +377,8 @@ impl RevocationIndex {
                         drop_revoked(&self.metrics, conn.reporter, &tx);
                         (None, None)
                     }
-                    // handshake already verified this chain, so a failure here is unexpected
+                    // handshake already verified this chain, so a failure here is
+                    // likely the result of a race between state updates and verifyForUse calls
                     Err(e) => {
                         warn!(
                             peer = conn.peer(),
