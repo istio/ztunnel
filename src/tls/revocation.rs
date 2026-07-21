@@ -16,16 +16,19 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use rustls::pki_types::{CertificateDer, UnixTime};
-use rustls::{CertificateError, CommonState, RootCertStore};
+use rustls::{CommonState, RootCertStore};
 use tokio::sync::watch;
 use tracing::warn;
-use webpki::{CertRevocationList, KeyUsage};
 
 use crate::identity::Identity;
 use crate::proxy::Metrics;
 use crate::proxy::metrics::Reporter;
 use crate::tls::crl::CrlManager;
-use crate::tls::verifier::verify_cert_chain;
+use crate::tls::lib::provider;
+use webpki::{
+    CertRevocationList, EndEntityCert, ExpirationPolicy, KeyUsage, RevocationCheckDepth,
+    RevocationOptionsBuilder, UnknownStatusPolicy,
+};
 
 // CRL revocation enforcement for existing connections, shared by both directions:
 //
@@ -127,8 +130,8 @@ impl RevocationHandle {
     }
 }
 
-/// re-run the webpki chain-validation path against a chain that was accepted at handshake.
-/// only `CertificateError::Revoked` is considered for revocation status.
+/// wrapper around `verify_cert_chain` that gives revocation signal against a chain that was accepted at handshake.
+/// only `webpki::Error::CertRevoked` is considered for revocation status.
 fn chain_is_revoked(
     crl_manager: &CrlManager,
     chain: &[CertificateDer<'static>],
@@ -148,8 +151,58 @@ fn chain_is_revoked(
             key_usage,
             crl_manager
         ),
-        Err(rustls::Error::InvalidCertificate(CertificateError::Revoked))
+        Err(webpki::Error::CertRevoked)
     )
+}
+
+pub struct VerifiedChain {
+    /// Verified intermediates, leaf-adjacent first. Excludes the end-entity and the trust anchor.
+    pub intermediates: Vec<CertificateDer<'static>>,
+}
+
+/// Verifies the peer's certificate chains to a trusted root and, when CRLs are supplied, is not revoked.
+pub fn verify_cert_chain(
+    end_entity: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+    roots: &RootCertStore,
+    now: UnixTime,
+    key_usage: KeyUsage,
+    crl_manager: &CrlManager,
+) -> Result<VerifiedChain, webpki::Error> {
+    let algs = provider().signature_verification_algorithms;
+    let ee = EndEntityCert::try_from(end_entity)?;
+
+    // get_crls() returns pre-parsed CRLs; the Arc must outlive the borrowed refs below.
+    let crls = crl_manager.get_crls();
+    let crl_refs: Vec<&CertRevocationList<'_>> = crls.iter().collect();
+
+    let revocation = (!crl_refs.is_empty()).then(|| {
+        RevocationOptionsBuilder::new(&crl_refs)
+            .expect("non-empty CRL list")
+            .with_depth(RevocationCheckDepth::Chain)
+            .with_status_policy(UnknownStatusPolicy::Allow)
+            .with_expiration_policy(ExpirationPolicy::Ignore)
+            .build()
+    });
+
+    let path = ee.verify_for_usage(
+        algs.all,
+        &roots.roots,
+        intermediates,
+        now,
+        key_usage,
+        revocation,
+        None,
+    )?;
+
+    // webpki builds the path from the end-entity upward, so `intermediate_certificates()` yields
+    // the used intermediates leaf-adjacent first — the order the CRL index expects.
+    Ok(VerifiedChain {
+        intermediates: path
+            .intermediate_certificates()
+            .map(|cert| cert.der().into_owned())
+            .collect(),
+    })
 }
 
 /// Resolves only when a CRL update revokes a cert in this connection's chain (via [`RevocationHandle::revoked`]).
@@ -314,7 +367,7 @@ impl RevocationIndex {
                             .insert(&conn, &chain, tx.clone(), &self.metrics)
                     }
                     // already revoked by current CRLs: drop the connection
-                    Err(rustls::Error::InvalidCertificate(CertificateError::Revoked)) => {
+                    Err(webpki::Error::CertRevoked) => {
                         drop_revoked(&self.metrics, conn.reporter, &tx);
                         None
                     }

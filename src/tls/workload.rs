@@ -24,13 +24,13 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{
-    ClientConfig, DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme,
+    CertRevocationListError, ClientConfig, DigitallySignedStruct, DistinguishedName, OtherError,
+    RootCertStore, SignatureScheme,
 };
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use tls::verifier::webpki_error_to_rustls;
 use tokio::io::{AsyncRead, AsyncWrite};
 use webpki::{
     CertRevocationList, EndEntityCert, ExpirationPolicy, KeyUsage, RevocationCheckDepth,
@@ -187,6 +187,47 @@ pub struct IdentityVerifier {
     pub(super) roots: Arc<RootCertStore>,
     pub(super) identity: Vec<Identity>,
     pub(super) crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
+}
+
+/// Maps `rustls-webpki` errors to `rustls::Error`.
+///
+/// We map the variants that carry structured `CertificateError` / CRL types used by rustls for
+/// handshake reporting; everything else (signature-algorithm context, uncommon path failures, and
+/// future `#[non_exhaustive]` variants) is wrapped in [`CertificateError::Other`] while preserving
+/// the original `webpki::Error` for logs.
+fn webpki_error_to_rustls(error: webpki::Error) -> rustls::Error {
+    use rustls::CertificateError;
+    use webpki::Error;
+
+    match error {
+        Error::BadDer | Error::BadDerTime | Error::TrailingData(_) => {
+            CertificateError::BadEncoding.into()
+        }
+        Error::CertNotValidYet { time, not_before } => {
+            CertificateError::NotValidYetContext { time, not_before }.into()
+        }
+        Error::CertExpired { time, not_after } => {
+            CertificateError::ExpiredContext { time, not_after }.into()
+        }
+        Error::UnknownIssuer => CertificateError::UnknownIssuer.into(),
+        Error::CertNotValidForName(ctx) => CertificateError::NotValidForNameContext {
+            expected: ctx.expected,
+            presented: ctx.presented,
+        }
+        .into(),
+        Error::CertRevoked => CertificateError::Revoked.into(),
+        Error::UnknownRevocationStatus => CertificateError::UnknownRevocationStatus.into(),
+        Error::CrlExpired { time, next_update } => {
+            CertificateError::ExpiredRevocationListContext { time, next_update }.into()
+        }
+        Error::IssuerNotCrlSigner => CertRevocationListError::IssuerInvalidForCrl.into(),
+        Error::InvalidSignatureForPublicKey => CertificateError::BadSignature.into(),
+        #[allow(deprecated)]
+        Error::RequiredEkuNotFound | Error::RequiredEkuNotFoundContext(_) => {
+            CertificateError::InvalidPurpose.into()
+        }
+        e => CertificateError::Other(OtherError(std::sync::Arc::new(e))).into(),
+    }
 }
 
 impl IdentityVerifier {
