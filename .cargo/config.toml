@@ -1,5 +1,11 @@
 [build]
 target-dir = "out/rust"
+
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "force-frame-pointers"]
+
 [env]
 BORING_BSSL_FIPS_PATH = { value = "vendor/boringssl-fips/linux_x86_64", force = true, relative = true }
 BORING_BSSL_FIPS_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
+CFLAGS = "-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"
+CXXFLAGS = "-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"

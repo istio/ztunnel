@@ -31,11 +31,11 @@ if [[ "$TLS_MODE" == "boring" ]]; then
     # TODO(https://github.com/istio/ztunnel/issues/357) clean up this hack
     sed -i 's/x86_64/arm64/g' .cargo/config.toml
   fi
-  cargo build --release --no-default-features -F tls-boring
+  cargo build --release --no-default-features -F tls-boring -F jemalloc
 elif [[ "$TLS_MODE" == "aws-lc" ]]; then
-  cargo build --release --no-default-features -F tls-aws-lc
+  cargo build --release --no-default-features -F tls-aws-lc -F jemalloc
 elif [[ "$TLS_MODE" == "openssl" ]]; then
-  cargo build --release --no-default-features -F tls-openssl
+  cargo build --release --no-default-features -F tls-openssl -F jemalloc
 else
   cargo build --release
 fi
