@@ -126,6 +126,8 @@ macro_rules! handle_connection {
         tokio::select! {
             biased;
             _ = $crate::proxy::connection_manager::await_revocation($crl_revoked) => {
+                // crl revocation signal originates in `RevocationIndex`, not `ConnectionManager` so release explicitly
+                $connguard.release();
                 Err(Error::CertificateRevoked)
             }
             _signaled = watch.wait_for_drain() => Err(Error::AuthorizationPolicyLateRejection),
