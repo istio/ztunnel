@@ -217,6 +217,8 @@ impl Inbound {
             )),
             Err(e) => {
                 warn!("failed to fetch certificate for CRL revocation enforcement: {e}");
+                pi.metrics
+                    .record_crl_untracked_connection(crate::proxy::metrics::Reporter::destination);
                 None
             }
         }
