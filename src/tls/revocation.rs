@@ -156,6 +156,40 @@ fn chain_is_revoked(
     )
 }
 
+/// used for register-time re-check decision to determine whether a CRL reload landed since `gen_before` and
+/// the verified chain is revoked under the current CRLs.
+#[inline(always)]
+fn revoked_after_reload(
+    gen_before: u64,
+    gen_now: u64,
+    verified_chain: Option<&[CertificateDer<'static>]>,
+    crls_now: &[CertRevocationList<'_>],
+    roots: &RootCertStore,
+    key_usage: KeyUsage,
+    established: UnixTime,
+) -> bool {
+    if gen_now == gen_before {
+        return false; // No reload raced this registration
+    }
+    let Some(chain) = verified_chain else {
+        return false; // connection wasn't tracked
+    };
+    let Some((end_entity, intermediates)) = chain.split_first() else {
+        return false; // should never happen if chain is not None
+    };
+    matches!(
+        verify_cert_chain(
+            end_entity,
+            intermediates,
+            roots,
+            established,
+            key_usage,
+            crls_now,
+        ),
+        Err(webpki::Error::CertRevoked)
+    )
+}
+
 pub struct VerifiedChain {
     /// Verified intermediates, leaf-adjacent first. Excludes the end-entity and the trust anchor.
     pub intermediates: Vec<CertificateDer<'static>>,
@@ -392,14 +426,15 @@ impl RevocationIndex {
             }
         };
 
-        // changed generation means a crl reload happened since verify and insert above executed.
-        // re-check with the verified chain against the current set now that we're inserted.
+        // changed generation means a crl reload happened since verify + insert above executed, so
+        // `navigate` may have run before this leaf was inserted and missed it.
+        // re-check the verified chain against the current CRLs now that we're inserted, and drop if it is now revoked.
         if tracked.is_some()
-            && crl_manager.generation() != gen_before
-            && let Some(chain) = verified_chain.as_deref()
-            && chain_is_revoked(
-                crl_manager,
-                chain,
+            && revoked_after_reload(
+                gen_before,
+                crl_manager.generation(),
+                verified_chain.as_deref(),
+                &crl_manager.get_crls(),
                 &conn.roots,
                 conn.key_usage,
                 conn.established,
@@ -1258,6 +1293,71 @@ mod tests {
         )
         .await
         .expect("register-time self-check must close an already-revoked connection");
+    }
+
+    /// register-time re-check decision (`revoked_after_reload`) only fires when a CRL reload
+    /// bumped the generation since the pre-verify snapshot and the verified chain is revoked under
+    /// the current CRLs — i.e. covers the register/navigate race window.
+    #[test]
+    fn revoked_after_reload_decision() {
+        let root = gen_ca("test-root", 1);
+        let leaf = gen_leaf("spiffe://td/ns/n/sa/a", 2);
+        let mut roots = RootCertStore::empty();
+        roots.add(self_signed(&root)).unwrap();
+        let chain = vec![signed_by(&leaf, &root)]; // just leaf
+        let now = UnixTime::now();
+        let ku = KeyUsage::server_auth();
+
+        let revoking = vec![webpki_crl(&root, 2, &[2])]; // revokes the leaf (serial 2)
+        let benign = vec![webpki_crl(&root, 2, &[99])]; // revokes an unrelated serial
+
+        // Reload happened and current CRLs revoke the chain
+        assert!(revoked_after_reload(
+            1,
+            2,
+            Some(&chain),
+            &revoking,
+            &roots,
+            ku,
+            now
+        ));
+
+        // Reload happened but the current CRLs don't revoke this chain
+        assert!(!revoked_after_reload(
+            1,
+            2,
+            Some(&chain),
+            &benign,
+            &roots,
+            ku,
+            now
+        ));
+        // Reload happened but no CRLs loaded
+        assert!(!revoked_after_reload(
+            1,
+            2,
+            Some(&chain),
+            &[],
+            &roots,
+            ku,
+            now
+        ));
+
+        // No reload since the snapshot (generation unchanged)
+        assert!(!revoked_after_reload(
+            1,
+            1,
+            Some(&chain),
+            &revoking,
+            &roots,
+            ku,
+            now
+        ));
+
+        // Connection wasn't tracked (no verified chain)
+        assert!(!revoked_after_reload(
+            1, 2, None, &revoking, &roots, ku, now
+        ));
     }
 
     /// Validate index can insert, deregister, and prune empty ancestors
