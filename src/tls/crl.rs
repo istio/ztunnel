@@ -19,11 +19,15 @@ use notify_debouncer_full::{
 use rustls::pki_types::CertificateRevocationListDer;
 use rustls_pemfile::Item;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, warn};
 use webpki::{CertRevocationList, OwnedCertRevocationList};
+
+use crate::proxy::Metrics;
+use crate::tls::revocation::{ConnRegistration, RevocationHandle, RevocationIndex};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CrlError {
@@ -38,14 +42,14 @@ pub enum CrlError {
 }
 
 #[derive(Clone)]
-/// NOTE: For **inbound** mesh TLS, `ServerConfig` is rebuilt when the workload certificate
-/// refreshes (~12h), so CRL changes apply on that cadence unless the server config path changes.
-///
-/// For **outbound** mesh TLS, [`crate::tls::WorkloadCertificate::outbound_connector`] calls
-/// [`CrlManager::get_crls`] when building each new client connector (e.g. new HBONE pool
-/// connections), so CRL file updates apply to new handshakes without waiting for cert rotation.
+/// CRLs are enforced on both inbound and outbound connections.
+/// Existing connections are tracked in the index and applicable ones are re-verified after a CRL load event.
 pub struct CrlManager {
     inner: Arc<RwLock<CrlManagerInner>>,
+    /// Existing connection enforcement index. CRL reload path drives navigation.
+    index: RevocationIndex,
+    /// Monotonic counter bumped on every CRL set reload
+    generation: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for CrlManager {
@@ -55,12 +59,14 @@ impl std::fmt::Debug for CrlManager {
 }
 
 struct CrlManagerInner {
-    /// Pre-parsed CRLs for webpki's RevocationOptionsBuilder, avoiding DER re-parse and mem alloc for every outbound handshake.
+    /// Pre-parsed CRLs for webpki's RevocationOptionsBuilder,
+    /// avoiding DER re-parse and mem alloc for every outbound handshake and exising connection verification.
     /// None = not loaded, Some = loaded (may be empty).
     crls: Option<Arc<Vec<CertRevocationList<'static>>>>,
-    /// CRLs as DER bytes for rustls's with_crls() on inbound mesh TLS connections.
+    /// Pre-parsed CRL DERs for rustls's with_crls(),
+    /// avoiding DER re-parse and mem alloc on `ServerConfig` creation for new inbound mesh TLS connections.
     /// None = not loaded, Some = loaded (may be empty)
-    crl_ders: Option<Vec<Vec<u8>>>,
+    crl_ders: Option<Arc<Vec<CertificateRevocationListDer<'static>>>>,
     crl_path: PathBuf,
     // WARNING: must use FileIdMap, NOT NoCache. Kubernetes secret/configmap volume updates
     // use atomic symlink swaps — FileIdMap tracks inode identity across renames so these
@@ -69,8 +75,9 @@ struct CrlManagerInner {
 }
 
 impl CrlManager {
-    /// creates a new CRL manager
-    pub fn new(crl_path: PathBuf) -> Result<Self, CrlError> {
+    /// creates a new CRL manager. `metrics` is used by the owned [`RevocationIndex`] to record
+    /// existing-connection revocations.
+    pub fn new(crl_path: PathBuf, metrics: Arc<Metrics>) -> Result<Self, CrlError> {
         debug!(path = ?crl_path, "initializing crl manager");
 
         let manager = Self {
@@ -80,6 +87,8 @@ impl CrlManager {
                 crl_path: crl_path.clone(),
                 _debouncer: None,
             })),
+            index: RevocationIndex::new(metrics),
+            generation: Arc::new(AtomicU64::new(0)),
         };
 
         // try to load the CRL, but don't fail if the file doesn't exist yet
@@ -102,73 +111,113 @@ impl CrlManager {
         Ok(manager)
     }
 
-    pub fn load_crl(&self) -> Result<(), CrlError> {
-        let mut inner = self.inner.write().unwrap();
+    /// Track an existing connection for CRL revocation enforcement, returning its [`RevocationHandle`].
+    pub fn register(&self, conn: ConnRegistration) -> RevocationHandle {
+        self.index.register(self, conn)
+    }
 
-        let data = std::fs::read(&inner.crl_path)?;
+    /// Reloads the CRL set from disk and, on success, re-evaluates existing connections against the new set.
+    pub fn load_crl(&self) -> Result<(), CrlError> {
+        let res = self.reload_crl_data();
+        if res.is_ok() {
+            self.index.navigate(self);
+        }
+        res
+    }
+
+    /// Reloads and re-parses the CRL set, replacing the cached set.
+    fn reload_crl_data(&self) -> Result<(), CrlError> {
+        // Snapshot the path under a brief read lock, then release it before blocking on I/O.
+        let crl_path = self.inner.read().unwrap().crl_path.clone();
+
+        let (crls, crl_ders) = Self::parse_crl_file(&crl_path)?;
+
+        // Swap in the finished set under a brief write lock.
+        {
+            let mut inner = self.inner.write().unwrap();
+            inner.crls = Some(Arc::new(crls));
+            inner.crl_ders = Some(Arc::new(crl_ders));
+        }
+        // bump generation so connections being simultaneously registered re-verify
+        self.generation.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+
+    /// Current CRL-reload generation.
+    /// Bumped by [`Self::reload_crl_data`] on every reload.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Reads and parses the CRL file into webpki's pre-parsed form.
+    /// An empty file — or one with no CRL blocks — is valid and yields an empty set (no revocations)
+    fn parse_crl_file(
+        crl_path: &Path,
+    ) -> Result<
+        (
+            Vec<CertRevocationList<'static>>,
+            Vec<CertificateRevocationListDer<'static>>,
+        ),
+        CrlError,
+    > {
+        let data = std::fs::read(crl_path)?;
 
         // empty file means no revocations - this is valid
         if data.is_empty() {
-            debug!(path = ?inner.crl_path, "crl file is empty, treating as no revocations");
-            inner.crl_ders = Some(Vec::new());
-            inner.crls = Some(Arc::new(Vec::new()));
-            return Ok(());
+            debug!(path = ?crl_path, "crl file is empty, treating as no revocations");
+            return Ok((Vec::new(), Vec::new()));
         }
 
         // parse all CRL blocks (handles concatenated CRLs)
         let is_pem = data.starts_with(b"-----BEGIN");
-        let der_crls = if is_pem {
+        let der_crls: Vec<CertificateRevocationListDer<'static>> = if is_pem {
             Self::parse_pem_crls(&data)?
         } else {
-            vec![data]
+            vec![CertificateRevocationListDer::from(data)]
         };
 
         // empty PEM file (no CRL blocks) means no revocations
         if der_crls.is_empty() {
-            debug!(path = ?inner.crl_path, "no crl blocks found, treating as no revocations");
-            inner.crl_ders = Some(Vec::new());
-            inner.crls = Some(Arc::new(Vec::new()));
-            return Ok(());
+            debug!(path = ?crl_path, "no crl blocks found, treating as no revocations");
+            return Ok((Vec::new(), Vec::new()));
         }
 
-        let mut validated_ders = Vec::with_capacity(der_crls.len());
+        let mut validated_ders: Vec<CertificateRevocationListDer<'static>> =
+            Vec::with_capacity(der_crls.len());
         let mut validated_crls: Vec<CertRevocationList<'static>> =
             Vec::with_capacity(der_crls.len());
 
-        for (idx, der_data) in der_crls.into_iter().enumerate() {
-            // parse with webpki to catch errors early and to keep parsed form for outbound verifier hot path.
-            // rustls with_crls() will use the raw DER bytes directly
-            let owned = OwnedCertRevocationList::from_der(&der_data).map_err(|e| {
+        for (idx, crl_der) in der_crls.into_iter().enumerate() {
+            // parse with webpki to catch errors early and to keep parsed form for new outbound and existing conns verifier hot path.
+            // rustls with_crls() takes the pre-wrapped DER directly for new inbound connections.
+            let owned = OwnedCertRevocationList::from_der(crl_der.as_ref()).map_err(|e| {
                 CrlError::WebPkiError(format!("failed to parse crl {}: {:?}", idx + 1, e))
             })?;
 
-            validated_ders.push(der_data);
+            validated_ders.push(crl_der);
             // Owned variant borrows nothing, so the lifetime can be 'static
             validated_crls.push(CertRevocationList::from(owned));
         }
 
-        // store validated DER bytes
-        let count = validated_ders.len();
-        inner.crl_ders = Some(validated_ders);
-        inner.crls = Some(Arc::new(validated_crls));
-
         debug!(
-            path = ?inner.crl_path,
+            path = ?crl_path,
             format = if is_pem { "PEM" } else { "DER" },
-            count = count,
+            count = validated_crls.len(),
             "crl loaded successfully"
         );
-        Ok(())
+        Ok((validated_crls, validated_ders))
     }
 
     /// parses PEM-encoded CRL data that may contain multiple CRL blocks
     /// returns a Vec of DER-encoded CRLs (empty vec if no blocks found)
-    fn parse_pem_crls(pem_data: &[u8]) -> Result<Vec<Vec<u8>>, CrlError> {
+    fn parse_pem_crls(
+        pem_data: &[u8],
+    ) -> Result<Vec<CertificateRevocationListDer<'static>>, CrlError> {
         let mut reader = std::io::BufReader::new(Cursor::new(pem_data));
 
         rustls_pemfile::read_all(&mut reader)
             .filter_map(|result| match result {
-                Ok(Item::Crl(crl)) => Some(Ok(crl.to_vec())),
+                Ok(Item::Crl(crl)) => Some(Ok(crl)),
                 Ok(_) => None, // skip non-CRL items
                 Err(e) => Some(Err(CrlError::ParseError(format!(
                     "failed to parse PEM: {}",
@@ -178,39 +227,29 @@ impl CrlManager {
             .collect()
     }
 
-    /// returns CRLs as DER bytes for rustls's with_crls().
+    /// returns the pre-wrapped CRL DERs for rustls's with_crls().
+    /// callers should `.iter().cloned()` to feed `WebPkiClientVerifier::builder().with_crls(...)`.
     /// if no CRLs are loaded, attempts to load them first.
-    pub fn get_crl_ders(&self) -> Vec<CertificateRevocationListDer<'static>> {
+    pub fn get_crl_ders(&self) -> Arc<Vec<CertificateRevocationListDer<'static>>> {
         let inner = self.inner.read().unwrap();
         if let Some(ref crl_ders) = inner.crl_ders {
-            // already loaded, use existing lock directly
-            crl_ders
-                .iter()
-                .map(|der| CertificateRevocationListDer::from(der.clone()))
-                .collect()
+            return crl_ders.clone();
+        }
+        drop(inner);
+        debug!("crl not loaded, attempting to load now");
+        if let Err(e) = self.reload_crl_data() {
+            debug!(error = %e, "failed to load crl");
+            return Arc::new(Vec::new());
+        }
+        let inner = self.inner.read().unwrap();
+        if let Some(ref crl_ders) = inner.crl_ders {
+            crl_ders.clone()
         } else {
-            // not loaded yet, drop lock to call load_crl()
-            drop(inner);
-            debug!("crl not loaded, attempting to load now");
-            if let Err(e) = self.load_crl() {
-                debug!(error = %e, "failed to load crl");
-                return Vec::new();
-            }
-            // re-acquire after loading
-            let inner = self.inner.read().unwrap();
-            inner
-                .crl_ders
-                .as_ref()
-                .map(|ders| {
-                    ders.iter()
-                        .map(|der| CertificateRevocationListDer::from(der.clone()))
-                        .collect()
-                })
-                .unwrap_or_default()
+            Arc::new(Vec::new())
         }
     }
 
-    /// returns the pre-parsed CRLs for use by the outbound verifier.
+    /// returns the pre-parsed CRLs for use by the webpki verifier.
     /// callers should `.iter().collect()` to get `Vec<&CertRevocationList>` for `RevocationOptionsBuilder::new.
     /// if no CRLs are loaded, attempts to load them first.
     pub fn get_crls(&self) -> Arc<Vec<CertRevocationList<'static>>> {
@@ -220,7 +259,7 @@ impl CrlManager {
         }
         drop(inner);
         debug!("crl not loaded, attempting to load now");
-        if let Err(e) = self.load_crl() {
+        if let Err(e) = self.reload_crl_data() {
             debug!(error = %e, "failed to load crl");
             return Arc::new(Vec::new());
         }
@@ -307,12 +346,16 @@ impl CrlManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::helpers::test_proxy_metrics;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     #[test]
     fn test_crl_manager_missing_file() {
-        let result = CrlManager::new(PathBuf::from("/nonexistent/path/crl.pem"));
+        let result = CrlManager::new(
+            PathBuf::from("/nonexistent/path/crl.pem"),
+            test_proxy_metrics(),
+        );
         assert!(result.is_ok(), "should handle missing CRL file gracefully");
     }
 
@@ -323,7 +366,7 @@ mod tests {
             .expect("failed to write test data to temporary file");
         file.flush().expect("failed to flush temporary test file");
 
-        let result = CrlManager::new(file.path().to_path_buf());
+        let result = CrlManager::new(file.path().to_path_buf(), test_proxy_metrics());
         assert!(result.is_err(), "should fail on invalid CRL data");
     }
 
@@ -332,7 +375,7 @@ mod tests {
         let file = NamedTempFile::new().expect("failed to create temporary test file");
         // file is empty by default
 
-        let result = CrlManager::new(file.path().to_path_buf());
+        let result = CrlManager::new(file.path().to_path_buf(), test_proxy_metrics());
         assert!(result.is_ok(), "should handle empty CRL file gracefully");
     }
 
@@ -383,10 +426,13 @@ mod tests {
         file.flush().expect("failed to flush temporary test file");
 
         // test that CrlManager can load it
-        let manager = CrlManager::new(file.path().to_path_buf())
+        let manager = CrlManager::new(file.path().to_path_buf(), test_proxy_metrics())
             .expect("should successfully parse valid CRL");
 
         let ders = manager.get_crl_ders();
-        assert_eq!(ders.len(), 1, "should have loaded one CRL");
+        assert_eq!(ders.len(), 1, "should have loaded one CRL DER");
+
+        let crls = manager.get_crls();
+        assert_eq!(crls.len(), 1, "should have loaded one CRL");
     }
 }

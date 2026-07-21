@@ -14,13 +14,14 @@
 
 use futures_util::TryFutureExt;
 use http::{Method, Response, StatusCode};
+use rustls::CommonState;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 use tls_listener::AsyncTls;
 use tokio::sync::watch;
 
-use tracing::{Instrument, debug, error, info, info_span, trace_span};
+use tracing::{Instrument, debug, error, info, info_span, trace_span, warn};
 
 use super::{
     ConnectionResult, ConnectionResultBuilder, Error, HboneAddress, LocalWorkloadInformation,
@@ -149,6 +150,9 @@ impl Inbound {
                     };
                     debug!(%conn, "accepted connection");
                     let cfg = pi.cfg.clone();
+                    // Enforce CRL revocation on this existing connection when a CRL is configured
+                    let revocation = Box::pin(Self::build_revocation(&pi, ssl)).await;
+                    let revoked_rx = revocation.as_ref().map(|r| r.subscribe_revoked());
                     let request_handler = move |req| {
                         let id = Self::extract_traceparent(&req);
                         let peer = conn.src;
@@ -156,6 +160,7 @@ impl Inbound {
                             pi.clone(),
                             conn.clone(),
                             self.enable_orig_src,
+                            revoked_rx.clone(),
                             req,
                         )
                         .instrument(info_span!("inbound", %id, %peer));
@@ -169,6 +174,7 @@ impl Inbound {
                         tls,
                         drain,
                         force_shutdown,
+                        revocation,
                         request_handler,
                     );
                     // This is per HBONE connection, so while would be nice to be small, at least it
@@ -178,7 +184,7 @@ impl Inbound {
                 };
                 // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
                 // and measured above.
-                assertions::size_between_ref(1000, 1600, &serve_client);
+                assertions::size_between_ref(1000, 1650, &serve_client);
                 tokio::task::spawn(serve_client.in_current_span());
             }
         };
@@ -190,6 +196,32 @@ impl Inbound {
             accept,
         )
         .await
+    }
+
+    /// Builds this connection's CRL revocation state, or `None` when CRL enforcement is disabled.
+    /// Kept as its own `async fn` (and boxed at the call site) so the `fetch_certificate` await
+    /// doesn't grow the size of the caller's future.
+    async fn build_revocation(
+        pi: &ProxyInputs,
+        ssl: &CommonState,
+    ) -> Option<crate::tls::revocation::RevocationHandle> {
+        let crl_manager = pi.crl_manager.as_ref()?;
+        match pi.local_workload_information.fetch_certificate().await {
+            Ok(cert) => Some(crl_manager.register(
+                crate::tls::revocation::ConnRegistration::from_conn(
+                    ssl,
+                    cert.root_store(),
+                    webpki::KeyUsage::client_auth(),
+                    crate::proxy::metrics::Reporter::destination,
+                ),
+            )),
+            Err(e) => {
+                warn!("failed to fetch certificate for CRL revocation enforcement: {e}");
+                pi.metrics
+                    .record_crl_untracked_connection(crate::proxy::metrics::Reporter::destination);
+                None
+            }
+        }
     }
 
     fn extract_traceparent(req: &H2Request) -> TraceParent {
@@ -206,6 +238,7 @@ impl Inbound {
         pi: Arc<ProxyInputs>,
         conn: Connection,
         enable_original_source: bool,
+        revoked: Option<watch::Receiver<bool>>,
         req: H2Request,
     ) {
         let src = conn.src;
@@ -344,7 +377,7 @@ impl Inbound {
                 .instrument(trace_span!("hbone server"))
                 .await
             });
-        let res = handle_connection!(conn_guard, send);
+        let res = handle_connection!(conn_guard, revoked, send);
         ri.result_tracker.record(res);
     }
 

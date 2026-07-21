@@ -99,11 +99,22 @@ impl ConnSpawner {
             }
         })?;
         trace!("connector connected, handshaking");
+        // Enforce CRL revocation on this tunnel for its whole lifetime
+        let revocation = self.crl_manager.as_ref().map(|crl_manager| {
+            let (_, ssl) = tls_stream.get_ref();
+            crl_manager.register(crate::tls::revocation::ConnRegistration::from_conn(
+                ssl,
+                cert.root_store(),
+                webpki::KeyUsage::server_auth(),
+                crate::proxy::metrics::Reporter::source,
+            ))
+        });
         let sender = h2::client::spawn_connection(
             self.cfg.clone(),
             tls_stream,
             self.timeout_rx.clone(),
             key,
+            revocation,
         )
         .await?;
         Ok(sender)
@@ -382,10 +393,13 @@ impl WorkloadHBONEPool {
         &mut self,
         workload_key: &WorkloadKey,
         request: http::Request<()>,
-    ) -> Result<(H2Stream, Option<Baggage>), Error> {
+    ) -> Result<(H2Stream, Option<Baggage>, Option<watch::Receiver<bool>>), Error> {
         let mut connection = self.connect(workload_key).await?;
 
-        connection.send_request(request).await
+        // Surface the tunnel's revocation signal so the caller can attribute a revoked teardown.
+        let revoked = connection.revoked_receiver();
+        let (stream, baggage) = connection.send_request(request).await?;
+        Ok((stream, baggage, revoked))
     }
 
     // Obtain a pooled connection. Will prefer to retrieve an existing conn from the pool, but
@@ -622,7 +636,7 @@ mod test {
                 .unwrap()
         };
 
-        let (c, _baggage) = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
+        let (c, _baggage, _) = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
         let mut c = TokioH2Stream::new(c);
         c.write_all(b"abcde").await.unwrap();
         let mut b = [0u8; 100];

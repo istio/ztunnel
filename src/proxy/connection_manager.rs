@@ -27,7 +27,32 @@ use crate::drain::{DrainTrigger, DrainWatcher};
 use crate::state::workload::{InboundProtocol, OutboundProtocol};
 use std::sync::Arc;
 use std::sync::RwLock;
+use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
+
+/// Future for a per-connection CRL revocation signal, used by [`handle_connection!`] as a
+/// `select!` arm alongside the RBAC drain. Resolves only when `rx`'s value flips to `true` (an
+/// actual revocation). `None` (e.g. plaintext passthrough, which has no client cert), a dropped
+/// sender, or a value that never becomes `true` all pend forever, so the connection's
+/// normal-completion arm wins instead of mis-attributing teardown as a revocation.
+///
+/// A `watch` is deliberately used here rather than the `drain` paradigm: a dropped `drain` signal
+/// resolves its watchers (`wait_for_drain` yields `Immediate`), which would mis-attribute every
+/// normal connection teardown as a revocation. A `watch` value distinguishes an explicit signal
+/// from a drop.
+pub async fn await_revocation(rx: Option<watch::Receiver<bool>>) {
+    match rx {
+        None => std::future::pending().await,
+        Some(mut rx) => loop {
+            if *rx.borrow_and_update() {
+                return;
+            }
+            if rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        },
+    }
+}
 
 struct ConnectionDrain {
     // TODO: this should almost certainly be changed to a type which has counted references exposed.
@@ -87,14 +112,29 @@ pub struct ConnectionGuard {
 // Inlining it removes this entirely, and the macro ensures we do it consistently across the various areas we use it.
 #[macro_export]
 macro_rules! handle_connection {
-    ($connguard:expr, $future:expr) => {{
+    // `$crl_revoked` is an `Option<tokio::sync::watch::Receiver<bool>>`: the per-connection CRL
+    // revocation signal (`None` when no client cert / no CRL, e.g. plaintext passthrough). The two
+    // termination arms mirror each other — the RBAC drain yields `AuthorizationPolicyLateRejection`
+    // and a CRL revocation yields `CertificateRevoked` — so the existing `record(res)` attributes
+    // either via `extract_failure_reason` with no call-site conditionals.
+    ($connguard:expr, $crl_revoked:expr, $future:expr) => {{
         let watch = $connguard.watcher();
+        // `biased` with the termination arms first makes attribution deterministic.
+        // Both signals are set *before* the connection is torn down,
+        // so polling them ahead of `$future` guarantees a revocation/late-rejection
+        // wins the race rather than the generic teardown error.
         tokio::select! {
+            biased;
+            _ = $crate::proxy::connection_manager::await_revocation($crl_revoked) => {
+                // crl revocation signal originates in `RevocationIndex`, not `ConnectionManager` so release explicitly
+                $connguard.release();
+                Err(Error::CertificateRevoked)
+            }
+            _signaled = watch.wait_for_drain() => Err(Error::AuthorizationPolicyLateRejection),
             res = $future => {
                 $connguard.release();
                 res
             }
-            _signaled = watch.wait_for_drain() => Err(Error::AuthorizationPolicyLateRejection)
         }
     }};
 }

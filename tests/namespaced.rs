@@ -1697,6 +1697,201 @@ mod namespaced {
         verify_metrics_compression(&local_zt).await;
         Ok(())
     }
+
+    /// An *already-established* inbound HBONE connection must be abruptly terminated when a CRL
+    /// update (mid-connection) revokes the client workload's certificate, and the server-side
+    /// rejection metric must increment. This exercises existing-connection enforcement, distinct
+    /// from `crl_inbound_rejects_revoked_cert` which only covers rejection at connection open.
+    #[tokio::test]
+    async fn crl_inbound_terminates_existing_connection_on_revocation() -> anyhow::Result<()> {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+        use ztunnel::tls::mock::crl_pem_revoking_cert;
+
+        let mut manager = setup_netns_test!(Shared);
+
+        // deploy the client-side ztunnel first so we can read the client workload cert it presents
+        // to the server during HBONE mTLS, and pre-build the CRL that revokes it.
+        let client_zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        let revoked_cert = client_zt
+            .cert_manager
+            .fetch_certificate(&identity::Identity::from_parts(
+                identity::DEFAULT_TRUST_DOMAIN.into(),
+                "default".into(),
+                "client".into(),
+            ))
+            .await?;
+        let crl_pem = crl_pem_revoking_cert(&revoked_cert.cert.serial_bytes());
+        // initial crl file is empty so connection is established successfully
+        // we revoke the client cert mid-connection by writing to this file below.
+        let mut crl_file = NamedTempFile::new()?;
+        let crl_path = crl_file.path().to_path_buf();
+
+        let server_zt = manager
+            .deploy_dedicated_ztunnel(
+                REMOTE_NODE,
+                Some(config::Config {
+                    crl_path: Some(crl_path),
+                    ..config::parse_config().unwrap()
+                }),
+                None,
+            )
+            .await?;
+
+        // create server workload requests are sent to and register it
+        run_tcp_server(
+            manager
+                .workload_builder("server", REMOTE_NODE)
+                .hbone()
+                .register()
+                .await?,
+        )?;
+        // create client workload that sends requests and register it
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+        let srv = resolve_target(manager.resolver(), "server");
+
+        // hold a connection open and drive round-trips on demand
+        let (mut tx, rx) = mpsc_ack(1);
+        let client_join_handle = run_long_running_tcp_client(&client, rx, srv)?;
+
+        // initial round-trip succeeds: the connection is established and the cert is not yet revoked
+        info!("initial connection should succeed, CRL is currently empty");
+        tx.send_and_wait(()).await?;
+
+        // revoke client cert by writing the pre-built CRL into the file watched by the server ztunnel
+        info!("revoking client cert and waiting for CRL to update");
+        crl_file.write_all(crl_pem.as_bytes())?;
+        crl_file.flush()?;
+
+        // Eventually (after the CRL file-watcher debounce (~2s) + reload + teardown propagation),
+        // the server ztunnel records the rejection via the existing-connection teardown path
+        // (reporter=destination).
+        info!("verifying CRL metric eventually increments for the existing revoked connection");
+        let metric_labels = destination_labels();
+        assert_eventually(
+            Duration::from_secs(10),
+            || async {
+                server_zt
+                    .metrics()
+                    .await
+                    .unwrap()
+                    .query_sum("istio_crl_policy_rejections_total", &metric_labels)
+                    > 0
+            },
+            true,
+        )
+        .await;
+
+        // ...and the held connection is eventually torn down (a round-trip fails).
+        info!("existing connection should be closed due to detected revoked cert");
+        assert_connection_closed_eventually(&mut tx, Duration::from_secs(10)).await;
+        drop(tx);
+        assert!(client_join_handle.join().unwrap().is_err());
+
+        Ok(())
+    }
+
+    /// An *already-established* outbound HBONE tunnel must be abruptly torn down when a CRL update
+    /// (mid-connection) revokes the upstream server workload's certificate, and the source-side
+    /// rejection metric must increment. This exercises outbound existing-connection enforcement,
+    /// distinct from `crl_outbound_rejects_revoked_cert` which only covers rejection at connection
+    /// open.
+    #[tokio::test]
+    async fn crl_outbound_terminates_existing_connection_on_revocation() -> anyhow::Result<()> {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+        use ztunnel::tls::mock::crl_pem_revoking_cert;
+
+        let mut manager = setup_netns_test!(Shared);
+
+        // deploy the server-side ztunnel first so we can read the server workload cert it presents
+        // to the client during HBONE mTLS, and pre-build the CRL that revokes it.
+        let server_zt = manager.deploy_ztunnel(REMOTE_NODE).await?;
+        let revoked_cert = server_zt
+            .cert_manager
+            .fetch_certificate(&identity::Identity::from_parts(
+                identity::DEFAULT_TRUST_DOMAIN.into(),
+                "default".into(),
+                "server".into(),
+            ))
+            .await?;
+        let crl_pem = crl_pem_revoking_cert(&revoked_cert.cert.serial_bytes());
+        // initial crl file is empty so the connection is established successfully; we revoke the
+        // server cert mid-connection by writing to this file below.
+        let mut crl_file = NamedTempFile::new()?;
+        let crl_path = crl_file.path().to_path_buf();
+
+        // deploy the client-side ztunnel with CRL enforcement enabled
+        let client_zt = manager
+            .deploy_dedicated_ztunnel(
+                DEFAULT_NODE,
+                Some(config::Config {
+                    crl_path: Some(crl_path),
+                    ..config::parse_config().unwrap()
+                }),
+                None,
+            )
+            .await?;
+
+        // create the server workload requests are sent to and register it
+        run_tcp_server(
+            manager
+                .workload_builder("server", REMOTE_NODE)
+                .hbone()
+                .register()
+                .await?,
+        )?;
+        // create the client workload that sends requests and register it
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+        let srv = resolve_target(manager.resolver(), "server");
+
+        // hold a connection open and drive round-trips on demand
+        let (mut tx, rx) = mpsc_ack(1);
+        let client_join_handle = run_long_running_tcp_client(&client, rx, srv)?;
+
+        // initial round-trip succeeds: the tunnel is established and the server cert is not yet revoked
+        info!("initial connection should succeed, CRL is currently empty");
+        tx.send_and_wait(()).await?;
+
+        // revoke the server cert by writing the pre-built CRL into the file watched by the client ztunnel
+        info!("revoking server cert and waiting for CRL to update");
+        crl_file.write_all(crl_pem.as_bytes())?;
+        crl_file.flush()?;
+
+        // Eventually (after the CRL file-watcher debounce (~2s) + reload + teardown propagation),
+        // the client ztunnel records the rejection via the existing-connection teardown path
+        // (reporter=source).
+        info!("verifying CRL metric eventually increments for the existing revoked tunnel");
+        let metric_labels = source_labels();
+        assert_eventually(
+            Duration::from_secs(10),
+            || async {
+                client_zt
+                    .metrics()
+                    .await
+                    .unwrap()
+                    .query_sum("istio_crl_policy_rejections_total", &metric_labels)
+                    > 0
+            },
+            true,
+        )
+        .await;
+
+        // ...and the held tunnel is eventually torn down (a round-trip fails).
+        info!("existing connection should be closed due to detected revoked cert");
+        assert_connection_closed_eventually(&mut tx, Duration::from_secs(10)).await;
+        drop(tx);
+        assert!(client_join_handle.join().unwrap().is_err());
+
+        Ok(())
+    }
+
     const TEST_VIP: &str = "10.10.0.1";
     const TEST_VIP2: &str = "10.10.0.2";
     const TEST_VIP3: &str = "10.10.0.3";
@@ -1857,6 +2052,24 @@ mod namespaced {
             }
             telemetry::testing::assert_contains(want);
             verify_metrics_compression(&zt).await;
+        }
+    }
+
+    /// Drives round-trips on a held connection until one fails (the connection has been torn down),
+    /// or panics after `dur`. Polling is required because the idle long-running client only observes
+    /// a server-side teardown when it next attempts a round-trip. `send_and_wait` takes `&mut self`,
+    /// so this can't be expressed via the `Fn`-based `assert_eventually` helper.
+    async fn assert_connection_closed_eventually(tx: &mut MpscAckSender<()>, dur: Duration) {
+        let deadline = tokio::time::Instant::now() + dur;
+        loop {
+            if tx.send_and_wait(()).await.is_err() {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "held connection was not torn down within {dur:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 

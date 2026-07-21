@@ -15,6 +15,7 @@
 use crate::config;
 use crate::drain::DrainWatcher;
 use crate::proxy::Error;
+use crate::tls::revocation::{self, RevocationHandle};
 use bytes::Bytes;
 use futures_util::FutureExt;
 use http::Response;
@@ -99,6 +100,7 @@ pub async fn serve_connection<F, Fut>(
     s: tokio_rustls::server::TlsStream<TcpStream>,
     drain: DrainWatcher,
     mut force_shutdown: watch::Receiver<()>,
+    mut revocation: Option<RevocationHandle>,
     handler: F,
 ) -> Result<(), Error>
 where
@@ -168,6 +170,17 @@ where
                 debug!("starting graceful drain...");
                 conn.graceful_shutdown();
                 break;
+            }
+            // CRL update: revocation is a security event, abruptly terminate (GOAWAY) rather than gracefully drain
+            _ = revocation::wait_for_revocation(revocation.as_mut()) => {
+                if let Some(rev) = revocation.as_ref() {
+                    debug!(
+                        peer = %rev.peer(),
+                        "terminating inbound connection: peer certificate revoked by CRL update"
+                    );
+                    conn.abrupt_shutdown(h2::Reason::NO_ERROR);
+                    break;
+                }
             }
         }
     }
