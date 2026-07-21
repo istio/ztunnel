@@ -269,7 +269,8 @@ type Serial = Vec<u8>;
 
 /// One tracked tunnel, owned by its issuing CA node's `child_leaves`
 struct Leaf {
-    /// cert chain (leaf -> IA(s), no root) exactly as presented at handshake for identical webpki verification
+    /// webpki validated cert chain (leaf -> IA(s), no root), retained for webpki verification
+    /// against updated CRLs during navigation
     chain: Vec<CertificateDer<'static>>,
     established: UnixTime,
     key_usage: KeyUsage,
