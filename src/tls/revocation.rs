@@ -142,6 +142,7 @@ fn chain_is_revoked(
     let Some((end_entity, intermediates)) = chain.split_first() else {
         return false;
     };
+    let crls = crl_manager.get_crls();
     matches!(
         verify_cert_chain(
             end_entity,
@@ -149,7 +150,7 @@ fn chain_is_revoked(
             roots,
             established, // use conn established time instead of current to avoid supurious CertExpired errors
             key_usage,
-            crl_manager
+            &crls
         ),
         Err(webpki::Error::CertRevoked)
     )
@@ -161,19 +162,19 @@ pub struct VerifiedChain {
 }
 
 /// Verifies the peer's certificate chains to a trusted root and, when CRLs are supplied, is not revoked.
+/// Single source of truth shared by the outbound handshake verifier (`IdentityVerifier`) and the
+/// existing-connection CRL re-check.
 pub fn verify_cert_chain(
     end_entity: &CertificateDer<'_>,
     intermediates: &[CertificateDer<'_>],
     roots: &RootCertStore,
     now: UnixTime,
     key_usage: KeyUsage,
-    crl_manager: &CrlManager,
+    crls: &[CertRevocationList<'_>],
 ) -> Result<VerifiedChain, webpki::Error> {
     let algs = provider().signature_verification_algorithms;
     let ee = EndEntityCert::try_from(end_entity)?;
 
-    // get_crls() returns pre-parsed CRLs; the Arc must outlive the borrowed refs below.
-    let crls = crl_manager.get_crls();
     let crl_refs: Vec<&CertRevocationList<'_>> = crls.iter().collect();
 
     let revocation = (!crl_refs.is_empty()).then(|| {
@@ -349,13 +350,14 @@ impl RevocationIndex {
                 None
             }
             Some((leaf, presented_ias)) => {
+                let crls = crl_manager.get_crls();
                 match verify_cert_chain(
                     leaf,
                     presented_ias,
                     &conn.roots,
                     conn.established,
                     conn.key_usage,
-                    crl_manager,
+                    &crls,
                 ) {
                     // insert with the verified chain
                     Ok(verified) => {

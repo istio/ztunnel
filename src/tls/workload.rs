@@ -32,10 +32,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use webpki::{
-    CertRevocationList, EndEntityCert, ExpirationPolicy, KeyUsage, RevocationCheckDepth,
-    RevocationOptionsBuilder, UnknownStatusPolicy,
-};
+use webpki::{CertRevocationList, KeyUsage};
 
 use crate::strng::Strng;
 use crate::tls;
@@ -296,35 +293,20 @@ impl ServerCertVerifier for IdentityVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        let algs = provider().signature_verification_algorithms;
-        let ee = EndEntityCert::try_from(end_entity).map_err(webpki_error_to_rustls)?;
-
-        // must convert from get_crls() returned OwnedCertRevocationList into CertRevocationList<'_> before passing to RevocationOptionsBuilder.
         let crls: Arc<Vec<CertRevocationList<'static>>> = self
             .crl_manager
             .as_deref()
             .map(|mgr| mgr.get_crls())
             .unwrap_or_default();
-        let crl_refs: Vec<&CertRevocationList<'_>> = crls.iter().collect();
 
-        let revocation = (!crl_refs.is_empty()).then(|| {
-            RevocationOptionsBuilder::new(&crl_refs)
-                .expect("non-empty CRL list")
-                .with_depth(RevocationCheckDepth::Chain)
-                .with_status_policy(UnknownStatusPolicy::Allow)
-                .with_expiration_policy(ExpirationPolicy::Ignore)
-                .build()
-        });
-
-        // verifies cert chain
-        ee.verify_for_usage(
-            algs.all,
-            &self.roots.roots,
+        // Shared cert chain + CRL-revocation verification
+        crate::tls::revocation::verify_cert_chain(
+            end_entity,
             intermediates,
+            &self.roots,
             now,
             KeyUsage::server_auth(),
-            revocation,
-            None,
+            &crls,
         )
         .map_err(webpki_error_to_rustls)?;
 

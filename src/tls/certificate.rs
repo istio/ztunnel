@@ -282,7 +282,7 @@ impl WorkloadCertificate {
     }
 
     /// The trust anchors this certificate chains to. Used to re-run the shared webpki
-    /// chain-validation path ([`crate::tls::verifier::verify_cert_chain`]) against a peer chain
+    /// chain-validation path ([`crate::tls::revocation::verify_cert_chain`]) against a peer chain
     /// captured at handshake time, e.g. to re-check CRL revocation on an existing connection.
     pub fn root_store(&self) -> Arc<RootCertStore> {
         self.root_store.clone()
