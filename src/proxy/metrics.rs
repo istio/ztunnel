@@ -407,7 +407,7 @@ impl Metrics {
         let crl_untracked_connections = Family::default();
         registry.register(
             "crl_untracked_connections",
-            "The total number of connections not tracked for CRL existing-connection enforcement because a peer certificate failed to parse (unstable)",
+            "The total number of connections not tracked for CRL enforcement (unstable)",
             crl_untracked_connections.clone(),
         );
 

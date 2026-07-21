@@ -228,9 +228,8 @@ type NodeId = u64;
 /// `u64` so the counter cannot realistically wrap over a long-lived proxy's uptime.
 type LeafId = u64;
 
-/// x509 serial number, stored as the DER `INTEGER` *content* (value, leading `0x00` sign byte included).
+/// raw cert serial number, stored as the DER `INTEGER` content (value, leading `0x00` sign byte included).
 /// used in webpki's [`CertRevocationList::find_serial`] for comparison.
-/// created by x509-parser's `raw_serial()`.
 /// `Vec` to hold all bytes verbatim so serial of any length isn't truncated (false negative).
 type Serial = Vec<u8>;
 
