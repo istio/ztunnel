@@ -48,6 +48,7 @@ use crate::{tls, xds};
 use self::service::discovery::v3::DeltaDiscoveryRequest;
 
 mod client;
+pub(crate) mod freshness_monitor;
 pub mod metrics;
 mod types;
 
