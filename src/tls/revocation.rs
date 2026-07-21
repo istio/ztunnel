@@ -339,15 +339,14 @@ impl RevocationIndex {
         // Verify again to obtain the verified path, and route the index by that instead of the peer's presented chain order.
         // Presented chains can be compromised or non-conforming that still handshake (webpki ignores unused ones)
         // and corrupt index structure causing a missed connection revocation.
-        let mut verified_chain: Option<Vec<CertificateDer<'static>>> = None;
-        let tracked = match conn.presented_chain.split_first() {
+        let (tracked, verified_chain) = match conn.presented_chain.split_first() {
             None => {
                 warn!(
                     peer = conn.peer(),
                     "crl index: peer presented no certificates; connection not tracked"
                 );
                 self.metrics.record_crl_untracked_connection(conn.reporter);
-                None
+                (None, None)
             }
             Some((leaf, presented_ias)) => {
                 let crls = crl_manager.get_crls();
@@ -370,13 +369,12 @@ impl RevocationIndex {
                             tx.clone(),
                             &self.metrics,
                         );
-                        verified_chain = Some(chain);
-                        tracked
+                        (tracked, Some(chain))
                     }
                     // already revoked by current CRLs: drop the connection
                     Err(webpki::Error::CertRevoked) => {
                         drop_revoked(&self.metrics, conn.reporter, &tx);
-                        None
+                        (None, None)
                     }
                     // handshake already verified this chain, so a failure here is unexpected
                     Err(e) => {
@@ -386,7 +384,7 @@ impl RevocationIndex {
                             "crl index: re-verification failed; connection not tracked"
                         );
                         self.metrics.record_crl_untracked_connection(conn.reporter);
-                        None
+                        (None, None)
                     }
                 }
             }
@@ -756,7 +754,7 @@ impl Drop for LeafGuard {
     }
 }
 
-/// Subject DN, issuer DN, and serial extracted from a cert (via x509-parser)
+/// Subject DN, issuer DN, and serial extracted from a cert
 struct CertInfo {
     subject_dn: Dn,
     issuer_dn: Dn,
