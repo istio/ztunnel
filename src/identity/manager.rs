@@ -20,6 +20,8 @@ use std::hash::{Hash, RandomState};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::identity::metrics::{CertExpiryLabels, Metrics as IdentityMetrics};
+
 use crate::config::ProxyMode;
 use async_trait::async_trait;
 
@@ -219,6 +221,7 @@ struct Worker {
     certs: Mutex<HashMap<Identity, CertChannel>>,
     // How many concurrent fetch_certificate calls can be pending at a time.
     concurrency: u16,
+    metrics: Arc<IdentityMetrics>,
 }
 
 impl Worker {
@@ -235,6 +238,7 @@ impl Worker {
             time_conv: cfg.time_conv,
             concurrency: cfg.concurrency,
             certs: Default::default(),
+            metrics: cfg.metrics,
         });
 
         // Process requests in the background. The task will terminate on its own when the
@@ -322,6 +326,11 @@ impl Worker {
                             // managing the Identity. Do nothing.
                             continue 'main;
                         }
+                        // Remove metric to avoid accumilating series from deteled pods
+                        self.metrics
+                            .cert_expiry_seconds
+                            .remove(&CertExpiryLabels{ identity: id.clone() });
+
                         match processing.get(&id) {
                             None => {
                                 pending.remove(&id);
@@ -424,6 +433,20 @@ impl Worker {
                                 // conversion here, so for now leaving the code as is.
                                 Instant::now()
                             };
+
+                            let expiry_secs = certs
+                            .cert
+                            .expiration()
+                            .not_after
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+
+                            self.metrics
+                            .cert_expiry_seconds
+                            .get_or_create(&CertExpiryLabels{identity: id.clone()})
+                            .set(expiry_secs);
+
                             (CertState::Available(Arc::new(certs)), refresh_at)
                         },
                     };
@@ -516,6 +539,7 @@ pub enum Request {
 pub struct SecretManagerConfig {
     time_conv: crate::time::Converter,
     concurrency: u16,
+    metrics: Arc<IdentityMetrics>,
 }
 
 // push_increase pushes an item onto the queue if its not present, otherwise updates the priority to the
@@ -569,6 +593,7 @@ impl SecretManager {
             SecretManagerConfig {
                 time_conv: crate::time::Converter::new(),
                 concurrency: 8,
+                metrics: Arc::new(IdentityMetrics::default()),
             },
         )
         .0
@@ -587,6 +612,10 @@ impl SecretManager {
             },
             handle,
         )
+    }
+
+    pub fn cert_metrics(&self) -> &IdentityMetrics {
+        &self.worker.metrics
     }
 
     async fn post(&self, req: Request) {
@@ -707,6 +736,7 @@ pub mod mock {
     use crate::identity::caclient::mock::{self, CaClient as MockCaClient};
 
     use super::SecretManager;
+    use crate::identity::metrics::Metrics as IdentityMetrics;
 
     pub struct Config {
         pub cert_lifetime: Duration,
@@ -737,6 +767,7 @@ pub mod mock {
                 super::SecretManagerConfig {
                     time_conv,
                     concurrency: 2,
+                    metrics: Arc::new(IdentityMetrics::default()),
                 },
             )
             .0,
@@ -752,7 +783,7 @@ pub mod mock {
 
 #[cfg(test)]
 mod tests {
-    use std::time;
+    use std::time::{self, SystemTime, UNIX_EPOCH};
 
     use matches::assert_matches;
 
@@ -907,6 +938,7 @@ mod tests {
             SecretManagerConfig {
                 time_conv,
                 concurrency,
+                metrics: Arc::new(IdentityMetrics::default()),
             },
         );
         Test {
@@ -1235,5 +1267,46 @@ mod tests {
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/sa"), Err(_));
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/sa/sa/"), Err(_));
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/foobar/sa/"), Err(_));
+    }
+
+    #[tokio::test]
+    async fn test_cert_expiry_metric_updated_on_fetch() {
+        let test = setup(1);
+        let id = identity("test-cert-expiry");
+
+        test.secret_manager
+            .fetch_certificate(&id)
+            .await
+            .expect("fetch failed");
+
+        let labels = CertExpiryLabels {
+            identity: id.clone(),
+        };
+        let expiry = test
+            .secret_manager
+            .cert_metrics()
+            .cert_expiry_seconds
+            .get_or_create(&labels)
+            .get();
+
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(expiry > now_secs, "cert expiry should be in the future");
+
+        // clone family before tear_down
+        let family = test
+            .secret_manager
+            .cert_metrics()
+            .cert_expiry_seconds
+            .clone();
+
+        test.secret_manager.forget_certificate(&id).await;
+        // ensure forget has been processed
+        test.tear_down().await;
+
+        let after_forget = family.get_or_create(&labels).get();
+        assert_eq!(after_forget, 0, "metric should be zero after forget");
     }
 }
