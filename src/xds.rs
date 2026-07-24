@@ -672,7 +672,6 @@ mod tests {
             addresses: vec![XdsNetworkAddress {
                 network: "".to_string(),
                 address: Ipv4Addr::new(127, 0, 1, 1).octets().to_vec(),
-                length: None,
             }],
             ports: vec![Port {
                 service_port: 80,
