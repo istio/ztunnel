@@ -1621,11 +1621,10 @@ mod tests {
         assert_eq!(store.endpoint_reindexes(), 0);
     }
 
-    // A workload re-insertion puts the same uid in both removals and upserts in
-    // one batch. Removals are applied before upserts, so when the new endpoint
-    // is health-filtered out the stale one is still dropped.
+    // A workload going unhealthy on re-insertion (same uid in both the removal and
+    // the upsert) must still evict its previously-healthy endpoint.
     #[test]
-    fn apply_endpoints_present_removal_before_filtered_upsert() {
+    fn apply_endpoints_present_unhealthy_reinsert_evicts() {
         let mut store = ServiceStore::default();
         let host = nshost("svc", "ns");
 
