@@ -955,6 +955,21 @@ mod tests {
         IpAddr::V6(Ipv6Addr::from(segments))
     }
 
+    fn nshost(name: &str, ns: &str) -> NamespacedHostname {
+        NamespacedHostname {
+            namespace: ns.into(),
+            hostname: format!("{name}.{ns}.svc.cluster.local").into(),
+        }
+    }
+
+    fn endpoint(uid: &str, status: HealthStatus) -> Endpoint {
+        Endpoint {
+            workload_uid: uid.into(),
+            port: HashMap::new(),
+            status,
+        }
+    }
+
     #[test]
     fn shared_vip_different_namespaces() {
         let mut store = ServiceStore::default();
@@ -1543,5 +1558,98 @@ mod tests {
             .get_best_by_vip(&nw(ip(10, 0, 1, 5)), Some(&ns_other))
             .unwrap();
         assert_eq!(svc.name, "local");
+    }
+
+    // Endpoints arriving before their service are staged, not reindexed, until the
+    // service materializes; on flush the unhealthy one is filtered out.
+    #[test]
+    fn apply_endpoints_stages_and_filters_on_flush() {
+        let mut store = ServiceStore::default();
+        let host = nshost("svc", "ns");
+
+        let mut upserts = HashMap::new();
+        upserts.insert(
+            "ep-healthy".into(),
+            endpoint("ep-healthy", HealthStatus::Healthy),
+        );
+        upserts.insert(
+            "ep-unhealthy".into(),
+            endpoint("ep-unhealthy", HealthStatus::Unhealthy),
+        );
+        store.apply_endpoints(&host, upserts, HashSet::new());
+
+        // Staged, not applied: no service exists yet, so nothing is reindexed.
+        assert_eq!(store.num_staged_services(), 1);
+        assert_eq!(store.endpoint_reindexes(), 0);
+        assert!(store.get_by_namespaced_host(&host).is_none());
+
+        // Once the service arrives, staged endpoints are flushed and the unhealthy
+        // one is filtered out.
+        store.insert(make_service("svc", "ns", vec![ip(10, 0, 0, 1)], vec![]));
+        assert_eq!(store.num_staged_services(), 0);
+        let svc = store.get_by_namespaced_host(&host).unwrap();
+        assert_eq!(svc.endpoints.len(), 1);
+        assert!(svc.endpoints.contains(&"ep-healthy".into()));
+        assert!(!svc.endpoints.contains(&"ep-unhealthy".into()));
+    }
+
+    // Removals against staged (not-yet-received) services: pruning an entry keeps
+    // the service key staged, emptying the staged map drops the key, and a removal
+    // with nothing staged is a no-op (no panic, no empty entry created).
+    #[test]
+    fn apply_endpoints_staged_removals() {
+        let mut store = ServiceStore::default();
+        let host = nshost("svc", "ns");
+
+        let mut upserts = HashMap::new();
+        upserts.insert("ep1".into(), endpoint("ep1", HealthStatus::Healthy));
+        upserts.insert("ep2".into(), endpoint("ep2", HealthStatus::Healthy));
+        store.apply_endpoints(&host, upserts, HashSet::new());
+        assert_eq!(store.num_staged_services(), 1);
+
+        // Remove one of two staged endpoints: the service key remains staged.
+        store.apply_endpoints(&host, HashMap::new(), HashSet::from(["ep1".into()]));
+        assert_eq!(store.num_staged_services(), 1);
+
+        // Removing the last staged endpoint drops the staged service entirely.
+        store.apply_endpoints(&host, HashMap::new(), HashSet::from(["ep2".into()]));
+        assert_eq!(store.num_staged_services(), 0);
+
+        // Removing again with nothing staged is a no-op: no empty entry created.
+        store.apply_endpoints(&host, HashMap::new(), HashSet::from(["missing".into()]));
+        assert_eq!(store.num_staged_services(), 0);
+        assert_eq!(store.endpoint_reindexes(), 0);
+    }
+
+    // A workload going unhealthy on re-insertion (same uid in both the removal and
+    // the upsert) must still evict its previously-healthy endpoint.
+    #[test]
+    fn apply_endpoints_present_unhealthy_reinsert_evicts() {
+        let mut store = ServiceStore::default();
+        let host = nshost("svc", "ns");
+
+        // Service present, with a healthy endpoint already applied.
+        store.insert(make_service("svc", "ns", vec![ip(10, 0, 0, 1)], vec![]));
+        let mut upserts = HashMap::new();
+        upserts.insert("ep1".into(), endpoint("ep1", HealthStatus::Healthy));
+        store.apply_endpoints(&host, upserts, HashSet::new());
+        assert_eq!(store.endpoint_reindexes(), 1);
+        assert!(
+            store
+                .get_by_namespaced_host(&host)
+                .unwrap()
+                .endpoints
+                .contains(&"ep1".into())
+        );
+
+        // Re-insertion of the same uid, now unhealthy: the removal drops the stale
+        // endpoint and the unhealthy upsert is filtered out, so ep1 disappears.
+        let mut upserts = HashMap::new();
+        upserts.insert("ep1".into(), endpoint("ep1", HealthStatus::Unhealthy));
+        store.apply_endpoints(&host, upserts, HashSet::from(["ep1".into()]));
+        assert_eq!(store.endpoint_reindexes(), 2);
+        let svc = store.get_by_namespaced_host(&host).unwrap();
+        assert_eq!(svc.endpoints.len(), 0);
+        assert!(!svc.endpoints.contains(&"ep1".into()));
     }
 }
