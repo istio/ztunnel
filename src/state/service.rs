@@ -1652,4 +1652,36 @@ mod tests {
         assert_eq!(svc.endpoints.len(), 0);
         assert!(!svc.endpoints.contains(&"ep1".into()));
     }
+
+    // A healthy re-upsert of an already-present uid (same uid in both the removal and the upsert) must
+    // leave the new endpoint in place.
+    #[test]
+    fn apply_endpoints_present_removal_applied_before_upsert() {
+        let mut store = ServiceStore::default();
+        let host = nshost("svc", "ns");
+
+        // Service present, with the original endpoint (port 80 -> 8080).
+        store.insert(make_service("svc", "ns", vec![ip(10, 0, 0, 1)], vec![]));
+        let mut old = endpoint("ep1", HealthStatus::Healthy);
+        old.port = HashMap::from([(80, 8080)]);
+        store.apply_endpoints(&host, HashMap::from([("ep1".into(), old)]), HashSet::new());
+
+        // Same uid removed and re-upserted (healthy) in one batch, now port 90 -> 9090.
+        let mut new = endpoint("ep1", HealthStatus::Healthy);
+        new.port = HashMap::from([(90, 9090)]);
+        store.apply_endpoints(
+            &host,
+            HashMap::from([("ep1".into(), new)]),
+            HashSet::from(["ep1".into()]),
+        );
+
+        // The new endpoint survives (not deleted by its own removal) and reflects
+        // the upsert, not the stale port mapping.
+        let svc = store.get_by_namespaced_host(&host).unwrap();
+        assert_eq!(svc.endpoints.len(), 1);
+        assert_eq!(
+            svc.endpoints.get(&"ep1".into()).unwrap().port,
+            HashMap::from([(90, 9090)])
+        );
+    }
 }
