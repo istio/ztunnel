@@ -2524,7 +2524,7 @@ mod tests {
 
         // The initial connection claims no retained resources.
         for _ in 0..2 {
-            let req = conn.rx.recv().await.unwrap();
+            let req = conn.recv_request().await.unwrap();
             assert!(req.initial_resource_versions.is_empty());
         }
 
@@ -2548,9 +2548,9 @@ mod tests {
             type_url: ADDRESS_TYPE.to_string(),
             removed_resources: vec![],
         });
-        conn.tx.send(response).await.unwrap();
+        conn.send_response(response).await;
 
-        let nack = conn.rx.recv().await.unwrap();
+        let nack = conn.recv_request().await.unwrap();
         assert_eq!(nack.type_url, ADDRESS_TYPE.to_string());
         assert!(nack.error_detail.is_some());
 
@@ -2569,7 +2569,7 @@ mod tests {
                 _ = &mut timer => {
                     panic!("expected requests were not received");
                 }
-                req = conn.rx.recv() => {
+                req = conn.recv_request() => {
                     req.unwrap()
                 }
             };
