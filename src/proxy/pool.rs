@@ -58,6 +58,8 @@ pub struct WorkloadHBONEPool {
 struct PoolState {
     timeout_tx: watch::Sender<bool>,
     timeout_rx: watch::Receiver<bool>,
+    connect_drain_tx: watch::Sender<bool>,
+    connect_drain_rx: watch::Receiver<bool>,
     // this is effectively just a convenience data type - a rwlocked hashmap with keying and LRU drops
     // and has no actual hyper/http/connection logic.
     connected_pool: Arc<pingora_pool::ConnectionPool<PooledConnection>>,
@@ -230,6 +232,10 @@ struct IdleReset {
     notify: Notify,
     #[cfg(test)]
     waiting_without_period: Notify,
+    #[cfg(test)]
+    pause_checkout_after_pickup: AtomicBool,
+    #[cfg(test)]
+    checkout_picked_up: Notify,
 }
 
 struct IdleResetInner {
@@ -265,6 +271,10 @@ impl IdleReset {
             notify: Notify::new(),
             #[cfg(test)]
             waiting_without_period: Notify::new(),
+            #[cfg(test)]
+            pause_checkout_after_pickup: AtomicBool::new(false),
+            #[cfg(test)]
+            checkout_picked_up: Notify::new(),
         }
     }
 
@@ -274,6 +284,16 @@ impl IdleReset {
 
     fn is_active(&self) -> bool {
         self.inner.lock().unwrap().active
+    }
+
+    #[cfg(test)]
+    fn pause_checkout_after_pickup(&self) {
+        if self.pause_checkout_after_pickup.load(Ordering::Acquire) {
+            self.checkout_picked_up.notify_waiters();
+            while self.pause_checkout_after_pickup.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        }
     }
 }
 
@@ -325,6 +345,19 @@ impl PoolEntry {
         let mut inner = self.inner.lock().unwrap();
         debug_assert!(inner.connections > 0);
         inner.connections -= 1;
+    }
+
+    fn add_pooled(&self) {
+        self.pooled.fetch_add(1, Ordering::Release);
+    }
+
+    fn remove_pooled(&self) {
+        let previous = self
+            .pooled
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pooled| {
+                pooled.checked_sub(1)
+            });
+        debug_assert!(previous.is_ok(), "pooled connection count underflow");
     }
 
     fn remove_waiter(&self) {
@@ -546,7 +579,7 @@ impl PoolState {
         idle.generation = idle.generation.wrapping_add(1);
         let generation = idle.generation;
         let meta = conn.meta.clone();
-        conn.entry.pooled.fetch_add(1, Ordering::Release);
+        conn.entry.add_pooled();
         let (evict, pickup) = self.connected_pool.put(&meta, conn.clone());
         idle.in_pool = true;
         idle.latest = Some(IdlePeriod {
@@ -570,7 +603,7 @@ impl PoolState {
             idle.latest = None;
             if idle.in_pool {
                 self.connected_pool.pop_closed(&conn.meta);
-                conn.entry.pooled.fetch_sub(1, Ordering::AcqRel);
+                conn.entry.remove_pooled();
             }
             idle.in_pool = false;
             drop(idle);
@@ -695,13 +728,13 @@ impl PoolState {
         let (until, transition) = entry.mark_failure();
         let pool = Arc::downgrade(self);
         let entry = entry.clone();
-        let mut timeout_rx = self.timeout_rx.clone();
+        let mut connect_drain_rx = self.connect_drain_rx.clone();
         tokio::spawn(async move {
             tokio::select! {
                 _ = tokio::time::sleep_until(until) => {
                     entry.expire_backoff(transition);
                 }
-                _ = timeout_rx.changed() => {
+                _ = connect_drain_rx.changed() => {
                     entry.mark_cancelled();
                 }
             }
@@ -751,17 +784,24 @@ impl PoolState {
             match self.guarded_get(entry.hash_key, workload_key)? {
                 Some(mut existing) => {
                     let idle_reset = existing.idle_reset.clone();
+                    #[cfg(test)]
+                    idle_reset.pause_checkout_after_pickup();
                     let mut idle = idle_reset.inner.lock().unwrap();
+                    if !idle.in_pool {
+                        continue;
+                    }
                     idle.in_pool = false;
                     idle.generation = idle.generation.wrapping_add(1);
                     idle.latest = None;
-                    if !existing.ready_to_use() {
+                    if !idle.active || !existing.ready_to_use() {
                         debug!(
                             "checked out broken connection for {}, dropping it",
                             workload_key
                         );
                         idle.active = false;
-                        existing.entry.pooled.fetch_sub(1, Ordering::AcqRel);
+                        existing.entry.remove_pooled();
+                        drop(idle);
+                        idle_reset.notify.notify_one();
                         existing.entry.notify.notify_waiters();
                         continue;
                     }
@@ -779,10 +819,11 @@ impl PoolState {
                         });
                         true
                     } else {
-                        existing.entry.pooled.fetch_sub(1, Ordering::AcqRel);
+                        existing.entry.remove_pooled();
                         false
                     };
                     drop(idle);
+                    idle_reset.notify.notify_one();
                     if reinserted {
                         existing.entry.notify.notify_one();
                     } else {
@@ -796,12 +837,12 @@ impl PoolState {
         }
     }
 
-    fn shutdown(&self) {
+    fn stop_connecting(&self) {
         if self.draining.swap(true, Ordering::AcqRel) {
             return;
         }
         debug!("draining HBONE connection pool");
-        let _ = self.timeout_tx.send(true);
+        let _ = self.connect_drain_tx.send(true);
         let entries = self
             .entries
             .iter(&self.entries.guard())
@@ -811,6 +852,11 @@ impl PoolState {
         for entry in entries {
             entry.mark_cancelled();
         }
+    }
+
+    fn shutdown(&self) {
+        self.stop_connecting();
+        let _ = self.timeout_tx.send(true);
     }
 }
 
@@ -893,7 +939,7 @@ impl IdleMonitor {
                         reset.in_pool = false;
                         reset.latest = None;
                         self.connected_pool.pop_closed(&self.meta);
-                        self.entry.pooled.fetch_sub(1, Ordering::AcqRel);
+                        self.entry.remove_pooled();
                         drop(reset);
                         self.entry.notify.notify_waiters();
                         break;
@@ -916,7 +962,7 @@ impl IdleMonitor {
             if remove_from_pool {
                 self.connected_pool.pop_closed(&self.meta);
             }
-            self.entry.pooled.fetch_sub(1, Ordering::AcqRel);
+            self.entry.remove_pooled();
             self.entry.notify.notify_waiters();
         }
         reset.in_pool = false;
@@ -946,6 +992,7 @@ impl WorkloadHBONEPool {
         metrics: Arc<crate::proxy::Metrics>,
     ) -> WorkloadHBONEPool {
         let (timeout_tx, timeout_rx) = watch::channel(false);
+        let (connect_drain_tx, connect_drain_rx) = watch::channel(false);
         let pool_duration = cfg.pool_unused_release_timeout;
 
         let spawner = ConnSpawner {
@@ -961,6 +1008,8 @@ impl WorkloadHBONEPool {
             state: Arc::new(PoolState {
                 timeout_tx,
                 timeout_rx,
+                connect_drain_tx,
+                connect_drain_rx,
                 connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
                 entries: flurry::HashMap::new(),
                 pool_unused_release_timeout: pool_duration,
@@ -978,6 +1027,21 @@ impl WorkloadHBONEPool {
     #[cfg(test)]
     pub(crate) fn shutdown(&self) {
         self.state.shutdown();
+    }
+
+    pub(crate) fn watch_drain(&self, drain: crate::drain::DrainWatcher) {
+        let pool = self.clone();
+        tokio::spawn(
+            async move {
+                let release = drain.wait_for_drain().await;
+                match release.mode() {
+                    crate::drain::DrainMode::Graceful => pool.state.stop_connecting(),
+                    crate::drain::DrainMode::Immediate => pool.state.shutdown(),
+                }
+                drop(release);
+            }
+            .in_current_span(),
+        );
     }
 
     pub async fn send_request_pooled(
@@ -1021,9 +1085,9 @@ impl WorkloadHBONEPool {
             return Ok(existing);
         }
 
-        let mut timeout_rx = self.state.timeout_rx.clone();
+        let mut connect_drain_rx = self.state.connect_drain_rx.clone();
         loop {
-            if self.state.draining.load(Ordering::Acquire) || *timeout_rx.borrow() {
+            if self.state.draining.load(Ordering::Acquire) || *connect_drain_rx.borrow() {
                 return Err(Error::WorkloadHBONEPoolDraining);
             }
 
@@ -1048,7 +1112,7 @@ impl WorkloadHBONEPool {
                     tokio::pin!(creation);
                     let result = tokio::select! {
                         biased;
-                        changed = timeout_rx.changed() => {
+                        changed = connect_drain_rx.changed() => {
                             let _ = changed;
                             return Err(Error::WorkloadHBONEPoolDraining);
                         }
@@ -1072,7 +1136,7 @@ impl WorkloadHBONEPool {
                     debug!("waiting for a pool entry update for {}", workload_key);
                     tokio::select! {
                         biased;
-                        changed = timeout_rx.changed() => {
+                        changed = connect_drain_rx.changed() => {
                             let _ = changed;
                             return Err(Error::WorkloadHBONEPoolDraining);
                         }
@@ -1092,7 +1156,7 @@ impl WorkloadHBONEPool {
                     debug!("waiting for connection backoff for {}", workload_key);
                     let _notified = tokio::select! {
                         biased;
-                        changed = timeout_rx.changed() => {
+                        changed = connect_drain_rx.changed() => {
                             let _ = changed;
                             return Err(Error::WorkloadHBONEPoolDraining);
                         }
@@ -1189,11 +1253,14 @@ pub mod benchmarks {
                 factory_calls: AtomicUsize::new(0),
             });
             let (timeout_tx, timeout_rx) = watch::channel(false);
+            let (connect_drain_tx, connect_drain_rx) = watch::channel(false);
             ProductionPool {
                 pool: WorkloadHBONEPool {
                     state: Arc::new(PoolState {
                         timeout_tx,
                         timeout_rx,
+                        connect_drain_tx,
+                        connect_drain_rx,
                         connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
                         entries: flurry::HashMap::new(),
                         pool_unused_release_timeout: BENCHMARK_IDLE_TIMEOUT,
@@ -1402,10 +1469,13 @@ mod test {
 
     fn pool_with_factory(idle: Duration, factory: Arc<dyn ConnectionFactory>) -> WorkloadHBONEPool {
         let (timeout_tx, timeout_rx) = watch::channel(false);
+        let (connect_drain_tx, connect_drain_rx) = watch::channel(false);
         WorkloadHBONEPool {
             state: Arc::new(PoolState {
                 timeout_tx,
                 timeout_rx,
+                connect_drain_tx,
+                connect_drain_rx,
                 connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
                 entries: flurry::HashMap::new(),
                 pool_unused_release_timeout: idle,
@@ -1684,6 +1754,43 @@ mod test {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_graceful_drain_releases_creator_and_waiters() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory =
+            Arc::new(MockConnectionFactory::new(clients).blocking_first(workload_key.clone()));
+        let pool = pool_with_factory(Duration::from_secs(100), factory.clone());
+        let (drain_tx, drain_rx) = drain::new();
+        pool.watch_drain(drain_rx);
+
+        let mut creator_pool = pool.clone();
+        let creator_key = workload_key.clone();
+        let creator = tokio::spawn(async move { creator_pool.connect(&creator_key).await });
+        wait_for_factory_calls(&factory, &workload_key, 1).await;
+
+        let mut waiter_pool = pool.clone();
+        let waiter_key = workload_key.clone();
+        let waiter = tokio::spawn(async move { waiter_pool.connect(&waiter_key).await });
+        tokio::task::yield_now().await;
+
+        drain_tx
+            .start_drain_and_wait(crate::drain::DrainMode::Graceful)
+            .await;
+        for task in [creator, waiter] {
+            let result = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .expect("graceful drain must release connection tasks")
+                .unwrap();
+            assert!(matches!(result, Err(Error::WorkloadHBONEPoolDraining)));
+        }
+        assert!(
+            !*pool.state.timeout_rx.borrow(),
+            "graceful drain must not stop active H2 connection drivers"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn graceful_drain_keeps_active_hbone_stream_usable() {
         let (mut pool, srv) = setup_test(10).await;
@@ -1704,6 +1811,7 @@ mod test {
         assert_eq!(&greeting, b"poolsrv\n");
 
         let (drain_tx, drain_rx) = drain::new();
+        pool.watch_drain(drain_rx.clone());
         let (ready_tx, ready_rx) = oneshot::channel();
         let (stream_result_tx, stream_result_rx) = oneshot::channel();
         let worker = tokio::spawn(async move {
@@ -1730,6 +1838,13 @@ mod test {
         ready_rx.await.unwrap();
         let draining =
             tokio::spawn(drain_tx.start_drain_and_wait(crate::drain::DrainMode::Graceful));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !pool.state.draining.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pool should observe graceful drain");
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(1), stream_result_rx)
                 .await
@@ -1809,21 +1924,33 @@ mod test {
         let waiting = idle_reset.waiting_without_period.notified();
         tokio::pin!(waiting);
         waiting.as_mut().enable();
-        let connection = pool
-            .state
-            .connected_pool
-            .get(&PoolState::hash_key(&workload_key))
-            .unwrap();
-        {
-            let mut idle = idle_reset.inner.lock().unwrap();
-            idle.in_pool = false;
-            idle.generation = idle.generation.wrapping_add(1);
-            idle.latest = None;
-        }
-        connection.entry.pooled.fetch_sub(1, Ordering::AcqRel);
+        let picked_up = idle_reset.checkout_picked_up.notified();
+        tokio::pin!(picked_up);
+        picked_up.as_mut().enable();
+        idle_reset
+            .pause_checkout_after_pickup
+            .store(true, Ordering::Release);
+        let state = pool.state.clone();
+        let entry = {
+            let guard = state.entries.guard();
+            state
+                .entries
+                .get(&PoolState::hash_key(&workload_key), &guard)
+                .cloned()
+                .unwrap()
+        };
+        let checkout_key = workload_key.clone();
+        let checkout_entry = entry.clone();
+        let checkout = tokio::task::spawn_blocking(move || {
+            state.checkout_existing_conn(&checkout_entry, &checkout_key)
+        });
+        picked_up.await;
         waiting.await;
 
-        assert!(pool.state.maybe_checkin_conn(&connection, false));
+        idle_reset
+            .pause_checkout_after_pickup
+            .store(false, Ordering::Release);
+        drop(checkout.await.unwrap().unwrap().unwrap());
         tokio::time::advance(Duration::from_millis(101)).await;
         for _ in 0..10 {
             tokio::task::yield_now().await;
@@ -1832,6 +1959,63 @@ mod test {
             pool.state.entries.is_empty(),
             "reinserted connection should retain an active idle expiration"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pool_checkout_does_not_double_release_expired_residency() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory = Arc::new(MockConnectionFactory::new(clients));
+        let mut pool = pool_with_factory(Duration::from_secs(100), factory);
+
+        let connection = pool.connect(&workload_key).await.unwrap();
+        let idle_reset = connection.idle_reset.clone();
+        let entry = connection.entry.clone();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while idle_reset.inner.lock().unwrap().latest.is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("idle monitor should consume the initial idle period");
+
+        let picked_up = idle_reset.checkout_picked_up.notified();
+        tokio::pin!(picked_up);
+        picked_up.as_mut().enable();
+        idle_reset
+            .pause_checkout_after_pickup
+            .store(true, Ordering::Release);
+        let state = pool.state.clone();
+        let checkout_key = workload_key.clone();
+        let checkout_entry = entry.clone();
+        let checkout = tokio::task::spawn_blocking(move || {
+            state.checkout_existing_conn(&checkout_entry, &checkout_key)
+        });
+        picked_up.await;
+
+        {
+            let mut idle = idle_reset.inner.lock().unwrap();
+            assert!(idle.in_pool);
+            idle.active = false;
+            idle.in_pool = false;
+            idle.latest = None;
+        }
+        entry.remove_pooled();
+        idle_reset
+            .pause_checkout_after_pickup
+            .store(false, Ordering::Release);
+        assert!(checkout.await.unwrap().unwrap().is_none());
+        assert_eq!(entry.pooled.load(Ordering::Acquire), 0);
+
+        idle_reset.notify.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while entry.inner.lock().unwrap().connections > 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("expired checkout race should release its idle monitor");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

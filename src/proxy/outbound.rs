@@ -90,6 +90,7 @@ impl Outbound {
         );
         let pi = self.pi.clone();
         let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
+            pool.watch_drain(drain.clone());
             loop {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
