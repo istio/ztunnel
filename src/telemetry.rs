@@ -25,7 +25,6 @@ use serde::ser::SerializeMap;
 
 use thiserror::Error;
 use tracing::{Event, Subscriber, field, info, warn};
-use tracing_appender::non_blocking::NonBlocking;
 use tracing_core::Field;
 use tracing_core::field::Visit;
 use tracing_core::span::Record;
@@ -39,14 +38,24 @@ use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, FormattedFi
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{Layer, Registry, filter, prelude::*, reload};
 
+// Batched, vectored non-blocking log writer (ported from agentgateway). The
+// background worker coalesces up to 64 lines into a single writev(2), which keeps
+// the drain ahead of high-concurrency log production and avoids the per-line
+// syscall bottleneck that backpressures the data plane under load.
+mod msg;
+mod nonblocking;
+mod worker;
+
+use nonblocking::{NonBlocking, NonBlockingBuilder, WorkerGuard};
+
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 static LOG_HANDLE: OnceCell<LogHandle> = OnceCell::new();
 
-pub fn setup_logging() -> tracing_appender::non_blocking::WorkerGuard {
+pub fn setup_logging() -> WorkerGuard {
     Lazy::force(&APPLICATION_START_TIME);
-    let (non_blocking, _guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+    let (non_blocking, _guard) = NonBlockingBuilder::default()
         .lossy(false)
-        .buffered_lines_limit(1000) // Buffer up to 1000 lines to avoid blocking on logs
+        .buffered_lines_limit(10000) // Buffer up to 10k lines; backpressure (not drop) when full
         .finish(std::io::stdout());
     tracing_subscriber::registry()
         .with(fmt_layer(non_blocking))
@@ -560,7 +569,7 @@ pub mod testing {
     pub fn setup_test_logging() {
         Lazy::force(&APPLICATION_START_TIME);
         let mock_writer = MockWriter::new(global_buf());
-        let (non_blocking, _guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        let (non_blocking, _guard) = super::NonBlockingBuilder::default()
             .lossy(false)
             .buffered_lines_limit(1)
             .finish(std::io::stdout());
@@ -574,5 +583,168 @@ pub mod testing {
             .with(fmt_layer(non_blocking))
             .with(layer)
             .init();
+    }
+}
+
+// End-to-end benchmark comparing the stock per-line writer (tracing-appender)
+// against the ported batched-writev writer, driving the *real* IstioJsonFormat
+// formatter from multiple producer threads into a single writer (as in the
+// multi-threaded data plane).
+//
+// Run with, e.g.:
+//   BENCH_N=2000000 BENCH_THREADS=8 BENCH_SINK=pipe \
+//     cargo +1.94.0 test --release --lib \
+//     writer_bench::bench_access_log_end_to_end -- --ignored --nocapture
+// BENCH_SINK: "pipe" (cat >/dev/null, models container stdout) or "devnull".
+#[cfg(test)]
+mod writer_bench {
+    use super::{IstioJsonFormat, NonBlockingBuilder};
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+    use tracing_subscriber::prelude::*;
+
+    fn emit_access_events(n: u64) {
+        for i in 0..n {
+            tracing::event!(
+                target: "access",
+                parent: None,
+                tracing::Level::INFO,
+                src.addr = "10.244.1.5:44321",
+                src.workload = "reviews-v1-7f9c8d6b5-abcde",
+                src.namespace = "bookinfo",
+                dst.addr = "10.244.2.7:9080",
+                dst.service = "ratings.bookinfo.svc.cluster.local",
+                dst.workload = "ratings-v1-65d4f7c9-xyz12",
+                dst.namespace = "bookinfo",
+                conn_id = "00000000000000000000000000000abc",
+                direction = "outbound",
+                bytes_sent = i,
+                bytes_recv = i,
+                duration = "12ms",
+                "connection complete"
+            );
+        }
+    }
+
+    // Spawn `threads` producers sharing one dispatcher/writer, then flush.
+    fn drive(
+        dispatch: tracing::Dispatch,
+        threads: usize,
+        per_thread: u64,
+        flush: impl FnOnce(),
+    ) -> Duration {
+        let t0 = Instant::now();
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                let d = dispatch.clone();
+                s.spawn(move || {
+                    tracing::dispatcher::with_default(&d, || emit_access_events(per_thread))
+                });
+            }
+        });
+        flush(); // drop the guard: flush pending lines + join the writer thread
+        t0.elapsed()
+    }
+
+    fn run_stock<W: Write + Send + 'static>(threads: usize, per_thread: u64, w: W) -> Duration {
+        let (nb, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+            .lossy(false)
+            .buffered_lines_limit(10000)
+            .finish(w);
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(nb)
+            .event_format(IstioJsonFormat())
+            .fmt_fields(IstioJsonFormat());
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(layer));
+        drive(dispatch, threads, per_thread, move || drop(guard))
+    }
+
+    fn run_batched<W: Write + Send + 'static>(threads: usize, per_thread: u64, w: W) -> Duration {
+        let (nb, guard) = NonBlockingBuilder::default()
+            .lossy(false)
+            .buffered_lines_limit(10000)
+            .finish(w);
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(nb)
+            .event_format(IstioJsonFormat())
+            .fmt_fields(IstioJsonFormat());
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(layer));
+        drive(dispatch, threads, per_thread, move || drop(guard))
+    }
+
+    fn dispatch<W: Write + Send + 'static>(
+        variant: &str,
+        threads: usize,
+        per_thread: u64,
+        w: W,
+    ) -> Duration {
+        match variant {
+            "stock" => run_stock(threads, per_thread, w),
+            "batched" => run_batched(threads, per_thread, w),
+            other => panic!("unknown variant {other}"),
+        }
+    }
+
+    fn bench_one(variant: &str, kind: &str, threads: usize, per_thread: u64) -> Duration {
+        use std::fs::File;
+        use std::process::{Command, Stdio};
+        match kind {
+            "devnull" => dispatch(
+                variant,
+                threads,
+                per_thread,
+                File::options().write(true).open("/dev/null").unwrap(),
+            ),
+            "pipe" => {
+                let mut c = Command::new("cat")
+                    .stdin(Stdio::piped())
+                    .stdout(File::options().write(true).open("/dev/null").unwrap())
+                    .spawn()
+                    .expect("spawn cat");
+                let stdin = c.stdin.take().unwrap();
+                let d = dispatch(variant, threads, per_thread, stdin);
+                c.wait().ok();
+                d
+            }
+            other => panic!("unknown sink {other}"),
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
+    fn bench_access_log_end_to_end() {
+        let total: u64 = std::env::var("BENCH_N")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000_000);
+        let threads: usize = std::env::var("BENCH_THREADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8);
+        let kind = std::env::var("BENCH_SINK").unwrap_or_else(|_| "pipe".to_string());
+        let per_thread = total / threads as u64;
+        let emitted = per_thread * threads as u64;
+
+        // Warm up (allocator, page faults) so the first variant isn't penalized.
+        bench_one("stock", "devnull", threads, 20_000);
+
+        let stock = bench_one("stock", &kind, threads, per_thread);
+        let batched = bench_one("batched", &kind, threads, per_thread);
+
+        let lps = |d: Duration| emitted as f64 / d.as_secs_f64();
+        println!(
+            "\n=== access-log end-to-end (real IstioJsonFormat), n={emitted}, producers={threads}, sink={kind} ==="
+        );
+        println!(
+            "stock per-line : {:>10.0} lines/s   wall={:>6.0}ms",
+            lps(stock),
+            stock.as_secs_f64() * 1000.0
+        );
+        println!(
+            "batched writev : {:>10.0} lines/s   wall={:>6.0}ms",
+            lps(batched),
+            batched.as_secs_f64() * 1000.0
+        );
+        println!("speedup        : {:.2}x", lps(batched) / lps(stock));
     }
 }

@@ -52,6 +52,7 @@ base64 = "0.22"
 byteorder = "1.5"
 bytes = { version = "1.11", features = ["serde"] }
 chrono = "0.4"
+crossbeam-channel = "0.5"
 duration-str = "0.21"
 futures = "0.3"
 futures-core = "0.3"
