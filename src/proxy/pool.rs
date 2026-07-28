@@ -1116,6 +1116,142 @@ impl WorkloadHBONEPool {
     }
 }
 
+#[cfg(feature = "testing")]
+pub mod benchmarks {
+    use super::{
+        ConnectionFactory, PoolState, WorkloadHBONEPool,
+        h2::client::{H2ConnectClient, WorkloadKey},
+    };
+    use std::collections::HashMap;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::watch;
+
+    const BENCHMARK_IDLE_TIMEOUT: Duration = Duration::from_millis(10);
+
+    struct BenchmarkFactory {
+        clients: Arc<HashMap<WorkloadKey, H2ConnectClient>>,
+        factory_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ConnectionFactory for BenchmarkFactory {
+        async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, super::Error> {
+            self.factory_calls.fetch_add(1, Ordering::Relaxed);
+            tokio::task::yield_now().await;
+            self.clients
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("missing benchmark connection").into())
+        }
+    }
+
+    pub struct ProductionPoolFixture {
+        clients: Arc<HashMap<WorkloadKey, H2ConnectClient>>,
+        keys: Arc<Vec<WorkloadKey>>,
+    }
+
+    impl ProductionPoolFixture {
+        pub async fn new(destinations: usize) -> Self {
+            Self::with_max_streams(destinations, u16::MAX).await
+        }
+
+        pub async fn with_max_streams(destinations: usize, max_streams: u16) -> Self {
+            let keys = (0..destinations)
+                .map(|index| WorkloadKey {
+                    src_id: crate::identity::Identity::default(),
+                    dst_id: vec![crate::identity::Identity::default()],
+                    dst: SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        10_000 + u16::try_from(index).unwrap(),
+                    ),
+                    src: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                })
+                .collect::<Vec<_>>();
+            let mut clients = HashMap::with_capacity(keys.len());
+            for key in &keys {
+                clients.insert(
+                    key.clone(),
+                    H2ConnectClient::benchmark_client(key.clone(), max_streams).await,
+                );
+            }
+            Self {
+                clients: Arc::new(clients),
+                keys: Arc::new(keys),
+            }
+        }
+
+        pub fn pool(&self) -> ProductionPool {
+            let factory = Arc::new(BenchmarkFactory {
+                clients: self.clients.clone(),
+                factory_calls: AtomicUsize::new(0),
+            });
+            let (timeout_tx, timeout_rx) = watch::channel(false);
+            ProductionPool {
+                pool: WorkloadHBONEPool {
+                    state: Arc::new(PoolState {
+                        timeout_tx,
+                        timeout_rx,
+                        connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
+                        entries: flurry::HashMap::new(),
+                        pool_unused_release_timeout: BENCHMARK_IDLE_TIMEOUT,
+                        pool_global_conn_count: super::AtomicI32::new(0),
+                        factory: factory.clone(),
+                        draining: super::AtomicBool::new(false),
+                        synchronization_wakeups: AtomicU64::new(0),
+                        unrelated_wakeups: AtomicU64::new(0),
+                    }),
+                },
+                keys: self.keys.clone(),
+                factory,
+            }
+        }
+    }
+
+    pub struct ProductionPool {
+        pool: WorkloadHBONEPool,
+        keys: Arc<Vec<WorkloadKey>>,
+        factory: Arc<BenchmarkFactory>,
+    }
+
+    impl ProductionPool {
+        pub async fn checkout(&self, key: usize) {
+            let mut pool = self.pool.clone();
+            pool.connect(&self.keys[key]).await.unwrap();
+        }
+
+        pub async fn open_stream(&self, key: usize) -> crate::proxy::h2::H2Stream {
+            let mut pool = self.pool.clone();
+            let request = http::Request::builder()
+                .method(http::Method::CONNECT)
+                .uri("https://benchmark.invalid")
+                .body(())
+                .unwrap();
+            pool.send_request_pooled(&self.keys[key], request)
+                .await
+                .unwrap()
+                .0
+        }
+
+        pub fn factory_calls(&self) -> usize {
+            self.factory.factory_calls.load(Ordering::Relaxed)
+        }
+
+        pub fn wakeups(&self) -> u64 {
+            self.pool
+                .state
+                .synchronization_wakeups
+                .load(Ordering::Relaxed)
+        }
+
+        pub fn unrelated_wakeups(&self) -> u64 {
+            self.pool.state.unrelated_wakeups.load(Ordering::Relaxed)
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::collections::HashMap;
