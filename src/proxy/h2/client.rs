@@ -153,6 +153,83 @@ impl H2ConnectClient {
     pub fn revoked_receiver(&self) -> Option<watch::Receiver<bool>> {
         self.revoked_rx.clone()
     }
+
+    #[cfg(feature = "testing")]
+    pub async fn benchmark_client(wl_key: WorkloadKey, max_allowed_streams: u16) -> Self {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let Ok(mut server) = h2::server::handshake(server_io).await else {
+                return;
+            };
+            while let Some(request) = server.accept().await {
+                let Ok((_request, mut respond)) = request else {
+                    return;
+                };
+                let _ = respond.send_response(http::Response::new(()), true);
+            }
+        });
+
+        let (sender, connection) = h2::client::Builder::new()
+            .initial_max_send_streams(max_allowed_streams as usize)
+            .handshake::<_, Bytes>(client_io)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        Self {
+            sender,
+            max_allowed_streams,
+            stream_count: Arc::new(AtomicU16::new(0)),
+            wl_key: Arc::new(wl_key),
+            revoked_rx: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn test_client_with_blocked_response(
+        wl_key: WorkloadKey,
+        max_allowed_streams: u16,
+    ) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (request_seen_tx, request_seen_rx) = oneshot::channel();
+        let (release_response_tx, release_response_rx) = oneshot::channel();
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let mut server = h2::server::handshake(server_io).await.unwrap();
+            let mut request_seen_tx = Some(request_seen_tx);
+            let mut release_response_rx = Some(release_response_rx);
+            while let Some(request) = server.accept().await {
+                let (_request, mut respond) = request.unwrap();
+                if let Some(request_seen_tx) = request_seen_tx.take() {
+                    let _ = request_seen_tx.send(());
+                }
+                if let Some(release_response_rx) = release_response_rx.take() {
+                    let _ = release_response_rx.await;
+                }
+                let _ = respond.send_response(http::Response::new(()), true);
+            }
+        });
+
+        let (sender, connection) = h2::client::Builder::new()
+            .initial_max_send_streams(max_allowed_streams as usize)
+            .handshake::<_, Bytes>(client_io)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        (
+            Self {
+                sender,
+                max_allowed_streams,
+                stream_count: Arc::new(AtomicU16::new(0)),
+                wl_key: Arc::new(wl_key),
+                revoked_rx: None,
+            },
+            request_seen_rx,
+            release_response_tx,
+        )
+    }
 }
 
 pub async fn spawn_connection(

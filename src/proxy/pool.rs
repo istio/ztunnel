@@ -1118,6 +1118,7 @@ impl WorkloadHBONEPool {
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
     use std::convert::Infallible;
     use std::net::IpAddr;
     use std::net::SocketAddr;
@@ -1132,15 +1133,17 @@ mod test {
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use prometheus_client::registry::Registry;
-    use std::sync::RwLock;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
     use std::sync::atomic::AtomicU32;
+    use std::sync::{Barrier, RwLock};
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-    use tokio::sync::oneshot;
+    use tokio::sync::{Semaphore, oneshot};
 
     use tracing::{Instrument, error};
 
@@ -1182,6 +1185,675 @@ mod test {
                 $srv.drop_rx.len()
             )
         };
+    }
+
+    struct MockConnectionFactory {
+        clients: HashMap<WorkloadKey, H2ConnectClient>,
+        calls: Mutex<HashMap<WorkloadKey, usize>>,
+        failures: Mutex<HashMap<WorkloadKey, usize>>,
+        blocked_key: Option<WorkloadKey>,
+        release_first: Arc<Semaphore>,
+    }
+
+    impl MockConnectionFactory {
+        fn new(clients: HashMap<WorkloadKey, H2ConnectClient>) -> Self {
+            Self {
+                clients,
+                calls: Mutex::new(HashMap::new()),
+                failures: Mutex::new(HashMap::new()),
+                blocked_key: None,
+                release_first: Arc::new(Semaphore::new(0)),
+            }
+        }
+
+        fn blocking_first(mut self, key: WorkloadKey) -> Self {
+            self.blocked_key = Some(key);
+            self
+        }
+
+        fn fail_first(self, key: WorkloadKey, failures: usize) -> Self {
+            self.failures.lock().unwrap().insert(key, failures);
+            self
+        }
+
+        fn calls_for(&self, key: &WorkloadKey) -> usize {
+            self.calls.lock().unwrap().get(key).copied().unwrap_or(0)
+        }
+
+        fn release_first(&self) {
+            self.release_first.add_permits(1);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ConnectionFactory for MockConnectionFactory {
+        async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error> {
+            let call = {
+                let mut calls = self.calls.lock().unwrap();
+                let calls = calls.entry(key.clone()).or_default();
+                *calls += 1;
+                *calls
+            };
+
+            if self.blocked_key.as_ref() == Some(&key) && call == 1 {
+                self.release_first
+                    .acquire()
+                    .await
+                    .expect("test semaphore should remain open")
+                    .forget();
+            }
+
+            let should_fail = {
+                let mut failures = self.failures.lock().unwrap();
+                match failures.get_mut(&key) {
+                    Some(remaining) if *remaining > 0 => {
+                        *remaining -= 1;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if should_fail {
+                return Err(io::Error::other("mock connection failure").into());
+            }
+
+            self.clients
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| io::Error::other("missing mock connection").into())
+        }
+    }
+
+    fn pool_with_factory(idle: Duration, factory: Arc<dyn ConnectionFactory>) -> WorkloadHBONEPool {
+        let (timeout_tx, timeout_rx) = watch::channel(false);
+        WorkloadHBONEPool {
+            state: Arc::new(PoolState {
+                timeout_tx,
+                timeout_rx,
+                connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
+                entries: flurry::HashMap::new(),
+                pool_unused_release_timeout: idle,
+                pool_global_conn_count: AtomicI32::new(0),
+                factory,
+                draining: AtomicBool::new(false),
+                synchronization_wakeups: AtomicU64::new(0),
+                unrelated_wakeups: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    async fn wait_for_factory_calls(
+        factory: &MockConnectionFactory,
+        key: &WorkloadKey,
+        expected: usize,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while factory.calls_for(key) < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("factory call count should advance");
+    }
+
+    async fn prebuilt_clients(
+        source_pool: &WorkloadHBONEPool,
+        keys: &[WorkloadKey],
+    ) -> HashMap<WorkloadKey, H2ConnectClient> {
+        let mut clients = HashMap::new();
+        for key in keys {
+            let client = source_pool
+                .state
+                .factory
+                .new_pool_conn(key.clone())
+                .await
+                .expect("prebuilt connection should succeed");
+            clients.insert(key.clone(), client);
+        }
+        clients
+    }
+
+    #[test]
+    fn pool_entry_registration_is_atomic_with_cleanup() {
+        let workload_key = WorkloadKey {
+            src_id: Identity::default(),
+            dst_id: vec![Identity::default()],
+            dst: "127.0.0.1:15008".parse().unwrap(),
+            src: "127.0.0.1".parse().unwrap(),
+        };
+        for _ in 0..1_000 {
+            let entry = Arc::new(PoolEntry::new(workload_key.clone(), 1));
+            let barrier = Arc::new(Barrier::new(3));
+            let register = {
+                let entry = entry.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    entry.try_add_user()
+                })
+            };
+            let cleanup = {
+                let entry = entry.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    entry.try_tombstone_if_idle()
+                })
+            };
+            barrier.wait();
+            let registered = register.join().unwrap();
+            let tombstoned = cleanup.join().unwrap();
+            assert_ne!(
+                registered, tombstoned,
+                "registration and cleanup must be mutually exclusive"
+            );
+            if registered {
+                entry.remove_user();
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_same_destination_single_flight() {
+        let (source_pool, srv) = setup_test(200).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory =
+            Arc::new(MockConnectionFactory::new(clients).blocking_first(workload_key.clone()));
+        let pool = pool_with_factory(Duration::from_secs(100), factory.clone());
+
+        let tasks = (0..100)
+            .map(|_| {
+                let mut pool = pool.clone();
+                let workload_key = workload_key.clone();
+                tokio::spawn(async move { pool.connect(&workload_key).await })
+            })
+            .collect::<Vec<_>>();
+
+        wait_for_factory_calls(&factory, &workload_key, 1).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(factory.calls_for(&workload_key), 1);
+        factory.release_first();
+
+        let connections = tokio::time::timeout(Duration::from_secs(2), future::join_all(tasks))
+            .await
+            .expect("same-key waiters should not hang");
+        assert!(
+            connections
+                .into_iter()
+                .all(|result| result.unwrap().is_ok())
+        );
+        assert_eq!(factory.calls_for(&workload_key), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_different_destinations_progress_independently() {
+        let (source_pool, srv) = setup_test(10).await;
+        let key_a = key(&srv, 1);
+        let key_b = key(&srv, 2);
+        let clients = prebuilt_clients(&source_pool, &[key_a.clone(), key_b.clone()]).await;
+        let factory = Arc::new(MockConnectionFactory::new(clients).blocking_first(key_a.clone()));
+        let pool = pool_with_factory(Duration::from_secs(100), factory.clone());
+
+        let mut pool_a = pool.clone();
+        let task_a = {
+            let key_a = key_a.clone();
+            tokio::spawn(async move { pool_a.connect(&key_a).await })
+        };
+        wait_for_factory_calls(&factory, &key_a, 1).await;
+        let mut waiter_pool_a = pool.clone();
+        let waiter_key_a = key_a.clone();
+        let waiter_a = tokio::spawn(async move { waiter_pool_a.connect(&waiter_key_a).await });
+        tokio::task::yield_now().await;
+
+        let mut pool_b = pool.clone();
+        let connection_b = tokio::time::timeout(Duration::from_secs(1), pool_b.connect(&key_b))
+            .await
+            .expect("key B must not wait for key A")
+            .expect("key B connection should succeed");
+        assert_eq!(factory.calls_for(&key_b), 1);
+        assert!(!task_a.is_finished());
+        assert!(!waiter_a.is_finished());
+        assert_eq!(
+            factory.calls_for(&key_a),
+            1,
+            "publishing key B must not wake or advance key A"
+        );
+
+        factory.release_first();
+        task_a.await.unwrap().unwrap();
+        waiter_a.await.unwrap().unwrap();
+        drop(connection_b);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_creator_cancellation_releases_waiters() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory =
+            Arc::new(MockConnectionFactory::new(clients).blocking_first(workload_key.clone()));
+        let pool = pool_with_factory(Duration::from_secs(100), factory.clone());
+
+        let mut creator_pool = pool.clone();
+        let creator_key = workload_key.clone();
+        let creator = tokio::spawn(async move { creator_pool.connect(&creator_key).await });
+        wait_for_factory_calls(&factory, &workload_key, 1).await;
+
+        let mut waiter_pool = pool.clone();
+        let waiter_key = workload_key.clone();
+        let waiter = tokio::spawn(async move { waiter_pool.connect(&waiter_key).await });
+        creator.abort();
+        assert!(matches!(creator.await, Err(error) if error.is_cancelled()));
+
+        wait_for_factory_calls(&factory, &workload_key, 2).await;
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("cancelled creator should release waiter")
+            .unwrap()
+            .unwrap();
+        assert_eq!(factory.calls_for(&workload_key), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_connection_failure_releases_waiters() {
+        let (source_pool, srv) = setup_test(20).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory =
+            Arc::new(MockConnectionFactory::new(clients).fail_first(workload_key.clone(), 1));
+        let pool = pool_with_factory(Duration::from_secs(100), factory.clone());
+
+        let tasks = (0..20)
+            .map(|_| {
+                let mut pool = pool.clone();
+                let workload_key = workload_key.clone();
+                tokio::spawn(async move { pool.connect(&workload_key).await })
+            })
+            .collect::<Vec<_>>();
+
+        let results = tokio::time::timeout(Duration::from_secs(2), future::join_all(tasks))
+            .await
+            .expect("failure waiters should not hang");
+        let (successes, failures): (Vec<_>, Vec<_>) = results
+            .into_iter()
+            .map(Result::unwrap)
+            .partition(Result::is_ok);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(successes.len(), 19);
+        assert_eq!(factory.calls_for(&workload_key), 2);
+
+        let mut retry_pool = pool.clone();
+        retry_pool.connect(&workload_key).await.unwrap();
+        assert_eq!(factory.calls_for(&workload_key), 2);
+    }
+
+    #[tokio::test]
+    async fn pool_lone_failure_backoff_expires_and_cleans_entry() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory =
+            Arc::new(MockConnectionFactory::new(clients).fail_first(workload_key.clone(), 1));
+        let mut pool = pool_with_factory(Duration::from_secs(100), factory);
+        tokio::time::pause();
+
+        assert!(pool.connect(&workload_key).await.is_err());
+        let guard = pool.state.entries.guard();
+        assert!(
+            pool.state
+                .entries
+                .contains_key(&PoolState::hash_key(&workload_key), &guard)
+        );
+        drop(guard);
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            pool.state.entries.is_empty(),
+            "expired backoff without users must release its entry"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_shutdown_releases_creator_and_waiters() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory =
+            Arc::new(MockConnectionFactory::new(clients).blocking_first(workload_key.clone()));
+        let pool = pool_with_factory(Duration::from_secs(100), factory.clone());
+
+        let mut creator_pool = pool.clone();
+        let creator_key = workload_key.clone();
+        let creator = tokio::spawn(async move { creator_pool.connect(&creator_key).await });
+        wait_for_factory_calls(&factory, &workload_key, 1).await;
+
+        let mut waiter_pool = pool.clone();
+        let waiter_key = workload_key.clone();
+        let waiter = tokio::spawn(async move { waiter_pool.connect(&waiter_key).await });
+        tokio::task::yield_now().await;
+        pool.shutdown();
+
+        for task in [creator, waiter] {
+            let result = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .expect("pool shutdown must release connection tasks")
+                .unwrap();
+            assert!(matches!(result, Err(Error::WorkloadHBONEPoolDraining)));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graceful_drain_keeps_active_hbone_stream_usable() {
+        let (mut pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let request = http::Request::builder()
+            .uri(srv.addr.to_string())
+            .method(http::Method::CONNECT)
+            .version(http::Version::HTTP_2)
+            .body(())
+            .unwrap();
+        let (stream, _, _) = pool
+            .send_request_pooled(&workload_key, request)
+            .await
+            .unwrap();
+        let mut stream = TokioH2Stream::new(stream);
+        let mut greeting = [0; 8];
+        stream.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(&greeting, b"poolsrv\n");
+
+        let (drain_tx, drain_rx) = drain::new();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (stream_result_tx, stream_result_rx) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            crate::drain::run_with_drain(
+                "pool-graceful-drain-test".to_string(),
+                drain_rx,
+                Duration::from_secs(1),
+                async move |drain, _force_shutdown| {
+                    tokio::spawn(async move {
+                        let _ = ready_tx.send(());
+                        let release = drain.clone().wait_for_drain().await;
+                        stream.write_all(b"still-open").await.unwrap();
+                        let mut echoed = [0; 10];
+                        stream.read_exact(&mut echoed).await.unwrap();
+                        let _ = stream_result_tx.send(echoed);
+                        drop(release);
+                        drop(drain);
+                    });
+                    futures_util::future::pending::<()>().await;
+                },
+            )
+            .await;
+        });
+        ready_rx.await.unwrap();
+        let draining =
+            tokio::spawn(drain_tx.start_drain_and_wait(crate::drain::DrainMode::Graceful));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), stream_result_rx)
+                .await
+                .expect("active stream should remain usable during graceful drain")
+                .unwrap(),
+            *b"still-open"
+        );
+        worker.await.unwrap();
+        draining.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pool_idle_expiration_is_generation_safe() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory = Arc::new(MockConnectionFactory::new(clients));
+        let mut pool = pool_with_factory(Duration::from_millis(100), factory.clone());
+        tokio::time::pause();
+
+        drop(pool.connect(&workload_key).await.unwrap());
+        assert_eq!(factory.calls_for(&workload_key), 1);
+        tokio::time::advance(Duration::from_millis(75)).await;
+
+        drop(pool.connect(&workload_key).await.unwrap());
+        tokio::time::advance(Duration::from_millis(50)).await;
+        drop(pool.connect(&workload_key).await.unwrap());
+        assert_eq!(
+            factory.calls_for(&workload_key),
+            1,
+            "stale expiration must not remove a newer idle generation"
+        );
+
+        let guard = pool.state.entries.guard();
+        let entry = pool
+            .state
+            .entries
+            .get(&PoolState::hash_key(&workload_key), &guard)
+            .cloned()
+            .unwrap();
+        drop(guard);
+        assert_eq!(entry.inner.lock().unwrap().connections, 1);
+
+        tokio::time::advance(Duration::from_millis(101)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            pool.state.entries.is_empty(),
+            "expired connection should release its unused destination entry"
+        );
+
+        drop(pool.connect(&workload_key).await.unwrap());
+        assert_eq!(factory.calls_for(&workload_key), 2);
+    }
+
+    #[tokio::test]
+    async fn pool_idle_monitor_observes_reinsert_after_pickup() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory = Arc::new(MockConnectionFactory::new(clients));
+        let mut pool = pool_with_factory(Duration::from_millis(100), factory);
+        tokio::time::pause();
+
+        let connection = pool.connect(&workload_key).await.unwrap();
+        let idle_reset = connection.idle_reset.clone();
+        drop(connection);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while idle_reset.inner.lock().unwrap().latest.is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("idle monitor should consume the initial idle period");
+
+        let waiting = idle_reset.waiting_without_period.notified();
+        tokio::pin!(waiting);
+        waiting.as_mut().enable();
+        let connection = pool
+            .state
+            .connected_pool
+            .get(&PoolState::hash_key(&workload_key))
+            .unwrap();
+        {
+            let mut idle = idle_reset.inner.lock().unwrap();
+            idle.in_pool = false;
+            idle.generation = idle.generation.wrapping_add(1);
+            idle.latest = None;
+        }
+        connection.entry.pooled.fetch_sub(1, Ordering::AcqRel);
+        waiting.await;
+
+        assert!(pool.state.maybe_checkin_conn(&connection, false));
+        tokio::time::advance(Duration::from_millis(101)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            pool.state.entries.is_empty(),
+            "reinserted connection should retain an active idle expiration"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_request_creation_releases_connection_capacity() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let (client, request_seen, release_response) =
+            H2ConnectClient::test_client_with_blocked_response(workload_key.clone(), 1).await;
+        let factory = Arc::new(MockConnectionFactory::new(HashMap::from([(
+            workload_key.clone(),
+            client,
+        )])));
+        let pool = pool_with_factory(Duration::from_millis(20), factory.clone());
+        let request = http::Request::builder()
+            .uri("https://cancelled-request.test")
+            .method(http::Method::CONNECT)
+            .version(http::Version::HTTP_2)
+            .body(())
+            .unwrap();
+
+        let request_task = {
+            let mut pool = pool.clone();
+            let workload_key = workload_key.clone();
+            tokio::spawn(async move { pool.send_request_pooled(&workload_key, request).await })
+        };
+        request_seen.await.unwrap();
+        request_task.abort();
+        assert!(matches!(
+            request_task.await,
+            Err(error) if error.is_cancelled()
+        ));
+        drop(release_response);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let retry_request = http::Request::builder()
+            .uri("https://reused-request.test")
+            .method(http::Method::CONNECT)
+            .version(http::Version::HTTP_2)
+            .body(())
+            .unwrap();
+        let mut retry_pool = pool.clone();
+        let stream = tokio::time::timeout(
+            Duration::from_secs(1),
+            retry_pool.send_request_pooled(&workload_key, retry_request),
+        )
+        .await
+        .expect("cancelled request must not strand connection capacity")
+        .unwrap();
+        assert_eq!(
+            factory.calls_for(&workload_key),
+            1,
+            "the existing H2 connection should be reused after cancellation"
+        );
+        drop(stream);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !pool.state.entries.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reused connection and entry should expire cleanly");
+        drop(source_pool);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_idle_reset_keeps_one_pending_record() {
+        let (source_pool, srv) = setup_test(100).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory = Arc::new(MockConnectionFactory::new(clients));
+        let mut pool = pool_with_factory(Duration::from_secs(100), factory);
+
+        let first = pool.connect(&workload_key).await.unwrap();
+        let idle_reset = first.idle_reset.clone();
+        drop(first);
+        for _ in 0..1_000 {
+            drop(pool.connect(&workload_key).await.unwrap());
+        }
+
+        let idle = idle_reset.inner.lock().unwrap();
+        assert!(idle.active);
+        assert!(idle.in_pool);
+        assert!(
+            idle.generation >= 1_000,
+            "all resets should update the single replacement slot"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_randomized_lifecycle_stress_preserves_entry_invariants() {
+        let (source_pool, srv) = setup_test(100).await;
+        let keys = (1..=8).map(|source| key(&srv, source)).collect::<Vec<_>>();
+        let clients = prebuilt_clients(&source_pool, &keys).await;
+        let mut mock_factory = MockConnectionFactory::new(clients);
+        for workload_key in &keys {
+            mock_factory = mock_factory.fail_first(workload_key.clone(), 5);
+        }
+        let factory = Arc::new(mock_factory);
+        let pool = pool_with_factory(Duration::from_millis(20), factory.clone());
+        let mut rng = StdRng::seed_from_u64(0x5eed);
+        for _ in 0..20 {
+            let mut tasks = Vec::with_capacity(1_000);
+            for _ in 0..1_000 {
+                let workload_key = keys[rng.random_range(0..keys.len())].clone();
+                let cancel = rng.random_ratio(1, 17);
+                let delay_before = rng.random_range(0..=3);
+                let delay_after = rng.random_range(0..=3);
+                let task = {
+                    let mut pool = pool.clone();
+                    tokio::spawn(async move {
+                        if delay_before > 0 {
+                            tokio::time::sleep(Duration::from_millis(delay_before)).await;
+                        }
+                        let result = pool.connect(&workload_key).await;
+                        if delay_after > 0 {
+                            tokio::time::sleep(Duration::from_millis(delay_after)).await;
+                        }
+                        result
+                    })
+                };
+                if cancel {
+                    task.abort();
+                }
+                tasks.push(task);
+            }
+            let results = tokio::time::timeout(Duration::from_secs(5), future::join_all(tasks))
+                .await
+                .expect("stress batch should not hang");
+            assert!(results.into_iter().all(|result| match result {
+                Ok(Ok(_)) | Ok(Err(_)) => true,
+                Err(error) => error.is_cancelled(),
+            }));
+            if rng.random_bool(0.5) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            } else {
+                tokio::task::yield_now().await;
+            }
+        }
+        let guard = pool.state.entries.guard();
+        for (_, entry) in pool.state.entries.iter(&guard) {
+            let inner = entry.inner.lock().unwrap();
+            assert!(!matches!(inner.state, EntryState::Connecting { .. }));
+            assert_eq!(inner.waiters, 0);
+        }
+        drop(guard);
+
+        pool.shutdown();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if pool.state.entries.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("idle stress entries should be cleaned up");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1263,25 +1935,23 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn connection_limits() {
+    async fn saturated_connections_are_reused_after_capacity_returns() {
         let (pool, mut srv) = setup_test(2).await;
 
         let key = key(&srv, 1);
 
-        // Pool allows 2. When we spawn 4 concurrently, so we need 2 connections
+        // Pool allows 2. When we spawn 4 concurrently, we need 2 connections.
         spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 4).await;
-        assert_opens_drops!(srv, 2, 2);
+        assert_opens_drops!(srv, 2, 0);
 
-        // This should require 3 connections (2 already opened, 1 new). However, due to an inefficiency
-        // in our pool, we don't properly reuse streams that hit the max.
-        // The first batch of 4 will start a connection for the first 2 connections, and each max out so they
-        // are not returned to the pool.
+        // Both saturated connections become reusable after stream capacity returns, so only one
+        // additional connection is needed for five concurrent requests.
         spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 5).await;
-        assert_opens_drops!(srv, 5, 2);
+        assert_opens_drops!(srv, 3, 0);
 
-        // Once we drop the pool, we should drop the rest of the connections as well (3 new ones, and the one already checked above)
+        // Once we drop the pool, all three reusable connections should close.
         drop(pool);
-        assert_opens_drops!(srv, 5, 1);
+        assert_opens_drops!(srv, 3, 3);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1312,6 +1982,8 @@ mod test {
         let key = key(&srv, 1);
 
         spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 2).await;
+        assert_opens_drops!(srv, 2, 0);
+        drop(pool);
         assert_opens_drops!(srv, 2, 2);
     }
 
