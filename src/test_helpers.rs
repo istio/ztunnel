@@ -16,9 +16,9 @@ use crate::config::ConfigSource;
 use crate::config::{self, RootCert};
 use crate::state::service::{Endpoint, EndpointSet, Service, Visibility};
 use crate::state::workload::InboundProtocol::{HBONE, TCP};
-use crate::state::workload::{
-    GatewayAddress, NamespacedHostname, NetworkAddress, Workload, gatewayaddress,
-};
+#[cfg(target_os = "linux")]
+use crate::state::workload::NamespacedHostname;
+use crate::state::workload::{GatewayAddress, NetworkAddress, Workload, gatewayaddress};
 use crate::state::workload::{HealthStatus, InboundProtocol};
 use crate::state::{DemandProxyState, ProxyState};
 use crate::xds::istio::security::Authorization as XdsAuthorization;

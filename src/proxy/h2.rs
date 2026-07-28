@@ -19,6 +19,7 @@ use h2::Reason;
 use std::io::Error;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -101,20 +102,34 @@ struct DropCounter {
     // We only decrement if they have, so we do not double count
     half_dropped: Arc<()>,
     active_count: Arc<AtomicU16>,
+    on_close: Arc<Mutex<Option<StreamCloseCallback>>>,
 }
+
+type StreamCloseCallback = Box<dyn FnOnce() + Send + 'static>;
 
 impl DropCounter {
     pub fn new(active_count: Arc<AtomicU16>) -> (Option<DropCounter>, Option<DropCounter>) {
         let half_dropped = Arc::new(());
+        let on_close = Arc::new(Mutex::new(None));
         let d1 = DropCounter {
             half_dropped: half_dropped.clone(),
             active_count: active_count.clone(),
+            on_close: on_close.clone(),
         };
         let d2 = DropCounter {
             half_dropped,
             active_count,
+            on_close,
         };
         (Some(d1), Some(d2))
+    }
+}
+
+impl H2Stream {
+    pub(crate) fn set_on_close(&mut self, callback: impl FnOnce() + Send + 'static) {
+        if let Some(counter) = self.read._dropped.as_ref() {
+            *counter.on_close.lock().unwrap() = Some(Box::new(callback));
+        }
     }
 }
 
@@ -141,8 +156,12 @@ impl Drop for DropCounter {
         std::mem::swap(&mut self.half_dropped, &mut half_dropped);
         if Arc::into_inner(half_dropped).is_none() {
             // other half already dropped
-            let left = self.active_count.fetch_sub(1, Ordering::SeqCst);
+            let left = self.active_count.fetch_sub(1, Ordering::Relaxed);
             trace!("dropping H2Stream, has {} active streams left", left - 1);
+            let callback = self.on_close.lock().unwrap().take();
+            if let Some(callback) = callback {
+                callback();
+            }
         } else {
             trace!("dropping H2Stream, other half remains");
         }
