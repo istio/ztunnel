@@ -4011,6 +4011,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "chrono",
+ "crossbeam-channel",
  "duration-str",
  "educe",
  "flurry",
