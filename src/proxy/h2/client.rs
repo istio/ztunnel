@@ -39,7 +39,7 @@ pub struct H2ConnectClient {
     sender: SendRequest<Bytes>,
     pub max_allowed_streams: u16,
     stream_count: Arc<AtomicU16>,
-    wl_key: WorkloadKey,
+    wl_key: Arc<WorkloadKey>,
     /// Tunnel revocation signal, surfaced to downstream connections via [`Self::revoked_receiver`]
     /// so they can attribute a revoked teardown as `CERT_REVOKED`.
     /// `None` when CRL enforcement is disabled.
@@ -60,7 +60,7 @@ pub struct WorkloadKey {
 
 impl Display for WorkloadKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}({})->{}[", self.src, &self.src_id, self.dst,)?;
+        write!(f, "{}({})->{}[", self.src, self.src_id, self.dst,)?;
         for i in &self.dst_id {
             write!(f, "{i}")?;
         }
@@ -70,7 +70,7 @@ impl Display for WorkloadKey {
 
 impl H2ConnectClient {
     pub fn is_for_workload(&self, wl_key: &WorkloadKey) -> Result<(), crate::proxy::Error> {
-        if !(self.wl_key == *wl_key) {
+        if self.wl_key.as_ref() != wl_key {
             Err(crate::proxy::Error::Generic(
                 "connection does not match workload key!".into(),
             ))
@@ -87,6 +87,10 @@ impl H2ConnectClient {
             self.max_allowed_streams
         );
         future_count >= self.max_allowed_streams
+    }
+
+    pub fn has_stream_capacity(&self) -> bool {
+        self.stream_count.load(Ordering::Relaxed) < self.max_allowed_streams
     }
 
     pub fn ready_to_use(&mut self) -> bool {
@@ -108,18 +112,14 @@ impl H2ConnectClient {
         &mut self,
         req: http::Request<()>,
     ) -> Result<(crate::proxy::h2::H2Stream, Option<Baggage>), Error> {
-        let cur = self.stream_count.fetch_add(1, Ordering::SeqCst);
-        trace!(current_streams = cur, "sending request");
-        let (send, recv, baggage) = match self.internal_send(req).await {
-            Ok(r) => r,
-            Err(e) => {
-                // Request failed, so drop the stream now
-                self.stream_count.fetch_sub(1, Ordering::SeqCst);
-                return Err(e);
-            }
-        };
+        let reservation = crate::proxy::h2::StreamReservation::new(self.stream_count.clone());
+        trace!(
+            current_streams = reservation.previous_count(),
+            "sending request"
+        );
+        let (send, recv, baggage) = self.internal_send(req).await?;
 
-        let (dropped1, dropped2) = crate::proxy::h2::DropCounter::new(self.stream_count.clone());
+        let (dropped1, dropped2) = reservation.into_drop_counters();
         let read = crate::proxy::h2::H2StreamReadHalf {
             recv_stream: recv,
             _dropped: dropped1,
@@ -204,7 +204,7 @@ pub async fn spawn_connection(
         sender: send_req,
         stream_count: Arc::new(AtomicU16::new(0)),
         max_allowed_streams,
-        wl_key,
+        wl_key: Arc::new(wl_key),
         revoked_rx,
     };
     Ok(c)

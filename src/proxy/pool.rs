@@ -17,22 +17,24 @@ use super::{Error, SocketFactory};
 use super::{LocalWorkloadInformation, h2};
 use std::time::Duration;
 
-use std::collections::hash_map::DefaultHasher;
-
 use std::hash::{Hash, Hasher};
+use std::ops::{Deref, DerefMut};
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Mutex;
+#[cfg(any(test, feature = "testing"))]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
-use tokio::sync::watch;
+use rand::Rng;
+use tokio::sync::Notify;
+use tokio::sync::{oneshot, watch};
+use tokio::time::Instant;
 
-use tokio::sync::Mutex;
 use tracing::{Instrument, debug, trace};
 
 use crate::baggage::Baggage;
 use crate::config;
-
-use flurry;
 
 use crate::proxy::h2::H2Stream;
 use crate::proxy::h2::client::{H2ConnectClient, WorkloadKey};
@@ -50,23 +52,148 @@ use tokio::io;
 #[derive(Clone)]
 pub struct WorkloadHBONEPool {
     state: Arc<PoolState>,
-    pool_watcher: watch::Receiver<bool>,
 }
 
-// PoolState is effectively the gnarly inner state stuff that needs thread/task sync, and should be wrapped in a Mutex.
+// PoolState is effectively the gnarly inner state stuff that needs thread/task sync.
 struct PoolState {
-    pool_notifier: watch::Sender<bool>, // This is already impl clone? rustc complains that it isn't, tho
-    timeout_tx: watch::Sender<bool>, // This is already impl clone? rustc complains that it isn't, tho
+    timeout_tx: watch::Sender<bool>,
+    timeout_rx: watch::Receiver<bool>,
     // this is effectively just a convenience data type - a rwlocked hashmap with keying and LRU drops
     // and has no actual hyper/http/connection logic.
-    connected_pool: Arc<pingora_pool::ConnectionPool<H2ConnectClient>>,
-    // this must be an atomic/concurrent-safe list-of-locks, so we can lock per-key, not globally, and avoid holding up all conn attempts
-    established_conn_writelock: flurry::HashMap<u64, Option<Arc<Mutex<()>>>>,
+    connected_pool: Arc<pingora_pool::ConnectionPool<PooledConnection>>,
+    entries: flurry::HashMap<u64, Arc<PoolEntry>>,
     pool_unused_release_timeout: Duration,
     // This is merely a counter to track the overall number of conns this pool spawns
     // to ensure we get unique poolkeys-per-new-conn, it is not a limit
     pool_global_conn_count: AtomicI32,
-    spawner: ConnSpawner,
+    factory: Arc<dyn ConnectionFactory>,
+    draining: AtomicBool,
+    #[cfg(any(test, feature = "testing"))]
+    synchronization_wakeups: AtomicU64,
+    #[cfg(any(test, feature = "testing"))]
+    unrelated_wakeups: AtomicU64,
+}
+
+struct PoolEntry {
+    key: WorkloadKey,
+    hash_key: u64,
+    inner: Mutex<EntryInner>,
+    notify: Notify,
+    pooled: AtomicUsize,
+}
+
+struct EntryInner {
+    state: EntryState,
+    transition: u64,
+    mapped: bool,
+    users: usize,
+    waiters: usize,
+    connections: usize,
+}
+
+#[derive(Clone, Copy)]
+enum EntryState {
+    Empty,
+    Connecting {
+        failures: u8,
+    },
+    Backoff {
+        until: Instant,
+        attempts: u8,
+        transition: u64,
+    },
+}
+
+enum EntryAction {
+    Create,
+    Wait(WaiterGuard),
+    Backoff(Instant, WaiterGuard),
+}
+
+struct EntryHandle {
+    pool: std::sync::Weak<PoolState>,
+    entry: Arc<PoolEntry>,
+}
+
+impl Drop for EntryHandle {
+    fn drop(&mut self) {
+        if self.entry.remove_user()
+            && let Some(pool) = self.pool.upgrade()
+        {
+            pool.cleanup_entry(&self.entry);
+        }
+    }
+}
+
+struct WaiterGuard {
+    entry: Arc<PoolEntry>,
+}
+
+impl Drop for WaiterGuard {
+    fn drop(&mut self) {
+        self.entry.remove_waiter();
+    }
+}
+
+struct CreationGuard {
+    entry: Arc<PoolEntry>,
+    active: bool,
+}
+
+struct ConnectionCheckoutGuard {
+    pool: std::sync::Weak<PoolState>,
+    connection: Option<PooledConnection>,
+}
+
+impl Drop for CreationGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.entry.mark_cancelled();
+        }
+    }
+}
+
+impl CreationGuard {
+    fn complete(&mut self) {
+        self.active = false;
+    }
+}
+
+impl ConnectionCheckoutGuard {
+    fn new(pool: &Arc<PoolState>, connection: PooledConnection) -> Self {
+        Self {
+            pool: Arc::downgrade(pool),
+            connection: Some(connection),
+        }
+    }
+
+    fn connection(&self) -> &PooledConnection {
+        self.connection
+            .as_ref()
+            .expect("checked-out connection must be present")
+    }
+
+    fn connection_mut(&mut self) -> &mut PooledConnection {
+        self.connection
+            .as_mut()
+            .expect("checked-out connection must be present")
+    }
+
+    fn into_connection(mut self) -> PooledConnection {
+        self.connection
+            .take()
+            .expect("checked-out connection must be present")
+    }
+}
+
+impl Drop for ConnectionCheckoutGuard {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take()
+            && let Some(pool) = self.pool.upgrade()
+        {
+            pool.recover_capacity(connection);
+        }
+    }
 }
 
 struct ConnSpawner {
@@ -78,9 +205,260 @@ struct ConnSpawner {
     metrics: Arc<crate::proxy::Metrics>,
 }
 
-// Does nothing but spawn new conns when asked
-impl ConnSpawner {
+#[async_trait::async_trait]
+trait ConnectionFactory: Send + Sync {
+    async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error>;
+}
+
+#[derive(Clone)]
+struct PooledConnection {
+    client: H2ConnectClient,
+    meta: pingora_pool::ConnectionMeta,
+    entry: Arc<PoolEntry>,
+    idle_reset: Arc<IdleReset>,
+}
+
+struct IdlePeriod {
+    generation: u64,
+    deadline: Instant,
+    evict: Arc<Notify>,
+    pickup: oneshot::Receiver<bool>,
+}
+
+struct IdleReset {
+    inner: Mutex<IdleResetInner>,
+    notify: Notify,
+    #[cfg(test)]
+    waiting_without_period: Notify,
+}
+
+struct IdleResetInner {
+    active: bool,
+    in_pool: bool,
+    generation: u64,
+    latest: Option<IdlePeriod>,
+}
+
+impl Deref for PooledConnection {
+    type Target = H2ConnectClient;
+
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
+
+impl DerefMut for PooledConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.client
+    }
+}
+
+impl IdleReset {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(IdleResetInner {
+                active: true,
+                in_pool: false,
+                generation: 0,
+                latest: None,
+            }),
+            notify: Notify::new(),
+            #[cfg(test)]
+            waiting_without_period: Notify::new(),
+        }
+    }
+
+    fn take_latest(&self) -> Option<IdlePeriod> {
+        self.inner.lock().unwrap().latest.take()
+    }
+
+    fn is_active(&self) -> bool {
+        self.inner.lock().unwrap().active
+    }
+}
+
+impl PoolEntry {
+    fn new(key: WorkloadKey, hash_key: u64) -> Self {
+        Self {
+            key,
+            hash_key,
+            inner: Mutex::new(EntryInner {
+                state: EntryState::Empty,
+                transition: 0,
+                mapped: true,
+                users: 0,
+                waiters: 0,
+                connections: 0,
+            }),
+            notify: Notify::new(),
+            pooled: AtomicUsize::new(0),
+        }
+    }
+
+    fn add_user(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        debug_assert!(inner.mapped);
+        inner.users += 1;
+    }
+
+    fn try_add_user(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.mapped {
+            return false;
+        }
+        inner.users += 1;
+        true
+    }
+
+    fn remove_user(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        debug_assert!(inner.users > 0);
+        inner.users -= 1;
+        Self::is_idle_inner(&inner)
+    }
+
+    fn add_connection(&self) {
+        self.inner.lock().unwrap().connections += 1;
+    }
+
+    fn remove_connection(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        debug_assert!(inner.connections > 0);
+        inner.connections -= 1;
+    }
+
+    fn remove_waiter(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        debug_assert!(inner.waiters > 0);
+        inner.waiters -= 1;
+    }
+
+    fn wait_action(self: &Arc<Self>) -> EntryAction {
+        let mut inner = self.inner.lock().unwrap();
+        self.wait_action_locked(&mut inner)
+    }
+
+    fn wait_action_locked(self: &Arc<Self>, inner: &mut EntryInner) -> EntryAction {
+        inner.waiters += 1;
+        EntryAction::Wait(WaiterGuard {
+            entry: self.clone(),
+        })
+    }
+
+    fn next_action(self: &Arc<Self>) -> EntryAction {
+        if self.pooled.load(Ordering::Acquire) > 0 {
+            return self.wait_action();
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if self.pooled.load(Ordering::Acquire) > 0 {
+            return self.wait_action_locked(&mut inner);
+        }
+        match inner.state {
+            EntryState::Empty => {
+                inner.transition = inner.transition.wrapping_add(1);
+                inner.state = EntryState::Connecting { failures: 0 };
+                EntryAction::Create
+            }
+            EntryState::Connecting { .. } => self.wait_action_locked(&mut inner),
+            EntryState::Backoff { until, .. } if until <= Instant::now() => {
+                let EntryState::Backoff { attempts, .. } = inner.state else {
+                    unreachable!()
+                };
+                inner.transition = inner.transition.wrapping_add(1);
+                inner.state = EntryState::Connecting { failures: attempts };
+                EntryAction::Create
+            }
+            EntryState::Backoff { until, .. } => {
+                inner.waiters += 1;
+                EntryAction::Backoff(
+                    until,
+                    WaiterGuard {
+                        entry: self.clone(),
+                    },
+                )
+            }
+        }
+    }
+
+    fn mark_success(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.transition = inner.transition.wrapping_add(1);
+        inner.state = EntryState::Empty;
+        drop(inner);
+        self.notify.notify_one();
+    }
+
+    fn mark_failure(&self) -> (Instant, u64) {
+        let mut inner = self.inner.lock().unwrap();
+        let failures = match inner.state {
+            EntryState::Connecting { failures } => failures,
+            _ => 0,
+        };
+        let attempts = failures.saturating_add(1);
+        let exponent = u32::from(attempts.saturating_sub(1).min(6));
+        let base_ms = 25u64.saturating_mul(1u64 << exponent).min(1_000);
+        let jitter_ms = rand::rng().random_range(0..=base_ms / 2);
+        let until = Instant::now() + Duration::from_millis(base_ms + jitter_ms);
+        inner.transition = inner.transition.wrapping_add(1);
+        let transition = inner.transition;
+        inner.state = EntryState::Backoff {
+            until,
+            attempts,
+            transition,
+        };
+        drop(inner);
+        self.notify.notify_waiters();
+        (until, transition)
+    }
+
+    fn expire_backoff(&self, expected_transition: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        if matches!(
+            inner.state,
+            EntryState::Backoff { transition, .. } if transition == expected_transition
+        ) {
+            inner.transition = inner.transition.wrapping_add(1);
+            inner.state = EntryState::Empty;
+            drop(inner);
+            self.notify.notify_waiters();
+        }
+    }
+
+    fn mark_cancelled(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.transition = inner.transition.wrapping_add(1);
+        inner.state = EntryState::Empty;
+        drop(inner);
+        self.notify.notify_waiters();
+    }
+
+    fn try_tombstone_if_idle(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.mapped || !Self::is_idle_inner(&inner) {
+            return false;
+        }
+        inner.mapped = false;
+        true
+    }
+
+    fn is_idle_inner(inner: &EntryInner) -> bool {
+        inner.users == 0
+            && inner.waiters == 0
+            && inner.connections == 0
+            && matches!(inner.state, EntryState::Empty)
+    }
+}
+
+#[async_trait::async_trait]
+impl ConnectionFactory for ConnSpawner {
+    // Does nothing but spawn new conns when asked.
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error> {
+        self.connect(key).await
+    }
+}
+
+impl ConnSpawner {
+    async fn connect(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error> {
         debug!("spawning new pool conn for {}", key);
 
         let cert = self.local_workload.fetch_certificate().await?;
@@ -122,63 +500,225 @@ impl ConnSpawner {
 }
 
 impl PoolState {
-    // This simply puts the connection back into the inner pool,
-    // and sets up a timed popper, which will resolve
-    // - when this reference is popped back out of the inner pool (doing nothing)
-    // - when this reference is evicted from the inner pool (doing nothing)
-    // - when the timeout_idler is drained (will pop)
-    // - when the timeout is hit (will pop)
-    //
-    // Idle poppers are safe to invoke if the conn they are popping is already gone
-    // from the inner queue, so we will start one for every insert, let them run or terminate on their own,
-    // and poll them to completion on shutdown - any duplicates from repeated checkouts/checkins of the same conn
-    // will simply resolve as a no-op in order.
-    //
+    fn hash_key(workload_key: &WorkloadKey) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        workload_key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    fn record_synchronization_wakeup(&self, entry: &PoolEntry, workload_key: &WorkloadKey) {
+        self.synchronization_wakeups.fetch_add(1, Ordering::Relaxed);
+        if &entry.key != workload_key {
+            self.unrelated_wakeups.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     // Note that "idle" in the context of this pool means "no one has asked for it or dropped it in X time, so prune it".
     //
-    // Pruning the idle connection from the pool does not close it - it simply ensures the pool stops holding a ref.
-    // hyper self-closes client conns when all refs are dropped and streamcount is 0, so pool consumers must
-    // drop their checked out conns and/or terminate their streams as well.
-    //
-    // Note that this simply removes the client ref from this pool - if other things hold client/streamrefs refs,
-    // they must also drop those before the underlying connection is fully closed.
-    fn maybe_checkin_conn(&self, conn: H2ConnectClient, pool_key: pingora_pool::ConnectionMeta) {
-        if conn.will_be_at_max_streamcount() {
+    // Each actual H2 connection owns one idle monitor task. Repeated checkout/check-in cycles reset
+    // that task with a new generation instead of spawning another task. The generation prevents an
+    // expiration selected concurrently with a newer check-in from removing the newer idle period.
+    fn maybe_checkin_conn(
+        self: &Arc<Self>,
+        conn: &PooledConnection,
+        capacity_recovered: bool,
+    ) -> bool {
+        if self.draining.load(Ordering::Acquire) {
+            return false;
+        }
+        if capacity_recovered {
+            if !conn.has_stream_capacity() {
+                return false;
+            }
+        } else if conn.will_be_at_max_streamcount() {
             debug!(
                 "checked out connection for {:?} is now at max streamcount; removing from pool",
-                pool_key
+                conn.meta
             );
+            return false;
+        }
+
+        let mut idle = conn.idle_reset.inner.lock().unwrap();
+        if !idle.active || idle.in_pool {
+            return false;
+        }
+        idle.generation = idle.generation.wrapping_add(1);
+        let generation = idle.generation;
+        let meta = conn.meta.clone();
+        conn.entry.pooled.fetch_add(1, Ordering::Release);
+        let (evict, pickup) = self.connected_pool.put(&meta, conn.clone());
+        idle.in_pool = true;
+        idle.latest = Some(IdlePeriod {
+            generation,
+            deadline: Instant::now() + self.pool_unused_release_timeout,
+            evict,
+            pickup,
+        });
+        drop(idle);
+        conn.entry.notify.notify_one();
+        conn.idle_reset.notify.notify_one();
+        true
+    }
+
+    fn recover_capacity(self: &Arc<Self>, mut conn: PooledConnection) {
+        if conn.ready_to_use() {
+            self.maybe_checkin_conn(&conn, true);
+        } else {
+            let mut idle = conn.idle_reset.inner.lock().unwrap();
+            idle.active = false;
+            idle.latest = None;
+            if idle.in_pool {
+                self.connected_pool.pop_closed(&conn.meta);
+                conn.entry.pooled.fetch_sub(1, Ordering::AcqRel);
+            }
+            idle.in_pool = false;
+            drop(idle);
+            conn.idle_reset.notify.notify_one();
+            conn.entry.notify.notify_waiters();
+        }
+    }
+
+    fn entry_for_key(self: &Arc<Self>, workload_key: &WorkloadKey) -> Result<EntryHandle, Error> {
+        let hash_key = Self::hash_key(workload_key);
+        loop {
+            let guard = self.entries.guard();
+            if let Some(entry) = self.entries.get(&hash_key, &guard).cloned() {
+                if entry.key != *workload_key {
+                    return Err(Error::Generic(
+                        "connection pool hash collision for workload key".into(),
+                    ));
+                }
+                if entry.try_add_user() {
+                    return Ok(EntryHandle {
+                        pool: Arc::downgrade(self),
+                        entry,
+                    });
+                }
+                self.cleanup_entry(&entry);
+                std::hint::spin_loop();
+                continue;
+            }
+
+            let entry = Arc::new(PoolEntry::new(workload_key.clone(), hash_key));
+            entry.add_user();
+            match self.entries.try_insert(hash_key, entry.clone(), &guard) {
+                Ok(_) => {
+                    return Ok(EntryHandle {
+                        pool: Arc::downgrade(self),
+                        entry,
+                    });
+                }
+                Err(error) => {
+                    let current = error.current.clone();
+                    if current.key != *workload_key {
+                        return Err(Error::Generic(
+                            "connection pool hash collision for workload key".into(),
+                        ));
+                    }
+                    if current.try_add_user() {
+                        return Ok(EntryHandle {
+                            pool: Arc::downgrade(self),
+                            entry: current,
+                        });
+                    }
+                    self.cleanup_entry(&current);
+                    std::hint::spin_loop();
+                }
+            }
+        }
+    }
+
+    fn cleanup_entry(&self, expected: &Arc<PoolEntry>) {
+        if !expected.try_tombstone_if_idle() {
             return;
         }
-        let (evict, pickup) = self.connected_pool.put(&pool_key, conn);
-        let rx = self.spawner.timeout_rx.clone();
-        let pool_ref = self.connected_pool.clone();
-        let pool_key_ref = pool_key.clone();
-        let release_timeout = self.pool_unused_release_timeout;
+
+        let guard = self.entries.guard();
+        let Some(entry) = self.entries.get(&expected.hash_key, &guard) else {
+            return;
+        };
+        if Arc::ptr_eq(entry, expected) {
+            trace!("removing unused pool entry for {}", expected.key);
+            self.entries.remove(&expected.hash_key, &guard);
+        }
+    }
+
+    fn begin_creation(&self, entry: &Arc<PoolEntry>) -> CreationGuard {
+        CreationGuard {
+            entry: entry.clone(),
+            active: true,
+        }
+    }
+
+    fn publish_success(
+        self: &Arc<Self>,
+        workload_key: &WorkloadKey,
+        entry: &Arc<PoolEntry>,
+        conn: H2ConnectClient,
+    ) -> PooledConnection {
+        let meta = pingora_pool::ConnectionMeta::new(
+            entry.hash_key,
+            self.pool_global_conn_count.fetch_add(1, Ordering::Relaxed),
+        );
+        let idle_reset = Arc::new(IdleReset::new());
+        let pooled = PooledConnection {
+            client: conn,
+            meta,
+            entry: entry.clone(),
+            idle_reset: idle_reset.clone(),
+        };
+        entry.add_connection();
+        self.maybe_checkin_conn(&pooled, false);
         tokio::spawn(
-            async move {
-                debug!("starting an idle timeout for connection {:?}", pool_key_ref);
-                pool_ref
-                    .idle_timeout(&pool_key_ref, Some(release_timeout), evict, rx, pickup)
-                    .await;
-                debug!(
-                    "connection {:?} was removed/checked out/timed out of the pool",
-                    pool_key_ref
-                )
+            IdleMonitor {
+                pool: Arc::downgrade(self),
+                entry: entry.clone(),
+                meta: pooled.meta.clone(),
+                idle_reset,
+                connected_pool: self.connected_pool.clone(),
+                timeout_rx: self.timeout_rx.clone(),
             }
+            .run()
             .in_current_span(),
         );
-        let _ = self.pool_notifier.send(true);
+        debug!(
+            "published connection {:?} for {}",
+            pooled.meta, workload_key
+        );
+        entry.mark_success();
+        pooled
+    }
+
+    fn publish_failure(self: &Arc<Self>, workload_key: &WorkloadKey, entry: &Arc<PoolEntry>) {
+        debug!("connection creation failed for {}", workload_key);
+        let (until, transition) = entry.mark_failure();
+        let pool = Arc::downgrade(self);
+        let entry = entry.clone();
+        let mut timeout_rx = self.timeout_rx.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep_until(until) => {
+                    entry.expire_backoff(transition);
+                }
+                _ = timeout_rx.changed() => {
+                    entry.mark_cancelled();
+                }
+            }
+            if let Some(pool) = pool.upgrade() {
+                pool.cleanup_entry(&entry);
+            }
+        });
     }
 
     // Since we are using a hash key to do lookup on the inner pingora pool, do a get guard
     // to make sure what we pull out actually deep-equals the workload_key, to avoid *sigh* crossing the streams.
     fn guarded_get(
         &self,
-        hash_key: &u64,
+        hash_key: u64,
         workload_key: &WorkloadKey,
-    ) -> Result<Option<H2ConnectClient>, Error> {
-        match self.connected_pool.get(hash_key) {
+    ) -> Result<Option<PooledConnection>, Error> {
+        match self.connected_pool.get(&hash_key) {
             None => Ok(None),
             Some(conn) => match Self::enforce_key_integrity(conn, workload_key) {
                 Err(e) => Err(e),
@@ -193,147 +733,193 @@ impl PoolState {
     //
     // this is a final safety check for collisions, we will throw up our hands and refuse to return the conn
     fn enforce_key_integrity(
-        conn: H2ConnectClient,
+        conn: PooledConnection,
         expected_key: &WorkloadKey,
-    ) -> Result<H2ConnectClient, Error> {
+    ) -> Result<PooledConnection, Error> {
         match conn.is_for_workload(expected_key) {
             Ok(()) => Ok(conn),
             Err(e) => Err(e),
         }
     }
 
-    // 1. Tries to get a writelock.
-    // 2. If successful, hold it, spawn a new connection, check it in, return a clone of it.
-    // 3. If not successful, return nothing.
-    //
-    // This is useful if we want to race someone else to the writelock to spawn a connection,
-    // and expect the losers to queue up and wait for the (singular) winner of the writelock
-    //
-    // This function should ALWAYS return a connection if it wins the writelock for the provided key.
-    // This function should NEVER return a connection if it does not win the writelock for the provided key.
-    // This function should ALWAYS propagate Error results to the caller
-    //
-    // It is important that the *initial* check here is authoritative, hence the locks, as
-    // we must know if this is a connection for a key *nobody* has tried to start yet
-    // (i.e. no writelock for our key in the outer map)
-    // or if other things have already established conns for this key (writelock for our key in the outer map).
-    //
-    // This is so we can backpressure correctly if 1000 tasks all demand a new connection
-    // to the same key at once, and not eagerly open 1000 tunnel connections.
-    async fn start_conn_if_win_writelock(
-        &self,
+    fn checkout_existing_conn(
+        self: &Arc<Self>,
+        entry: &PoolEntry,
         workload_key: &WorkloadKey,
-        pool_key: &pingora_pool::ConnectionMeta,
-    ) -> Result<Option<H2ConnectClient>, Error> {
-        let inner_conn_lock = {
-            trace!("getting keyed lock out of lockmap");
-            let guard = self.established_conn_writelock.guard();
-
-            let exist_conn_lock = self
-                .established_conn_writelock
-                .get(&pool_key.key, &guard)
-                .unwrap();
-            trace!("got keyed lock out of lockmap");
-            exist_conn_lock.as_ref().unwrap().clone()
-        };
-
-        trace!("attempting to win connlock for {}", workload_key);
-
-        let inner_lock = inner_conn_lock.try_lock();
-        match inner_lock {
-            Ok(_guard) => {
-                // BEGIN take inner writelock
-                debug!("nothing else is creating a conn and we won the lock, make one");
-                let client = self.spawner.new_pool_conn(workload_key.clone()).await?;
-
-                debug!(
-                    "checking in new conn for {} with pk {:?}",
-                    workload_key, pool_key
-                );
-                self.maybe_checkin_conn(client.clone(), pool_key.clone());
-                Ok(Some(client))
-                // END take inner writelock
-            }
-            Err(_) => {
-                debug!(
-                    "did not win connlock for {}, something else has it",
-                    workload_key
-                );
-                Ok(None)
-            }
-        }
-    }
-
-    // Does an initial, naive check to see if we have a writelock inserted into the map for this key
-    //
-    // If we do, take the writelock for that key, clone (or create) a connection, check it back in,
-    // and return a cloned ref, then drop the writelock.
-    //
-    // Otherwise, return None.
-    //
-    // This function should ALWAYS return a connection if a writelock exists for the provided key.
-    // This function should NEVER return a connection if no writelock exists for the provided key.
-    // This function should ALWAYS propagate Error results to the caller
-    //
-    // It is important that the *initial* check here is authoritative, hence the locks, as
-    // we must know if this is a connection for a key *nobody* has tried to start yet
-    // (i.e. no writelock for our key in the outer map)
-    // or if other things have already established conns for this key (writelock for our key in the outer map).
-    //
-    // This is so we can backpressure correctly if 1000 tasks all demand a new connection
-    // to the same key at once, and not eagerly open 1000 tunnel connections.
-    async fn checkout_conn_under_writelock(
-        &self,
-        workload_key: &WorkloadKey,
-        pool_key: &pingora_pool::ConnectionMeta,
-    ) -> Result<Option<H2ConnectClient>, Error> {
-        let found_conn = {
-            trace!("pool connect outer map - take guard");
-            let guard = self.established_conn_writelock.guard();
-
-            trace!("pool connect outer map - check for keyed mutex");
-            let exist_conn_lock = self.established_conn_writelock.get(&pool_key.key, &guard);
-            exist_conn_lock.and_then(|e_conn_lock| e_conn_lock.clone())
-        };
-        let Some(exist_conn_lock) = found_conn else {
-            return Ok(None);
-        };
-        debug!(
-            "checkout - found mutex for pool key {:?}, waiting for writelock",
-            pool_key
-        );
-        let _conn_lock = exist_conn_lock.as_ref().lock().await;
-
-        trace!(
-            "checkout - got writelock for conn with key {} and hash {:?}",
-            workload_key, pool_key.key
-        );
-        let returned_connection = loop {
-            match self.guarded_get(&pool_key.key, workload_key)? {
+    ) -> Result<Option<PooledConnection>, Error> {
+        loop {
+            match self.guarded_get(entry.hash_key, workload_key)? {
                 Some(mut existing) => {
+                    let idle_reset = existing.idle_reset.clone();
+                    let mut idle = idle_reset.inner.lock().unwrap();
+                    idle.in_pool = false;
+                    idle.generation = idle.generation.wrapping_add(1);
+                    idle.latest = None;
                     if !existing.ready_to_use() {
-                        // We checked this out, and will not check it back in
-                        // Loop again to find another/make a new one
                         debug!(
                             "checked out broken connection for {}, dropping it",
                             workload_key
                         );
+                        idle.active = false;
+                        existing.entry.pooled.fetch_sub(1, Ordering::AcqRel);
+                        existing.entry.notify.notify_waiters();
                         continue;
                     }
+                    let reinserted = if !existing.will_be_at_max_streamcount() && idle.active {
+                        idle.generation = idle.generation.wrapping_add(1);
+                        let generation = idle.generation;
+                        let meta = existing.meta.clone();
+                        let (evict, pickup) = self.connected_pool.put(&meta, existing.clone());
+                        idle.in_pool = true;
+                        idle.latest = Some(IdlePeriod {
+                            generation,
+                            deadline: Instant::now() + self.pool_unused_release_timeout,
+                            evict,
+                            pickup,
+                        });
+                        true
+                    } else {
+                        existing.entry.pooled.fetch_sub(1, Ordering::AcqRel);
+                        false
+                    };
+                    drop(idle);
+                    if reinserted {
+                        existing.entry.notify.notify_one();
+                    } else {
+                        existing.entry.notify.notify_waiters();
+                    }
                     debug!("re-using connection for {}", workload_key);
-                    break existing;
+                    return Ok(Some(existing));
                 }
-                None => {
-                    debug!("new connection needed for {}", workload_key);
-                    break self.spawner.new_pool_conn(workload_key.clone()).await?;
-                }
-            };
-        };
+                None => return Ok(None),
+            }
+        }
+    }
 
-        // For any connection, we will check in a copy and return the other unless its already maxed out
-        // TODO: in the future, we can keep track of these and start to use them once they finish some streams.
-        self.maybe_checkin_conn(returned_connection.clone(), pool_key.clone());
-        Ok(Some(returned_connection))
+    fn shutdown(&self) {
+        if self.draining.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        debug!("draining HBONE connection pool");
+        let _ = self.timeout_tx.send(true);
+        let entries = self
+            .entries
+            .iter(&self.entries.guard())
+            .map(|entry| entry.1)
+            .cloned()
+            .collect::<Vec<_>>();
+        for entry in entries {
+            entry.mark_cancelled();
+        }
+    }
+}
+
+struct IdleMonitor {
+    pool: std::sync::Weak<PoolState>,
+    entry: Arc<PoolEntry>,
+    meta: pingora_pool::ConnectionMeta,
+    idle_reset: Arc<IdleReset>,
+    connected_pool: Arc<pingora_pool::ConnectionPool<PooledConnection>>,
+    timeout_rx: watch::Receiver<bool>,
+}
+
+impl IdleMonitor {
+    async fn run(mut self) {
+        let mut current: Option<IdlePeriod> = None;
+        loop {
+            let Some(mut idle) = current.take() else {
+                let reset = self.idle_reset.notify.notified();
+                tokio::pin!(reset);
+                reset.as_mut().enable();
+                if let Some(period) = self.idle_reset.take_latest() {
+                    current = Some(period);
+                    continue;
+                }
+                if !self.idle_reset.is_active() {
+                    break;
+                }
+                #[cfg(test)]
+                self.idle_reset.waiting_without_period.notify_waiters();
+                tokio::select! {
+                    _ = &mut reset => {
+                        if !self.idle_reset.is_active() {
+                            break;
+                        }
+                        current = self.idle_reset.take_latest();
+                    }
+                    drain = self.timeout_rx.changed() => {
+                        if drain.is_err() || *self.timeout_rx.borrow() {
+                            self.close(true);
+                            break;
+                        }
+                    }
+                }
+                continue;
+            };
+
+            let expiration = tokio::time::sleep_until(idle.deadline);
+            tokio::pin!(expiration);
+            tokio::select! {
+                biased;
+                _ = self.idle_reset.notify.notified() => {
+                    if !self.idle_reset.is_active() {
+                        break;
+                    }
+                    current = self.idle_reset.take_latest();
+                }
+                drain = self.timeout_rx.changed() => {
+                    if drain.is_err() || *self.timeout_rx.borrow() {
+                        self.close(true);
+                        break;
+                    }
+                    current = Some(idle);
+                }
+                _ = &mut idle.pickup => {
+                    trace!("connection {:?} checked out before idle expiration", self.meta);
+                }
+                _ = idle.evict.notified() => {
+                    trace!("connection {:?} evicted before idle expiration", self.meta);
+                    self.close(false);
+                    break;
+                }
+                _ = &mut expiration => {
+                    let mut reset = self.idle_reset.inner.lock().unwrap();
+                    if reset.active
+                        && reset.in_pool
+                        && reset.generation == idle.generation
+                    {
+                        debug!("connection {:?} reached its idle expiration", self.meta);
+                        reset.active = false;
+                        reset.in_pool = false;
+                        reset.latest = None;
+                        self.connected_pool.pop_closed(&self.meta);
+                        self.entry.pooled.fetch_sub(1, Ordering::AcqRel);
+                        drop(reset);
+                        self.entry.notify.notify_waiters();
+                        break;
+                    }
+                }
+            }
+        }
+
+        self.entry.remove_connection();
+        if let Some(pool) = self.pool.upgrade() {
+            pool.cleanup_entry(&self.entry);
+        }
+    }
+
+    fn close(&self, remove_from_pool: bool) {
+        let mut reset = self.idle_reset.inner.lock().unwrap();
+        reset.active = false;
+        reset.latest = None;
+        if reset.in_pool {
+            if remove_from_pool {
+                self.connected_pool.pop_closed(&self.meta);
+            }
+            self.entry.pooled.fetch_sub(1, Ordering::AcqRel);
+            self.entry.notify.notify_waiters();
+        }
+        reset.in_pool = false;
     }
 }
 
@@ -344,7 +930,7 @@ impl Drop for PoolState {
         debug!(
             "poolstate dropping, stopping all connection drivers and cancelling all outstanding eviction timeout spawns"
         );
-        let _ = self.timeout_tx.send(true);
+        self.shutdown();
     }
 }
 
@@ -360,33 +946,38 @@ impl WorkloadHBONEPool {
         metrics: Arc<crate::proxy::Metrics>,
     ) -> WorkloadHBONEPool {
         let (timeout_tx, timeout_rx) = watch::channel(false);
-        let (timeout_send, timeout_recv) = watch::channel(false);
         let pool_duration = cfg.pool_unused_release_timeout;
 
         let spawner = ConnSpawner {
             cfg,
             socket_factory,
             local_workload,
-            timeout_rx: timeout_recv.clone(),
+            timeout_rx: timeout_rx.clone(),
             crl_manager,
             metrics,
         };
 
         Self {
             state: Arc::new(PoolState {
-                pool_notifier: timeout_tx,
-                timeout_tx: timeout_send,
-                // timeout_rx: timeout_recv,
-                // the number here is simply the number of unique src/dest keys
-                // the pool is expected to track before the inner hashmap resizes.
+                timeout_tx,
+                timeout_rx,
                 connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
-                established_conn_writelock: flurry::HashMap::new(),
+                entries: flurry::HashMap::new(),
                 pool_unused_release_timeout: pool_duration,
                 pool_global_conn_count: AtomicI32::new(0),
-                spawner,
+                factory: Arc::new(spawner),
+                draining: AtomicBool::new(false),
+                #[cfg(any(test, feature = "testing"))]
+                synchronization_wakeups: AtomicU64::new(0),
+                #[cfg(any(test, feature = "testing"))]
+                unrelated_wakeups: AtomicU64::new(0),
             }),
-            pool_watcher: timeout_rx,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shutdown(&self) {
+        self.state.shutdown();
     }
 
     pub async fn send_request_pooled(
@@ -394,11 +985,19 @@ impl WorkloadHBONEPool {
         workload_key: &WorkloadKey,
         request: http::Request<()>,
     ) -> Result<(H2Stream, Option<Baggage>, Option<watch::Receiver<bool>>), Error> {
-        let mut connection = self.connect(workload_key).await?;
+        let connection = self.connect(workload_key).await?;
+        let mut checkout = ConnectionCheckoutGuard::new(&self.state, connection);
 
         // Surface the tunnel's revocation signal so the caller can attribute a revoked teardown.
-        let revoked = connection.revoked_receiver();
-        let (stream, baggage) = connection.send_request(request).await?;
+        let revoked = checkout.connection().revoked_receiver();
+        let (mut stream, baggage) = checkout.connection_mut().send_request(request).await?;
+        let connection = checkout.into_connection();
+        let pool = Arc::downgrade(&self.state);
+        stream.set_on_close(move || {
+            if let Some(pool) = pool.upgrade() {
+                pool.recover_capacity(connection);
+            }
+        });
         Ok((stream, baggage, revoked))
     }
 
@@ -408,127 +1007,112 @@ impl WorkloadHBONEPool {
     //
     // If many `connects` request a connection to the same dest at once, all will wait until exactly
     // one connection is created, before deciding if they should create more or just use that one.
-    async fn connect(&mut self, workload_key: &WorkloadKey) -> Result<H2ConnectClient, Error> {
+    async fn connect(&mut self, workload_key: &WorkloadKey) -> Result<PooledConnection, Error> {
         trace!("pool connect START");
-        // TODO BML this may not be collision resistant, or a fast hash. It should be resistant enough for workloads tho.
-        // We are doing a deep-equals check at the end to mitigate any collisions, will see about bumping Pingora
-        let mut s = DefaultHasher::new();
-        workload_key.hash(&mut s);
-        let hash_key = s.finish();
-        let pool_key = pingora_pool::ConnectionMeta::new(
-            hash_key,
-            self.state
-                .pool_global_conn_count
-                .fetch_add(1, Ordering::SeqCst),
-        );
-        // First, see if we can naively take an inner lock for our specific key, and get a connection.
-        // This should be the common case, except for the first establishment of a new connection/key.
-        // This will be done under outer readlock (nonexclusive)/inner keyed writelock (exclusive).
+        if self.state.draining.load(Ordering::Acquire) {
+            return Err(Error::WorkloadHBONEPoolDraining);
+        }
+        let entry = self.state.entry_for_key(workload_key)?;
         let existing_conn = self
             .state
-            .checkout_conn_under_writelock(workload_key, &pool_key)
-            .await?;
-
-        // Early return, no need to do anything else
-        if let Some(e) = existing_conn {
+            .checkout_existing_conn(&entry.entry, workload_key)?;
+        if let Some(existing) = existing_conn {
             debug!("initial attempt - found existing conn, done");
-            return Ok(e);
+            return Ok(existing);
         }
 
-        // We couldn't get a writelock for this key. This means nobody has tried to establish any conns for this key yet,
-        // So, we will take a nonexclusive readlock on the outer lockmap, and attempt to insert one.
-        //
-        // (if multiple threads try to insert one, only one will succeed.)
-        {
-            debug!(
-                "didn't find a connection for key {:?}, making sure lockmap has entry",
-                hash_key
-            );
-            let guard = self.state.established_conn_writelock.guard();
-            match self.state.established_conn_writelock.try_insert(
-                hash_key,
-                Some(Arc::new(Mutex::new(()))),
-                &guard,
-            ) {
-                Ok(_) => {
-                    debug!("inserting conn mutex for key {:?} into lockmap", hash_key);
-                }
-                Err(_) => {
-                    debug!("already have conn for key {:?} in lockmap", hash_key);
-                }
+        let mut timeout_rx = self.state.timeout_rx.clone();
+        loop {
+            if self.state.draining.load(Ordering::Acquire) || *timeout_rx.borrow() {
+                return Err(Error::WorkloadHBONEPoolDraining);
             }
-        }
 
-        // If we get here, it means the following are true:
-        // 1. We have a guaranteed sharded mutex in the outer map for our current key
-        // 2. We can now, under readlock(nonexclusive) in the outer map, attempt to
-        // take the inner writelock for our specific key (exclusive).
-        //
-        // This doesn't block other tasks spawning connections against other keys, but DOES block other
-        // tasks spawning connections against THIS key - which is what we want.
+            let notified = entry.entry.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
 
-        // NOTE: The inner, key-specific mutex is a tokio::async::Mutex, and not a stdlib sync mutex.
-        // these differ from the stdlib sync mutex in that they are (slightly) slower
-        // (they effectively sleep the current task) and they can be held over an await.
-        // The tokio docs (rightly) advise you to not use these,
-        // because holding a lock over an await is a great way to create deadlocks if the await you
-        // hold it over does not resolve.
-        //
-        // HOWEVER. Here we know this connection will either establish or timeout (or fail with error)
-        // and we WANT other tasks to go back to sleep if a task is already trying to create a new connection for this key.
-        //
-        // So the downsides are actually useful (we WANT task contention -
-        // to block other parallel tasks from trying to spawn a connection for this key if we are already doing so)
-        trace!("fallback attempt - trying win win connlock");
-        let res = match self
-            .state
-            .start_conn_if_win_writelock(workload_key, &pool_key)
-            .await?
-        {
-            Some(client) => client,
-            None => {
-                debug!("we didn't win the lock, something else is creating a conn, wait for it");
-                // If we get here, it means the following are true:
-                // 1. We have a writelock in the outer map for this key (either we inserted, or someone beat us to it - but it's there)
-                // 2. We could not get the exclusive inner writelock to add a new conn for this key.
-                // 3. Someone else got the exclusive inner writelock, and is adding a new conn for this key.
-                //
-                // So, loop and wait for the pool_watcher to tell us a new conn was enpooled,
-                // so we can pull it out and check it.
-                loop {
-                    match self.pool_watcher.changed().await {
-                        Ok(_) => {
-                            trace!(
-                                "notified a new conn was enpooled, checking for hash {:?}",
-                                hash_key
-                            );
-                            // Notifier fired, try and get a conn out for our key.
-                            let existing_conn = self
-                                .state
-                                .checkout_conn_under_writelock(workload_key, &pool_key)
-                                .await?;
-                            match existing_conn {
-                                None => {
-                                    trace!(
-                                        "woke up on pool notification, but didn't find a conn for {:?} yet",
-                                        hash_key
-                                    );
-                                    continue;
-                                }
-                                Some(e_conn) => {
-                                    debug!("found existing conn after waiting");
-                                    break e_conn;
-                                }
-                            }
-                        }
-                        Err(_) => {
+            if let Some(existing) = self
+                .state
+                .checkout_existing_conn(&entry.entry, workload_key)?
+            {
+                debug!("found existing connection after registering waiter");
+                return Ok(existing);
+            }
+            let action = entry.entry.next_action();
+
+            match action {
+                EntryAction::Create => {
+                    let mut guard = self.state.begin_creation(&entry.entry);
+                    debug!("becoming connection creator for {}", workload_key);
+                    let creation = self.state.factory.new_pool_conn(workload_key.clone());
+                    tokio::pin!(creation);
+                    let result = tokio::select! {
+                        biased;
+                        changed = timeout_rx.changed() => {
+                            let _ = changed;
                             return Err(Error::WorkloadHBONEPoolDraining);
+                        }
+                        result = &mut creation => result,
+                    };
+                    match result {
+                        Ok(conn) => {
+                            let client =
+                                self.state.publish_success(workload_key, &entry.entry, conn);
+                            guard.complete();
+                            return Ok(client);
+                        }
+                        Err(err) => {
+                            self.state.publish_failure(workload_key, &entry.entry);
+                            guard.complete();
+                            return Err(err);
+                        }
+                    }
+                }
+                EntryAction::Wait(_waiter) => {
+                    debug!("waiting for a pool entry update for {}", workload_key);
+                    tokio::select! {
+                        biased;
+                        changed = timeout_rx.changed() => {
+                            let _ = changed;
+                            return Err(Error::WorkloadHBONEPoolDraining);
+                        }
+                        _ = &mut notified => {}
+                    }
+                    #[cfg(any(test, feature = "testing"))]
+                    self.state
+                        .record_synchronization_wakeup(&entry.entry, workload_key);
+                    if let Some(existing) = self
+                        .state
+                        .checkout_existing_conn(&entry.entry, workload_key)?
+                    {
+                        return Ok(existing);
+                    }
+                }
+                EntryAction::Backoff(until, _waiter) => {
+                    debug!("waiting for connection backoff for {}", workload_key);
+                    let _notified = tokio::select! {
+                        biased;
+                        changed = timeout_rx.changed() => {
+                            let _ = changed;
+                            return Err(Error::WorkloadHBONEPoolDraining);
+                        }
+                        _ = &mut notified => true,
+                        _ = tokio::time::sleep_until(until) => false,
+                    };
+                    #[cfg(any(test, feature = "testing"))]
+                    if _notified {
+                        self.state
+                            .record_synchronization_wakeup(&entry.entry, workload_key);
+                        if let Some(existing) = self
+                            .state
+                            .checkout_existing_conn(&entry.entry, workload_key)?
+                        {
+                            return Ok(existing);
                         }
                     }
                 }
             }
-        };
-        Ok(res)
+        }
     }
 }
 
