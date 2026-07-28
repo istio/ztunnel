@@ -14,8 +14,9 @@
 
 // Batched, vectored non-blocking log writer ported from agentgateway
 // (https://github.com/agentgateway/agentgateway), itself derived from
-// tracing-appender (MIT). Coalesces up to 64 lines into a single writev(2) so the
-// drain thread keeps up under high-concurrency log production.
+// tracing-appender (Copyright (c) 2019 Tokio Contributors, MIT license).
+// Coalesces up to 64 lines into a single writev(2) so the drain thread keeps
+// up under high-concurrency log production.
 #[derive(Debug)]
 pub(crate) enum Msg {
     Line(Vec<u8>),

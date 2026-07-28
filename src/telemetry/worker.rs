@@ -13,8 +13,9 @@
 // limitations under the License.
 
 // Ported from agentgateway (https://github.com/agentgateway/agentgateway),
-// derived from tracing-appender (MIT). The worker drains the channel and
-// coalesces up to GROUP_SIZE lines into a single writev(2).
+// derived from tracing-appender (Copyright (c) 2019 Tokio Contributors, MIT
+// license). The worker drains the channel and coalesces up to GROUP_SIZE
+// lines into a single writev(2).
 use std::fmt::Debug;
 use std::io::{IoSlice, Write};
 use std::thread;

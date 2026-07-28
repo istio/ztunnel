@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Derived from https://github.com/tokio-rs/tracing/blob/e63ef57f3d686abe3727ddd586eb9af73d6715b7/tracing-appender/src/non_blocking.rs#L1-L491
-// Under MIT license
+// Copyright (c) 2019 Tokio Contributors, under the MIT license.
 use std::io;
 use std::io::Write;
 use std::sync::Arc;
