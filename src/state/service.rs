@@ -681,3 +681,36 @@ impl<'a> ServiceMatch<'a> {
             .into()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ipnet::IpNet;
+    use std::net::Ipv4Addr;
+
+    fn make_service(name: &str, ns: &str, vips: Vec<IpAddr>, _cidrs: Vec<IpNet>) -> Service {
+        Service {
+            name: name.into(),
+            namespace: ns.into(),
+            hostname: format!("{name}.{ns}.svc.cluster.local").into(),
+            vips: vips
+                .into_iter()
+                .map(|ip| NetworkAddress {
+                    address: ip,
+                    network: crate::strng::EMPTY,
+                })
+                .collect(),
+            ports: HashMap::new(),
+            endpoints: EndpointSet::from_list([]),
+            subject_alt_names: vec![],
+            waypoint: None,
+            load_balancer: None,
+            ip_families: None,
+            canonical: false,
+        }
+    }
+
+    fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+}
