@@ -49,6 +49,7 @@ if [[ "$CI" == "" && "$DEST" == "gs://istio-build/ztunnel" ]]; then
   echo "Outside of CI, DEST must be explicitly set"
   exit 1
 fi
+# FIXME(sjinxuan) get ridof this once we fully migrate to AWS.
 if [[ -z "${AWS_CONTAINER_CREDENTIALS_FULL_URI}" ]]; then
     gsutil cp "${WD}/../out/rust/release/ztunnel" "${DEST}/${RELEASE_NAME}"
 fi
