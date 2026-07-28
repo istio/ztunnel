@@ -212,6 +212,20 @@ trait ConnectionFactory: Send + Sync {
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error>;
 }
 
+#[cfg(test)]
+struct BlockingConnectionFactory {
+    started: Arc<Notify>,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl ConnectionFactory for BlockingConnectionFactory {
+    async fn new_pool_conn(&self, _key: WorkloadKey) -> Result<H2ConnectClient, Error> {
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
 #[derive(Clone)]
 struct PooledConnection {
     client: H2ConnectClient,
@@ -1022,6 +1036,33 @@ impl WorkloadHBONEPool {
                 unrelated_wakeups: AtomicU64::new(0),
             }),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn blocking_for_test(idle: Duration) -> (Self, Arc<Notify>) {
+        let started = Arc::new(Notify::new());
+        let factory = Arc::new(BlockingConnectionFactory {
+            started: started.clone(),
+        });
+        let (timeout_tx, timeout_rx) = watch::channel(false);
+        let (connect_drain_tx, connect_drain_rx) = watch::channel(false);
+        let pool = Self {
+            state: Arc::new(PoolState {
+                timeout_tx,
+                timeout_rx,
+                connect_drain_tx,
+                connect_drain_rx,
+                connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
+                entries: flurry::HashMap::new(),
+                pool_unused_release_timeout: idle,
+                pool_global_conn_count: AtomicI32::new(0),
+                factory,
+                draining: AtomicBool::new(false),
+                synchronization_wakeups: AtomicU64::new(0),
+                unrelated_wakeups: AtomicU64::new(0),
+            }),
+        };
+        (pool, started)
     }
 
     #[cfg(test)]
