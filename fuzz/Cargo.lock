@@ -3165,18 +3165,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-appender"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "786d480bce6247ab75f005b14ae1624ad978d3029d9113f0a22fa1ac773faeaf"
-dependencies = [
- "crossbeam-channel",
- "thiserror 2.0.18",
- "time",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "tracing-attributes"
 version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4011,6 +3999,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "chrono",
+ "crossbeam-channel",
  "duration-str",
  "educe",
  "flurry",
@@ -4074,7 +4063,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "tracing-appender",
  "tracing-core",
  "tracing-log",
  "tracing-subscriber",
