@@ -22,6 +22,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use std::sync::Arc;
+#[cfg(feature = "testing")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use tokio::sync::watch;
@@ -50,13 +52,15 @@ use tokio::io;
 #[derive(Clone)]
 pub struct WorkloadHBONEPool {
     state: Arc<PoolState>,
-    pool_watcher: watch::Receiver<bool>,
+    pool_watcher: watch::Receiver<u64>,
 }
 
 // PoolState is effectively the gnarly inner state stuff that needs thread/task sync, and should be wrapped in a Mutex.
 struct PoolState {
-    pool_notifier: watch::Sender<bool>, // This is already impl clone? rustc complains that it isn't, tho
-    timeout_tx: watch::Sender<bool>, // This is already impl clone? rustc complains that it isn't, tho
+    // The hash key identifies which destination caused the notification.
+    pool_notifier: watch::Sender<u64>,
+    timeout_tx: watch::Sender<bool>,
+    timeout_rx: watch::Receiver<bool>,
     // this is effectively just a convenience data type - a rwlocked hashmap with keying and LRU drops
     // and has no actual hyper/http/connection logic.
     connected_pool: Arc<pingora_pool::ConnectionPool<H2ConnectClient>>,
@@ -66,7 +70,11 @@ struct PoolState {
     // This is merely a counter to track the overall number of conns this pool spawns
     // to ensure we get unique poolkeys-per-new-conn, it is not a limit
     pool_global_conn_count: AtomicI32,
-    spawner: ConnSpawner,
+    factory: Arc<dyn ConnectionFactory>,
+    #[cfg(feature = "testing")]
+    synchronization_wakeups: AtomicU64,
+    #[cfg(feature = "testing")]
+    unrelated_wakeups: AtomicU64,
 }
 
 struct ConnSpawner {
@@ -78,8 +86,14 @@ struct ConnSpawner {
     metrics: Arc<crate::proxy::Metrics>,
 }
 
+#[async_trait::async_trait]
+trait ConnectionFactory: Send + Sync {
+    async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error>;
+}
+
 // Does nothing but spawn new conns when asked
-impl ConnSpawner {
+#[async_trait::async_trait]
+impl ConnectionFactory for ConnSpawner {
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error> {
         debug!("spawning new pool conn for {}", key);
 
@@ -151,7 +165,7 @@ impl PoolState {
             return;
         }
         let (evict, pickup) = self.connected_pool.put(&pool_key, conn);
-        let rx = self.spawner.timeout_rx.clone();
+        let rx = self.timeout_rx.clone();
         let pool_ref = self.connected_pool.clone();
         let pool_key_ref = pool_key.clone();
         let release_timeout = self.pool_unused_release_timeout;
@@ -168,7 +182,7 @@ impl PoolState {
             }
             .in_current_span(),
         );
-        let _ = self.pool_notifier.send(true);
+        let _ = self.pool_notifier.send(pool_key.key);
     }
 
     // Since we are using a hash key to do lookup on the inner pingora pool, do a get guard
@@ -244,7 +258,7 @@ impl PoolState {
             Ok(_guard) => {
                 // BEGIN take inner writelock
                 debug!("nothing else is creating a conn and we won the lock, make one");
-                let client = self.spawner.new_pool_conn(workload_key.clone()).await?;
+                let client = self.factory.new_pool_conn(workload_key.clone()).await?;
 
                 debug!(
                     "checking in new conn for {} with pk {:?}",
@@ -325,7 +339,7 @@ impl PoolState {
                 }
                 None => {
                     debug!("new connection needed for {}", workload_key);
-                    break self.spawner.new_pool_conn(workload_key.clone()).await?;
+                    break self.factory.new_pool_conn(workload_key.clone()).await?;
                 }
             };
         };
@@ -359,33 +373,37 @@ impl WorkloadHBONEPool {
         crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
         metrics: Arc<crate::proxy::Metrics>,
     ) -> WorkloadHBONEPool {
+        let (pool_notifier, pool_watcher) = watch::channel(0u64);
         let (timeout_tx, timeout_rx) = watch::channel(false);
-        let (timeout_send, timeout_recv) = watch::channel(false);
         let pool_duration = cfg.pool_unused_release_timeout;
 
-        let spawner = ConnSpawner {
+        let factory = Arc::new(ConnSpawner {
             cfg,
             socket_factory,
             local_workload,
-            timeout_rx: timeout_recv.clone(),
+            timeout_rx: timeout_rx.clone(),
             crl_manager,
             metrics,
-        };
+        });
 
         Self {
             state: Arc::new(PoolState {
-                pool_notifier: timeout_tx,
-                timeout_tx: timeout_send,
-                // timeout_rx: timeout_recv,
-                // the number here is simply the number of unique src/dest keys
+                pool_notifier,
+                timeout_tx,
+                timeout_rx,
+                // The number here is simply the number of unique src/dest keys
                 // the pool is expected to track before the inner hashmap resizes.
                 connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
                 established_conn_writelock: flurry::HashMap::new(),
                 pool_unused_release_timeout: pool_duration,
                 pool_global_conn_count: AtomicI32::new(0),
-                spawner,
+                factory,
+                #[cfg(feature = "testing")]
+                synchronization_wakeups: AtomicU64::new(0),
+                #[cfg(feature = "testing")]
+                unrelated_wakeups: AtomicU64::new(0),
             }),
-            pool_watcher: timeout_rx,
+            pool_watcher,
         }
     }
 
@@ -498,6 +516,17 @@ impl WorkloadHBONEPool {
                 loop {
                     match self.pool_watcher.changed().await {
                         Ok(_) => {
+                            #[cfg(feature = "testing")]
+                            {
+                                let notified_key = *self.pool_watcher.borrow();
+                                self.state
+                                    .synchronization_wakeups
+                                    .fetch_add(1, Ordering::Relaxed);
+                                if notified_key != hash_key {
+                                    self.state.unrelated_wakeups.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+
                             trace!(
                                 "notified a new conn was enpooled, checking for hash {:?}",
                                 hash_key
@@ -532,6 +561,129 @@ impl WorkloadHBONEPool {
     }
 }
 
+#[cfg(feature = "testing")]
+pub mod benchmarks {
+    use super::{ConnectionFactory, PoolState, WorkloadHBONEPool};
+    use crate::proxy::h2::client::{H2ConnectClient, WorkloadKey};
+    use std::collections::HashMap;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::watch;
+
+    struct BenchmarkFactory {
+        clients: Arc<HashMap<WorkloadKey, H2ConnectClient>>,
+        factory_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ConnectionFactory for BenchmarkFactory {
+        async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, super::Error> {
+            self.factory_calls.fetch_add(1, Ordering::Relaxed);
+
+            // Allow competing checkout tasks to reach the coordination path.
+            tokio::task::yield_now().await;
+
+            self.clients
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("missing benchmark connection").into())
+        }
+    }
+
+    pub struct ProductionPoolFixture {
+        clients: Arc<HashMap<WorkloadKey, H2ConnectClient>>,
+        keys: Arc<Vec<WorkloadKey>>,
+    }
+
+    impl ProductionPoolFixture {
+        pub async fn new(destinations: usize) -> Self {
+            let keys = (0..destinations)
+                .map(|index| WorkloadKey {
+                    src_id: crate::identity::Identity::default(),
+                    dst_id: vec![crate::identity::Identity::default()],
+                    dst: SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        10_000 + u16::try_from(index).unwrap(),
+                    ),
+                    src: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                })
+                .collect::<Vec<_>>();
+
+            let mut clients = HashMap::with_capacity(keys.len());
+            for key in &keys {
+                clients.insert(
+                    key.clone(),
+                    H2ConnectClient::benchmark_client(key.clone(), u16::MAX).await,
+                );
+            }
+
+            Self {
+                clients: Arc::new(clients),
+                keys: Arc::new(keys),
+            }
+        }
+
+        pub fn pool(&self) -> ProductionPool {
+            let factory = Arc::new(BenchmarkFactory {
+                clients: self.clients.clone(),
+                factory_calls: AtomicUsize::new(0),
+            });
+
+            let (pool_notifier, pool_watcher) = watch::channel(0u64);
+            let (timeout_tx, timeout_rx) = watch::channel(false);
+
+            ProductionPool {
+                pool: WorkloadHBONEPool {
+                    state: Arc::new(PoolState {
+                        pool_notifier,
+                        timeout_tx,
+                        timeout_rx,
+                        connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
+                        established_conn_writelock: flurry::HashMap::new(),
+                        pool_unused_release_timeout: Duration::from_secs(60),
+                        pool_global_conn_count: AtomicI32::new(0),
+                        factory: factory.clone(),
+                        synchronization_wakeups: AtomicU64::new(0),
+                        unrelated_wakeups: AtomicU64::new(0),
+                    }),
+                    pool_watcher,
+                },
+                keys: self.keys.clone(),
+                factory,
+            }
+        }
+    }
+
+    pub struct ProductionPool {
+        pool: WorkloadHBONEPool,
+        keys: Arc<Vec<WorkloadKey>>,
+        factory: Arc<BenchmarkFactory>,
+    }
+
+    impl ProductionPool {
+        pub async fn checkout(&self, key: usize) {
+            let mut pool = self.pool.clone();
+            pool.connect(&self.keys[key]).await.unwrap();
+        }
+
+        pub fn factory_calls(&self) -> usize {
+            self.factory.factory_calls.load(Ordering::Relaxed)
+        }
+
+        pub fn wakeups(&self) -> u64 {
+            self.pool
+                .state
+                .synchronization_wakeups
+                .load(Ordering::Relaxed)
+        }
+
+        pub fn unrelated_wakeups(&self) -> u64 {
+            self.pool.state.unrelated_wakeups.load(Ordering::Relaxed)
+        }
+    }
+}
 #[cfg(test)]
 mod test {
     use std::convert::Infallible;
