@@ -46,7 +46,7 @@ openssl = { version = "0.10", optional = true }
 anyhow = "1.0"
 async-stream = "0.3"
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 byteorder = "1.5"
 bytes = { version = "1.11", features = ["serde"] }
 chrono = "0.4"
