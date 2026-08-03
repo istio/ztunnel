@@ -65,6 +65,7 @@ impl ConnRegistration {
     /// from_conn captures all info needed for webpki re-verification during CRL load event
     pub fn from_conn(
         conn_state: &CommonState,
+        peer_identity: Option<Identity>,
         roots: Arc<RootCertStore>,
         key_usage: KeyUsage,
         reporter: Reporter,
@@ -73,7 +74,6 @@ impl ConnRegistration {
             .peer_certificates()
             .map(|certs| certs.iter().map(|c| c.clone().into_owned()).collect())
             .unwrap_or_default();
-        let peer_identity = crate::tls::identity_from_connection(conn_state);
         Self {
             presented_chain,
             roots,
@@ -1070,6 +1070,7 @@ mod tests {
         let (_, ssl) = client_tls.get_ref();
         let reg = ConnRegistration::from_conn(
             ssl,
+            None,
             server_wl.root_store(),
             KeyUsage::server_auth(),
             crate::proxy::metrics::Reporter::source,
@@ -1233,6 +1234,7 @@ mod tests {
         let (_, ssl) = client_tls.get_ref();
         let reg = ConnRegistration::from_conn(
             ssl,
+            None,
             server_wl.root_store(),
             KeyUsage::server_auth(),
             crate::proxy::metrics::Reporter::source,

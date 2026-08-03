@@ -43,8 +43,7 @@ use crate::state::service::{LoadBalancerMode, Service, ServiceDescription};
 use crate::state::workload::OutboundProtocol;
 use crate::state::workload::{InboundProtocol, NetworkAddress, Workload, address::Address};
 use crate::state::{ServiceResolutionMode, Upstream};
-use crate::tls::identity_from_connection;
-use crate::{assertions, copy, proxy, socket};
+use crate::{assertions, copy, proxy, socket, tls};
 
 use super::h2::TokioH2Stream;
 
@@ -288,7 +287,10 @@ impl OutboundConnection {
                 }
             })?;
             let (_, ssl) = tls_stream.get_ref();
-            let peer_identity = identity_from_connection(ssl);
+            let peer_identity = {
+                let x509_cert = tls::certificate_from_connection(ssl);
+                tls::identity(&x509_cert)
+            };
 
             // Spawn inner CONNECT tunnel
             let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
@@ -296,6 +298,7 @@ impl OutboundConnection {
             let revocation = self.pi.crl_manager.as_ref().map(|crl_manager| {
                 crl_manager.register(crate::tls::revocation::ConnRegistration::from_conn(
                     ssl,
+                    peer_identity.clone(),
                     cert.root_store(),
                     webpki::KeyUsage::server_auth(),
                     crate::proxy::metrics::Reporter::source,
