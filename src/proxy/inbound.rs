@@ -141,9 +141,12 @@ impl Inbound {
                     };
                     debug!(latency=?start.elapsed(), "accepted TLS connection");
                     let (_, ssl) = tls.get_ref();
-                    let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
+                    let src_identity = {
+                        let x509_cert = tls::certificate_from_connection(ssl);
+                        tls::identity(&x509_cert)
+                    };
                     let conn = Connection {
-                        src_identity,
+                        src_identity: src_identity.clone(),
                         src,
                         dst_network: network.clone(), // inbound request must be on our network
                         dst,
@@ -151,7 +154,7 @@ impl Inbound {
                     debug!(%conn, "accepted connection");
                     let cfg = pi.cfg.clone();
                     // Enforce CRL revocation on this existing connection when a CRL is configured
-                    let revocation = Box::pin(Self::build_revocation(&pi, ssl)).await;
+                    let revocation = Box::pin(Self::build_revocation(&pi, ssl, src_identity)).await;
                     let revoked_rx = revocation.as_ref().map(|r| r.subscribe_revoked());
                     let request_handler = move |req| {
                         let id = Self::extract_traceparent(&req);
@@ -204,12 +207,14 @@ impl Inbound {
     async fn build_revocation(
         pi: &ProxyInputs,
         ssl: &CommonState,
+        peer_identity: Option<Identity>,
     ) -> Option<crate::tls::revocation::RevocationHandle> {
         let crl_manager = pi.crl_manager.as_ref()?;
         match pi.local_workload_information.fetch_certificate().await {
             Ok(cert) => Some(crl_manager.register(
                 crate::tls::revocation::ConnRegistration::from_conn(
                     ssl,
+                    peer_identity,
                     cert.root_store(),
                     webpki::KeyUsage::client_auth(),
                     crate::proxy::metrics::Reporter::destination,
