@@ -66,7 +66,9 @@ pub fn certificate_from_connection(conn: &CommonState) -> X509Result<'_, X509Cer
     conn.peer_certificates()
         .and_then(|certs| certs.first())
         .ok_or(X509Error::InvalidCertificate.into())
-        .and_then(|cert| X509Certificate::from_der(cert))
+        .and_then(|cert| {
+            X509Certificate::from_der(cert).inspect_err(|e| warn!("invalid certificate: {e}"))
+        })
 }
 
 pub fn identity(result: &X509Result<X509Certificate>) -> Option<Identity> {
