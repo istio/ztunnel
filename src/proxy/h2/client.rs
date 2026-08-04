@@ -39,7 +39,7 @@ pub struct H2ConnectClient {
     sender: SendRequest<Bytes>,
     pub max_allowed_streams: u16,
     stream_count: Arc<AtomicU16>,
-    wl_key: WorkloadKey,
+    wl_key: Arc<WorkloadKey>,
     /// Tunnel revocation signal, surfaced to downstream connections via [`Self::revoked_receiver`]
     /// so they can attribute a revoked teardown as `CERT_REVOKED`.
     /// `None` when CRL enforcement is disabled.
@@ -60,7 +60,7 @@ pub struct WorkloadKey {
 
 impl Display for WorkloadKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}({})->{}[", self.src, &self.src_id, self.dst,)?;
+        write!(f, "{}({})->{}[", self.src, self.src_id, self.dst,)?;
         for i in &self.dst_id {
             write!(f, "{i}")?;
         }
@@ -70,7 +70,7 @@ impl Display for WorkloadKey {
 
 impl H2ConnectClient {
     pub fn is_for_workload(&self, wl_key: &WorkloadKey) -> Result<(), crate::proxy::Error> {
-        if !(self.wl_key == *wl_key) {
+        if self.wl_key.as_ref() != wl_key {
             Err(crate::proxy::Error::Generic(
                 "connection does not match workload key!".into(),
             ))
@@ -87,6 +87,10 @@ impl H2ConnectClient {
             self.max_allowed_streams
         );
         future_count >= self.max_allowed_streams
+    }
+
+    pub fn has_stream_capacity(&self) -> bool {
+        self.stream_count.load(Ordering::Relaxed) < self.max_allowed_streams
     }
 
     pub fn ready_to_use(&mut self) -> bool {
@@ -108,18 +112,14 @@ impl H2ConnectClient {
         &mut self,
         req: http::Request<()>,
     ) -> Result<(crate::proxy::h2::H2Stream, Option<Baggage>), Error> {
-        let cur = self.stream_count.fetch_add(1, Ordering::SeqCst);
-        trace!(current_streams = cur, "sending request");
-        let (send, recv, baggage) = match self.internal_send(req).await {
-            Ok(r) => r,
-            Err(e) => {
-                // Request failed, so drop the stream now
-                self.stream_count.fetch_sub(1, Ordering::SeqCst);
-                return Err(e);
-            }
-        };
+        let reservation = crate::proxy::h2::StreamReservation::new(self.stream_count.clone());
+        trace!(
+            current_streams = reservation.previous_count(),
+            "sending request"
+        );
+        let (send, recv, baggage) = self.internal_send(req).await?;
 
-        let (dropped1, dropped2) = crate::proxy::h2::DropCounter::new(self.stream_count.clone());
+        let (dropped1, dropped2) = reservation.into_drop_counters();
         let read = crate::proxy::h2::H2StreamReadHalf {
             recv_stream: recv,
             _dropped: dropped1,
@@ -152,6 +152,83 @@ impl H2ConnectClient {
     /// A receiver for this tunnel's CRL revocation signal, or `None` when CRL enforcement is disabled
     pub fn revoked_receiver(&self) -> Option<watch::Receiver<bool>> {
         self.revoked_rx.clone()
+    }
+
+    #[cfg(feature = "testing")]
+    pub async fn benchmark_client(wl_key: WorkloadKey, max_allowed_streams: u16) -> Self {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let Ok(mut server) = h2::server::handshake(server_io).await else {
+                return;
+            };
+            while let Some(request) = server.accept().await {
+                let Ok((_request, mut respond)) = request else {
+                    return;
+                };
+                let _ = respond.send_response(http::Response::new(()), true);
+            }
+        });
+
+        let (sender, connection) = h2::client::Builder::new()
+            .initial_max_send_streams(max_allowed_streams as usize)
+            .handshake::<_, Bytes>(client_io)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        Self {
+            sender,
+            max_allowed_streams,
+            stream_count: Arc::new(AtomicU16::new(0)),
+            wl_key: Arc::new(wl_key),
+            revoked_rx: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn test_client_with_blocked_response(
+        wl_key: WorkloadKey,
+        max_allowed_streams: u16,
+    ) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (request_seen_tx, request_seen_rx) = oneshot::channel();
+        let (release_response_tx, release_response_rx) = oneshot::channel();
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let mut server = h2::server::handshake(server_io).await.unwrap();
+            let mut request_seen_tx = Some(request_seen_tx);
+            let mut release_response_rx = Some(release_response_rx);
+            while let Some(request) = server.accept().await {
+                let (_request, mut respond) = request.unwrap();
+                if let Some(request_seen_tx) = request_seen_tx.take() {
+                    let _ = request_seen_tx.send(());
+                }
+                if let Some(release_response_rx) = release_response_rx.take() {
+                    let _ = release_response_rx.await;
+                }
+                let _ = respond.send_response(http::Response::new(()), true);
+            }
+        });
+
+        let (sender, connection) = h2::client::Builder::new()
+            .initial_max_send_streams(max_allowed_streams as usize)
+            .handshake::<_, Bytes>(client_io)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        (
+            Self {
+                sender,
+                max_allowed_streams,
+                stream_count: Arc::new(AtomicU16::new(0)),
+                wl_key: Arc::new(wl_key),
+                revoked_rx: None,
+            },
+            request_seen_rx,
+            release_response_tx,
+        )
     }
 }
 
@@ -204,7 +281,7 @@ pub async fn spawn_connection(
         sender: send_req,
         stream_count: Arc::new(AtomicU16::new(0)),
         max_allowed_streams,
-        wl_key,
+        wl_key: Arc::new(wl_key),
         revoked_rx,
     };
     Ok(c)

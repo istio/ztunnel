@@ -87,8 +87,13 @@ impl Outbound {
             self.pi.crl_manager.clone(),
             self.pi.metrics.clone(),
         );
+        self.run_with_pool(pool).await;
+    }
+
+    async fn run_with_pool(self, pool: proxy::pool::WorkloadHBONEPool) {
         let pi = self.pi.clone();
         let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
+            pool.watch_drain(drain.clone());
             loop {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
@@ -851,6 +856,78 @@ mod tests {
     };
     use crate::xds::istio::workload::{NetworkMode, Service as XdsService};
     use crate::{identity, xds};
+
+    #[tokio::test]
+    async fn graceful_drain_cancels_blocked_outbound_pool_connect() {
+        initialize_telemetry();
+        let cfg = Arc::new(Config {
+            local_node: Some("local-node".to_string()),
+            outbound_addr: "127.0.0.1:0".parse().unwrap(),
+            self_termination_deadline: Duration::from_secs(5),
+            ..crate::config::parse_config().unwrap()
+        });
+        let source = XdsWorkload {
+            uid: "cluster1//v1/Pod/default/local-source".to_string(),
+            name: "local-source".to_string(),
+            namespace: "default".to_string(),
+            service_account: "default".to_string(),
+            node: "local-node".to_string(),
+            ..Default::default()
+        };
+        let destination = XdsWorkload {
+            uid: "cluster1//v1/Pod/default/remote-destination".to_string(),
+            name: "remote-destination".to_string(),
+            namespace: "default".to_string(),
+            service_account: "default".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 1])],
+            node: "remote-node".to_string(),
+            tunnel_protocol: XdsProtocol::Hbone as i32,
+            ..Default::default()
+        };
+        let state = new_proxy_state(&[source, destination], &[], &[]);
+        let socket_factory = Arc::new(crate::proxy::DefaultSocketFactory::default());
+        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(WorkloadInfo {
+                name: "local-source".to_string(),
+                namespace: "default".to_string(),
+                service_account: "default".to_string(),
+            }),
+            state.clone(),
+            identity::mock::new_secret_manager(Duration::from_secs(10)),
+        ));
+        let pi = Arc::new(ProxyInputs {
+            cfg: cfg.clone(),
+            connection_manager: ConnectionManager::default(),
+            state,
+            metrics: test_proxy_metrics(),
+            socket_factory,
+            local_workload_information,
+            resolver: None,
+            disable_inbound_freebind: false,
+            crl_manager: None,
+        });
+        let (drain_tx, drain_rx) = crate::drain::new();
+        let outbound = Outbound::new(pi, drain_rx).await.unwrap();
+        let outbound_address = outbound.address();
+        let (pool, factory_started) = WorkloadHBONEPool::blocking_for_test(Duration::from_secs(60));
+        let outbound_task = tokio::spawn(outbound.run_with_pool(pool));
+
+        let _client = TcpStream::connect(outbound_address).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), factory_started.notified())
+            .await
+            .expect("outbound connection should reach the pool factory");
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            drain_tx.start_drain_and_wait(crate::drain::DrainMode::Graceful),
+        )
+        .await
+        .expect("outbound drain should cancel the blocked pool connection");
+        tokio::time::timeout(Duration::from_secs(2), outbound_task)
+            .await
+            .expect("outbound listener should stop after drain")
+            .unwrap();
+    }
 
     async fn run_build_request(
         from: &str,
