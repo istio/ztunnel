@@ -104,6 +104,20 @@ impl EndpointSet {
         self.inner.insert(k, Arc::new(v));
     }
 
+    pub fn extend(&mut self, eps: impl IntoIterator<Item = (Strng, Endpoint)>) {
+        for (k, v) in eps {
+            self.inner.insert(k, Arc::new(v));
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     pub fn contains(&self, key: &Strng) -> bool {
         self.inner.contains_key(key)
     }
@@ -112,8 +126,8 @@ impl EndpointSet {
         self.inner.get(key).map(Arc::as_ref)
     }
 
-    pub fn remove(&mut self, key: &Strng) {
-        self.inner.remove(key);
+    pub fn remove(&mut self, key: &Strng) -> bool {
+        self.inner.remove(key).is_some()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Endpoint> {
@@ -369,6 +383,12 @@ pub struct ServiceStore {
     /// service for a given hostname. However, `ServiceEntry` allows hostnames to be overridden
     /// on a per-namespace basis.
     pub(super) by_host: HashMap<Strng, Vec<Arc<Service>>>,
+
+    /// Counts endpoint-only reindexes (one per service per [Self::apply_endpoints]
+    /// that mutates an existing service). Used by tests to assert that a push
+    /// clones each service at most once, not once per endpoint.
+    #[cfg(test)]
+    endpoint_reindexes: usize,
 }
 
 impl ServiceStore {
@@ -471,62 +491,61 @@ impl ServiceStore {
     }
 
     /// Adds an endpoint for the service VIP.
-    pub fn insert_endpoint(&mut self, service_name: NamespacedHostname, ep: Endpoint) {
-        let ep_uid = ep.workload_uid.clone();
-        if let Some(svc) = self.get_by_namespaced_host(&service_name) {
-            // We may or may not accept the endpoint based on it's health
-            if !svc.should_include_endpoint(ep.status) {
-                trace!(
-                    "service doesn't accept pod with status {:?}, skip",
-                    ep.status
-                );
-                return;
-            }
+    /// Applies a batch of endpoint upserts and removals to a single service with
+    /// a single clone + single reindex (or a single staged-map update when the
+    /// service has not been received yet). The xDS push handler uses this to
+    /// coalesce all of a service's endpoint changes in one push, avoiding the
+    /// O(E²) cost of cloning the service's whole [EndpointSet] per endpoint.
+    ///
+    /// Removals are applied before upserts, so a uid present in both (a
+    /// re-inserted workload) reflects the upsert — or, if the upsert is
+    /// health-filtered out, is correctly left removed.
+    pub fn apply_endpoints(
+        &mut self,
+        service_name: &NamespacedHostname,
+        upserts: HashMap<Strng, Endpoint>,
+        removals: HashSet<Strng>,
+    ) {
+        if let Some(svc) = self.get_by_namespaced_host(service_name) {
             let mut svc = Arc::unwrap_or_clone(svc);
+            let mut changed = false;
 
-            // Clone the service and add the endpoint.
-            svc.endpoints.insert(ep_uid, ep);
+            for uid in &removals {
+                changed |= svc.endpoints.remove(uid);
+            }
 
-            // Update the service.
-            self.insert_endpoint_update(svc);
+            // We may or may not accept an endpoint based on its health.
+            let accepted: Vec<(Strng, Endpoint)> = upserts
+                .into_iter()
+                .filter(|(_, ep)| svc.should_include_endpoint(ep.status))
+                .collect();
+            if !accepted.is_empty() {
+                changed = true;
+                svc.endpoints.extend(accepted);
+            }
+
+            // Single reindex for the whole batch.
+            if changed {
+                self.insert_endpoint_update(svc);
+            }
         } else {
             // We received workload endpoints, but don't have the Service yet.
-            // This can happen due to ordering issues.
-            trace!("pod has service {}, but service not found", service_name);
-
-            // Add a staged entry. This will be added to the service once we receive it.
-            self.staged_services
-                .entry(service_name.clone())
-                .or_default()
-                .insert(ep_uid, ep.clone());
-        }
-    }
-
-    /// Removes entries for the given endpoint address.
-    pub fn remove_endpoint(&mut self, prev_workload: &Workload) {
-        let mut services_to_update = HashSet::new();
-        let workload_uid = &prev_workload.uid;
-        for svc in prev_workload.services.iter() {
-            // Remove the endpoint from the staged services.
-            self.staged_services
-                .entry(svc.clone())
-                .or_default()
-                .remove(workload_uid);
-            if self.staged_services[svc].is_empty() {
-                self.staged_services.remove(svc);
+            // This can happen due to ordering issues. Stage them; they are
+            // health-filtered at flush time (see insert_internal). Apply removals
+            // before upserts, matching the present-service path.
+            if !removals.is_empty()
+                && let Some(staged) = self.staged_services.get_mut(service_name)
+            {
+                staged.retain(|uid, _| !removals.contains(uid));
+                if staged.is_empty() {
+                    self.staged_services.remove(service_name);
+                }
             }
-
-            services_to_update.insert(svc.clone());
-        }
-
-        // Now remove the endpoint from all Services.
-        for svc in &services_to_update {
-            if let Some(svc) = self.get_by_namespaced_host(svc) {
-                let mut svc = Arc::unwrap_or_clone(svc);
-                svc.endpoints.remove(workload_uid);
-
-                // Update the service.
-                self.insert_endpoint_update(svc);
+            if !upserts.is_empty() {
+                self.staged_services
+                    .entry(service_name.clone())
+                    .or_default()
+                    .extend(upserts);
             }
         }
     }
@@ -542,6 +561,10 @@ impl ServiceStore {
     }
 
     fn insert_internal(&mut self, mut service: Service, endpoint_update_only: bool) {
+        #[cfg(test)]
+        if endpoint_update_only {
+            self.endpoint_reindexes += 1;
+        }
         let namespaced_hostname = service.namespaced_hostname();
         // If we're replacing an existing service, remove the old one from all data structures.
         if !endpoint_update_only {
@@ -674,6 +697,11 @@ impl ServiceStore {
     #[cfg(test)]
     pub fn num_staged_services(&self) -> usize {
         self.staged_services.len()
+    }
+
+    #[cfg(test)]
+    pub fn endpoint_reindexes(&self) -> usize {
+        self.endpoint_reindexes
     }
 }
 
