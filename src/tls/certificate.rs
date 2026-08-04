@@ -33,6 +33,7 @@ use tracing::warn;
 
 use crate::tls;
 use x509_parser::certificate::X509Certificate;
+use x509_parser::error::X509Result;
 
 #[derive(Clone, Debug)]
 pub struct Certificate {
@@ -60,18 +61,20 @@ pub struct WorkloadCertificate {
     pub roots: Vec<Certificate>,
 }
 
-pub fn identity_from_connection(conn: &CommonState) -> Option<Identity> {
+pub fn certificate_from_connection(conn: &CommonState) -> X509Result<'_, X509Certificate<'_>> {
     use x509_parser::prelude::*;
     conn.peer_certificates()
         .and_then(|certs| certs.first())
-        .and_then(|cert| match X509Certificate::from_der(cert) {
-            Ok((_, a)) => Some(a),
-            Err(e) => {
-                warn!("invalid certificate: {e}");
-                None
-            }
+        .ok_or(X509Error::InvalidCertificate.into())
+        .and_then(|cert| {
+            X509Certificate::from_der(cert).inspect_err(|e| warn!("invalid certificate: {e}"))
         })
-        .and_then(|cert| match identities(cert) {
+}
+
+pub fn identity(result: &X509Result<X509Certificate>) -> Option<Identity> {
+    result
+        .as_ref()
+        .map_or(None, |(_, cert)| match identities(cert) {
             Ok(ids) => ids.into_iter().next(),
             Err(e) => {
                 warn!("failed to extract identity: {}", e);
@@ -80,7 +83,7 @@ pub fn identity_from_connection(conn: &CommonState) -> Option<Identity> {
         })
 }
 
-pub fn identities(cert: X509Certificate) -> Result<Vec<Identity>, Error> {
+pub fn identities(cert: &X509Certificate) -> Result<Vec<Identity>, Error> {
     use x509_parser::prelude::*;
     let names = cert
         .subject_alternative_name()?
