@@ -46,8 +46,8 @@ use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
 use crate::state::DemandProxyState;
 use crate::state::service::{IpFamily, Service, ServiceMatch};
-use crate::state::workload::Workload;
 use crate::state::workload::address::Address;
+use crate::state::workload::{HeadlessServiceMatch, Workload};
 use crate::strng::Strng;
 use crate::{config, dns};
 
@@ -329,6 +329,16 @@ impl Store {
         out
     }
 
+    /// Returns the cluster-local domain suffix used to identify Kubernetes services,
+    /// e.g. `.svc.cluster.local` (no trailing dot).
+    fn kubernetes_cluster_local_domain(&self) -> String {
+        let domain = ".".to_string() + &self.svc_domain.to_utf8();
+        domain
+            .strip_suffix('.')
+            .expect("the svc domain must have a trailing '.'")
+            .to_string()
+    }
+
     fn find_server(&self, client: &Workload, requested_name: &Name) -> Option<ServerMatch> {
         // Lock the workload store for the duration of this function, since we're calling it
         // in a loop.
@@ -366,19 +376,9 @@ impl Store {
                     .flatten()
                     // Remove things without a VIP, unless they are Kubernetes headless services.
                     // This will trigger us to forward upstream.
-                    // TODO: we should have a reliable way to distinguish these. In sidecars, we use
-                    // `svc.Attributes.ServiceRegistry`, but we don't pass anything similar over WDS.
-                    // For now, checking the domain is good enough.
-                    // This does mean a `.svc.cluster.local` ServiceEntry will use these semantics, but
-                    // its better than *ALL* ServiceEntry doing this
                     .filter(|service| {
-                        // Domain will be like `.svc.cluster.local.` (trailing .), so ignore the last character.
-                        let domain = ".".to_string() + &self.svc_domain.to_utf8();
-
-                        let domain = domain
-                            .strip_suffix('.')
-                            .expect("the svc domain must have a trailing '.'");
-                        !service.vips.is_empty() || service.hostname.ends_with(domain)
+                        let domain = self.kubernetes_cluster_local_domain();
+                        !service.vips.is_empty() || service.is_kubernetes_headless(&domain)
                     })
                     // Drop services not visible to the client's namespace. If this empties the
                     // candidate list, we forward upstream as if the service were not in the mesh.
@@ -417,7 +417,35 @@ impl Store {
                         alias,
                     });
                 }
-                // TODO(): add support for workload lookups for headless pods
+            }
+
+            if alias.name.num_labels() > 1 {
+                trace!("checking headless svc {:#?}", alias);
+
+                let mut name = alias.name.into_iter();
+                let pod_name = str::from_utf8(name.next().unwrap()).unwrap();
+                let service_suffix = Name::from_labels(name).unwrap().to_utf8();
+                let service_suffix = service_suffix
+                    .strip_suffix('.')
+                    .expect("the svc domain must have a trailing '.'");
+
+                let cluster_local_domain = self.kubernetes_cluster_local_domain();
+                if let Some(wl) = HeadlessServiceMatch::find_best_match(
+                    state.workloads.find_headless_pod_workloads(
+                        pod_name,
+                        service_suffix,
+                        &state.services,
+                        &cluster_local_domain,
+                    ),
+                    &client.namespace,
+                    &client.cluster_id,
+                ) {
+                    return Some(ServerMatch {
+                        server: Address::Workload(wl),
+                        name: alias.name.clone(),
+                        alias,
+                    });
+                }
             }
         }
 
@@ -1384,20 +1412,35 @@ mod tests {
                 expect_answers: vec![],
                 ..Default::default()
             },
-            // TODO(https://github.com/istio/ztunnel/issues/1119)
             Case {
-                name: "todo: k8s pod - fqdn",
-                host: "headless.pod0.ns1.svc.cluster.local.",
-                expect_authoritative: false, // forwarded.
-                expect_code: ResponseCode::NXDomain,
+                name: "success: headless pod FQDN",
+                host: "pod-0.headless.ns1.svc.cluster.local.",
+                expect_answers: vec![a(
+                    n("pod-0.headless.ns1.svc.cluster.local."),
+                    ipv4("30.30.30.30"),
+                )],
                 ..Default::default()
             },
-            // TODO(https://github.com/istio/ztunnel/issues/1119)
             Case {
-                name: "todo: k8s pod - name.domain.ns",
-                host: "headless.pod0.ns1.",
-                expect_authoritative: false, // forwarded.
-                expect_code: ResponseCode::NXDomain,
+                name: "success: headless pod FQDN AAAA",
+                host: "pod-0.headless.ns1.svc.cluster.local.",
+                query_type: RecordType::AAAA,
+                expect_answers: vec![aaaa(
+                    n("pod-0.headless.ns1.svc.cluster.local."),
+                    ipv6("2001:db8::30"),
+                )],
+                ..Default::default()
+            },
+            Case {
+                name: "success: headless pod partial pod.subdomain.ns.svc",
+                host: "pod-0.headless.ns1.svc.",
+                expect_answers: vec![a(n("pod-0.headless.ns1.svc."), ipv4("30.30.30.30"))],
+                ..Default::default()
+            },
+            Case {
+                name: "success: headless pod partial pod.subdomain.ns",
+                host: "pod-0.headless.ns1.",
+                expect_answers: vec![a(n("pod-0.headless.ns1."), ipv4("30.30.30.30"))],
                 ..Default::default()
             },
             Case {
@@ -1835,7 +1878,7 @@ mod tests {
             local_workload(),
             // Workloads backing headless service.
             xds_workload(
-                "headless0",
+                "pod-0",
                 NS1,
                 "headless.pod0.ns1.svc.cluster.local",
                 &NW1,
