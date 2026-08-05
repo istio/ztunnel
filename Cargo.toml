@@ -52,6 +52,7 @@ base64 = "0.22"
 byteorder = "1.5"
 bytes = { version = "1.11", features = ["serde"] }
 chrono = "0.4"
+crossbeam-channel = "0.5"
 duration-str = "0.21"
 futures = "0.3"
 futures-core = "0.3"
@@ -116,7 +117,6 @@ http = "1.4"
 split-iter = "0.1"
 arcstr = { version = "1.2", features = ["serde"] }
 tracing-core = "0.1"
-tracing-appender = "0.2"
 tokio-util = { version = "0.7", features = ["io-util"] }
 educe = "0.6"
 tempfile = { version = "3.27", optional = true}
