@@ -114,20 +114,16 @@ impl Inbound {
                 let force_shutdown = force_shutdown.clone();
                 let pi = self.pi.clone();
                 let dst = to_canonical(raw_socket.local_addr().expect("local_addr available"));
-                let network = pi.cfg.network.clone();
                 let acceptor = crate::tls::InboundAcceptor::new(acceptor.clone());
 
                 let socket_labels = metrics::SocketLabels {
                     reporter: Reporter::destination,
                 };
                 pi.metrics.record_socket_open(&socket_labels);
-                let metrics_for_socket_close = pi.metrics.clone();
 
                 let serve_client = async move {
-                    let _socket_guard = metrics::SocketCloseGuard::new(
-                        metrics_for_socket_close,
-                        Reporter::destination,
-                    );
+                    let _socket_guard =
+                        metrics::SocketCloseGuard::new(pi.metrics.clone(), Reporter::destination);
                     let tls = match acceptor.accept(raw_socket).await {
                         Ok(tls) => tls,
                         Err(e) => {
@@ -141,17 +137,20 @@ impl Inbound {
                     };
                     debug!(latency=?start.elapsed(), "accepted TLS connection");
                     let (_, ssl) = tls.get_ref();
-                    let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
+                    let src_identity = {
+                        let x509_cert = tls::certificate_from_connection(ssl);
+                        tls::identity(&x509_cert)
+                    };
                     let conn = Connection {
-                        src_identity,
+                        src_identity: src_identity.clone(),
                         src,
-                        dst_network: network.clone(), // inbound request must be on our network
+                        dst_network: pi.cfg.network.clone(), // inbound request must be on our network
                         dst,
                     };
                     debug!(%conn, "accepted connection");
                     let cfg = pi.cfg.clone();
                     // Enforce CRL revocation on this existing connection when a CRL is configured
-                    let revocation = Box::pin(Self::build_revocation(&pi, ssl)).await;
+                    let revocation = Box::pin(Self::build_revocation(&pi, ssl, src_identity)).await;
                     let revoked_rx = revocation.as_ref().map(|r| r.subscribe_revoked());
                     let request_handler = move |req| {
                         let id = Self::extract_traceparent(&req);
@@ -179,7 +178,7 @@ impl Inbound {
                     );
                     // This is per HBONE connection, so while would be nice to be small, at least it
                     // is pooled so typically fewer of these.
-                    let serve = Box::pin(assertions::size_between(6000, 8000, serve_conn));
+                    let serve = Box::pin(assertions::size_between(6000, 7000, serve_conn));
                     serve.await
                 };
                 // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
@@ -204,12 +203,14 @@ impl Inbound {
     async fn build_revocation(
         pi: &ProxyInputs,
         ssl: &CommonState,
+        peer_identity: Option<Identity>,
     ) -> Option<crate::tls::revocation::RevocationHandle> {
         let crl_manager = pi.crl_manager.as_ref()?;
         match pi.local_workload_information.fetch_certificate().await {
             Ok(cert) => Some(crl_manager.register(
                 crate::tls::revocation::ConnRegistration::from_conn(
                     ssl,
+                    peer_identity,
                     cert.root_store(),
                     webpki::KeyUsage::client_auth(),
                     crate::proxy::metrics::Reporter::destination,

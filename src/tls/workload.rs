@@ -71,7 +71,7 @@ impl TrustDomainVerifier {
         let (_, c) = X509Certificate::from_der(client_cert).map_err(|_e| {
             rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
         })?;
-        let ids = tls::certificate::identities(c).map_err(|_e| {
+        let ids = tls::certificate::identities(&c).map_err(|_e| {
             rustls::Error::InvalidCertificate(
                 rustls::CertificateError::ApplicationVerificationFailure,
             )
@@ -233,7 +233,7 @@ impl IdentityVerifier {
         let (_, c) = X509Certificate::from_der(server_cert).map_err(|_e| {
             rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
         })?;
-        let id = tls::certificate::identities(c).map_err(|_e| {
+        let id = tls::certificate::identities(&c).map_err(|_e| {
             rustls::Error::InvalidCertificate(
                 rustls::CertificateError::ApplicationVerificationFailure,
             )
