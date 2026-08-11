@@ -161,7 +161,8 @@ async fn handle_dashboard(_req: Request<Incoming>) -> Response<Full<Bytes>> {
     let apis = &[
         (
             "debug/pprof/profile",
-            "build profile using the pprof profiler (if supported)",
+            "capture a CPU profile (if supported); \
+             params: seconds (1-300, default 10), frequency in Hz (1-1000, default 100)",
         ),
         (
             "debug/pprof/heap",
@@ -244,14 +245,47 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
 }
 
 #[cfg(target_os = "linux")]
-async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
+async fn handle_pprof(req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
+    let qp: HashMap<String, String> = req
+        .uri()
+        .query()
+        .map(|v| {
+            url::form_urlencoded::parse(v.as_bytes())
+                .into_owned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let seconds = match qp.get("seconds").map(|s| s.parse::<u64>()) {
+        None => 10,
+        Some(Ok(s)) if (1..=300).contains(&s) => s,
+        Some(_) => {
+            return Ok(plaintext_response(
+                hyper::StatusCode::BAD_REQUEST,
+                "invalid seconds value; expected 1-300\n".into(),
+            ));
+        }
+    };
+    // Default matches Go's CPU profiler. Higher rates severely under-report on a
+    // multi-core-busy process: SIGPROF is non-queuing, so expirations coalesce, and
+    // pprof-rs's handler serializes all threads through one lock and drops samples
+    // that arrive while it is held.
+    let frequency = match qp.get("frequency").map(|s| s.parse::<i32>()) {
+        None => 100,
+        Some(Ok(f)) if (1..=1000).contains(&f) => f,
+        Some(_) => {
+            return Ok(plaintext_response(
+                hyper::StatusCode::BAD_REQUEST,
+                "invalid frequency value; expected 1-1000\n".into(),
+            ));
+        }
+    };
+
     use pprof::protos::Message;
     let guard = pprof::ProfilerGuardBuilder::default()
-        .frequency(1000)
-        // .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+        .frequency(frequency)
         .build()?;
 
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_secs(seconds)).await;
     let report = guard.report().build()?;
     let profile = report.pprof()?;
 
