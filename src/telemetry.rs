@@ -25,7 +25,6 @@ use serde::ser::SerializeMap;
 
 use thiserror::Error;
 use tracing::{Event, Subscriber, field, info, warn};
-use tracing_appender::non_blocking::NonBlocking;
 use tracing_core::Field;
 use tracing_core::field::Visit;
 use tracing_core::span::Record;
@@ -39,14 +38,24 @@ use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, FormattedFi
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{Layer, Registry, filter, prelude::*, reload};
 
+// Batched, vectored non-blocking log writer (ported from agentgateway). The
+// background worker coalesces up to 64 lines into a single writev(2), which keeps
+// the drain ahead of high-concurrency log production and avoids the per-line
+// syscall bottleneck that backpressures the data plane under load.
+mod msg;
+mod nonblocking;
+mod worker;
+
+use nonblocking::{NonBlocking, NonBlockingBuilder, WorkerGuard};
+
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 static LOG_HANDLE: OnceCell<LogHandle> = OnceCell::new();
 
-pub fn setup_logging() -> tracing_appender::non_blocking::WorkerGuard {
+pub fn setup_logging() -> WorkerGuard {
     Lazy::force(&APPLICATION_START_TIME);
-    let (non_blocking, _guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+    let (non_blocking, _guard) = NonBlockingBuilder::default()
         .lossy(false)
-        .buffered_lines_limit(1000) // Buffer up to 1000 lines to avoid blocking on logs
+        .buffered_lines_limit(10000) // Buffer up to 10k lines; backpressure (not drop) when full
         .finish(std::io::stdout());
     tracing_subscriber::registry()
         .with(fmt_layer(non_blocking))
@@ -560,7 +569,7 @@ pub mod testing {
     pub fn setup_test_logging() {
         Lazy::force(&APPLICATION_START_TIME);
         let mock_writer = MockWriter::new(global_buf());
-        let (non_blocking, _guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        let (non_blocking, _guard) = super::NonBlockingBuilder::default()
             .lossy(false)
             .buffered_lines_limit(1)
             .finish(std::io::stdout());
