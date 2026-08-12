@@ -419,7 +419,14 @@ impl Store {
                 }
             }
 
-            if alias.name.num_labels() > 1 {
+            if alias
+                .name
+                .num_labels()
+                .wrapping_sub(self.svc_domain.num_labels())
+                == 3
+            {
+                // name is on the form pod-0.subdomain.ns.svc.cluster.local, i.e. it may
+                // be a pod FQDN - try to lookup in workload registry.
                 trace!("checking headless svc {:#?}", alias);
 
                 let mut name = alias.name.into_iter();
