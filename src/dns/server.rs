@@ -429,9 +429,10 @@ impl Store {
                 // be a pod FQDN - try to lookup in workload registry.
                 trace!("checking headless svc {:#?}", alias);
 
-                let mut name = alias.name.into_iter();
-                let pod_name = str::from_utf8(name.next().unwrap()).unwrap();
-                let service_suffix = Name::from_labels(name).unwrap().to_utf8();
+                let pod_name = alias.name.iter().next().expect("at least one label");
+                let pod_name = str::from_utf8(pod_name).expect("label is utf8");
+
+                let service_suffix = alias.name.base_name().to_utf8();
                 let service_suffix = service_suffix
                     .strip_suffix('.')
                     .expect("the svc domain must have a trailing '.'");
