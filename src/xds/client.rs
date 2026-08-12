@@ -169,6 +169,14 @@ impl<T: 'static + fmt::Debug + prost::Message + Default> RawHandler for HandlerW
             .map(|r| r.expect_err("must be err"))
             .collect();
 
+        // Resources we rejected must not be recorded as retained: on reconnect the server
+        // would otherwise see a matching version and never re-send (so never retry) them.
+        let rejected_names: HashSet<Strng> = decode_failures
+            .iter()
+            .chain(result.as_ref().err().into_iter().flatten())
+            .map(|reject| reject.name.clone())
+            .collect();
+
         // after we update the proxy cache, we can update our xds cache. it's important that we do this after
         // as we make on demand notifications here, so the proxy cache must be updated first.
         for name in res.removed_resources {
@@ -189,7 +197,9 @@ impl<T: 'static + fmt::Debug + prost::Message + Default> RawHandler for HandlerW
                 type_url: type_url.clone(),
             };
             state.notify_on_demand(&key);
-            state.add_resource(key.type_url, key.name);
+            if !rejected_names.contains(&key.name) {
+                state.add_resource(key.type_url, key.name, r.version.into());
+            }
         }
 
         // Either can fail. Merge the results
@@ -220,8 +230,10 @@ pub struct Config {
 }
 
 pub struct State {
-    /// Stores all known workload resources. Map from type_url to name
-    known_resources: HashMap<Strng, HashSet<Strng>>,
+    /// Stores all known resources. Map from type_url to name to the version the server last
+    /// sent, echoed back in initial_resource_versions on reconnect so the server can skip
+    /// re-sending resources whose content is unchanged.
+    known_resources: HashMap<Strng, HashMap<Strng, Strng>>,
 
     /// pending stores a list of all resources that are pending and XDS push
     pending: HashMap<ResourceKey, oneshot::Sender<()>>,
@@ -239,11 +251,22 @@ impl State {
             }
         }
     }
-    fn add_resource(&mut self, type_url: Strng, name: Strng) {
+    fn add_resource(&mut self, type_url: Strng, name: Strng, version: Strng) {
         self.known_resources
             .entry(type_url)
             .or_default()
-            .insert(name.clone());
+            .insert(name, version);
+    }
+
+    /// Records a resource that has been requested but not yet received. The version is left
+    /// empty — claiming no version means the server will always send the resource — without
+    /// clobbering the version of a resource already held.
+    fn add_pending_resource(&mut self, type_url: Strng, name: Strng) {
+        self.known_resources
+            .entry(type_url)
+            .or_default()
+            .entry(name)
+            .or_default();
     }
 }
 
@@ -599,9 +622,10 @@ impl AdsClient {
                     .state
                     .known_resources
                     .get(&strng::new(&req.type_url))
-                    .map(|hs| {
-                        hs.iter()
-                            .map(|n| (n.to_string(), "".to_string())) // Proto expects Name -> Version. We don't care about version
+                    .map(|resources| {
+                        resources
+                            .iter()
+                            .map(|(name, version)| (name.to_string(), version.to_string()))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -756,7 +780,8 @@ impl AdsClient {
         info!("received on demand request {demand_event}");
         let ResourceKey { type_url, name } = demand_event.clone();
         self.state.pending.insert(demand_event, tx);
-        self.state.add_resource(type_url.clone(), name.clone());
+        self.state
+            .add_pending_resource(type_url.clone(), name.clone());
         send.send(DeltaDiscoveryRequest {
             type_url: type_url.to_string(),
             resource_names_subscribe: vec![name.to_string()],
@@ -1073,6 +1098,85 @@ mod tests {
 
             if auth_seen && addr_seen {
                 return;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_reconnect_echoes_retained_versions() {
+        helpers::initialize_telemetry();
+
+        // Setup fake xds server
+        let (mut conn_receiver, client, _state, _block) = AdsServer::spawn(false).await;
+
+        tokio::spawn(async move {
+            if let Err(e) = client.run().await {
+                info!("workload manager: {}", e);
+            }
+        });
+
+        let mut conn = conn_receiver.recv().await.unwrap();
+
+        // The initial connection claims no retained resources.
+        for _ in 0..2 {
+            let req = conn.rx.recv().await.unwrap();
+            assert!(req.initial_resource_versions.is_empty());
+        }
+
+        // Send one valid address and one undecodable one. The response is NACKed, but the
+        // valid resource is still retained.
+        let malformed = ProtoResource {
+            name: "bad".to_string(),
+            aliases: vec![],
+            version: "9.9.9".to_string(),
+            resource: Some(Any {
+                type_url: ADDRESS_TYPE.to_string(),
+                value: vec![0xFF],
+            }),
+            ttl: None,
+            cache_control: None,
+        };
+        let response = Ok(DeltaDiscoveryResponse {
+            resources: vec![get_address(0, "1.2.3.4".parse().unwrap()), malformed],
+            nonce: TextNonce::new().to_string(),
+            system_version_info: "1.0.0".to_string(),
+            type_url: ADDRESS_TYPE.to_string(),
+            removed_resources: vec![],
+        });
+        conn.tx.send(response).await.unwrap();
+
+        let nack = conn.rx.recv().await.unwrap();
+        assert_eq!(nack.type_url, ADDRESS_TYPE.to_string());
+        assert!(nack.error_detail.is_some());
+
+        // Force a reconnect. The new stream's initial request echoes the version of the
+        // retained resource, and does not claim the rejected one (the server must re-send,
+        // and thereby retry, it).
+        drop(conn);
+        let mut conn = conn_receiver.recv().await.unwrap();
+
+        let timer = tokio::time::sleep(std::time::Duration::from_secs(5));
+        futures::pin_mut!(timer);
+        let mut addr_seen = false;
+        let mut auth_seen = false;
+        while !(addr_seen && auth_seen) {
+            let req = tokio::select! {
+                _ = &mut timer => {
+                    panic!("expected requests were not received");
+                }
+                req = conn.rx.recv() => {
+                    req.unwrap()
+                }
+            };
+            if req.type_url == ADDRESS_TYPE {
+                assert_eq!(
+                    req.initial_resource_versions,
+                    HashMap::from([("foo0".to_string(), "0.0.1".to_string())])
+                );
+                addr_seen = true;
+            } else if req.type_url == AUTHORIZATION_TYPE {
+                assert!(req.initial_resource_versions.is_empty());
+                auth_seen = true;
             }
         }
     }

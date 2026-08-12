@@ -49,7 +49,9 @@ pub struct Metrics {
     // on-demand DNS is not a part of DNS proxy, but part of ztunnel proxy itself
     pub on_demand_dns: Family<OnDemandDnsLabels, Counter>,
 
-    pub crl_policy_rejections: Family<CrlRejectionLabels, Counter>,
+    pub crl_policy_rejections: Family<CrlLabels, Counter>,
+
+    pub crl_untracked_connections: Family<CrlLabels, Counter>,
 }
 
 #[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
@@ -84,6 +86,8 @@ pub enum ResponseFlags {
     NetworkPolicyError,
     // Identity/certificate error
     IdentityError,
+    // Connection terminated because a peer certificate was revoked by a CRL
+    CertificateRevoked,
 }
 
 impl EncodeLabelValue for ResponseFlags {
@@ -96,6 +100,7 @@ impl EncodeLabelValue for ResponseFlags {
             ResponseFlags::Http2HandshakeFailure => writer.write_str("H2_HANDSHAKE_FAILURE"),
             ResponseFlags::NetworkPolicyError => writer.write_str("NETWORK_POLICY"),
             ResponseFlags::IdentityError => writer.write_str("IDENTITY_ERROR"),
+            ResponseFlags::CertificateRevoked => writer.write_str("CERT_REVOKED"),
         }
     }
 }
@@ -246,7 +251,7 @@ pub struct SocketLabels {
 }
 
 #[derive(Clone, Copy, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
-pub struct CrlRejectionLabels {
+pub struct CrlLabels {
     pub reporter: Reporter,
 }
 
@@ -399,6 +404,13 @@ impl Metrics {
             crl_policy_rejections.clone(),
         );
 
+        let crl_untracked_connections = Family::default();
+        registry.register(
+            "crl_untracked_connections",
+            "The total number of connections not tracked for CRL enforcement (unstable)",
+            crl_untracked_connections.clone(),
+        );
+
         Self {
             connection_opens,
             connection_close,
@@ -408,6 +420,7 @@ impl Metrics {
             connection_failures,
             open_sockets,
             crl_policy_rejections,
+            crl_untracked_connections,
         }
     }
 
@@ -421,7 +434,13 @@ impl Metrics {
 
     pub fn record_crl_rejection(&self, reporter: Reporter) {
         self.crl_policy_rejections
-            .get_or_create(&CrlRejectionLabels { reporter })
+            .get_or_create(&CrlLabels { reporter })
+            .inc();
+    }
+
+    pub fn record_crl_untracked_connection(&self, reporter: Reporter) {
+        self.crl_untracked_connections
+            .get_or_create(&CrlLabels { reporter })
             .inc();
     }
 }
@@ -621,6 +640,7 @@ impl ConnectionResultBuilder {
             src.workload = self.src.1.as_deref().map(to_value),
             src.namespace = self.tl.source_workload_namespace.to_value(),
             src.identity = self.tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
+            src.cluster = self.tl.source_cluster.to_value(),
 
             dst.addr = %self.dst.0,
             dst.hbone_addr = self.hbone_target.as_ref().map(display),
@@ -628,6 +648,7 @@ impl ConnectionResultBuilder {
             dst.workload = self.dst.1.as_deref().map(to_value),
             dst.namespace = self.tl.destination_workload_namespace.to_value(),
             dst.identity = self.tl.destination_principal.as_ref().filter(|_| mtls).map(to_value_owned),
+            dst.cluster = self.tl.destination_cluster.to_value(),
 
             direction = if self.tl.reporter == Reporter::source {
                 "outbound"
@@ -704,6 +725,7 @@ impl ConnectionResult {
                 | proxy::Error::AuthorizationPolicyLateRejection => {
                     ResponseFlags::AuthorizationPolicyDenied
                 }
+                proxy::Error::CertificateRevoked => ResponseFlags::CertificateRevoked,
                 proxy::Error::ConnectionFailed(_) => ResponseFlags::ConnectionFailure,
                 _ => ResponseFlags::ConnectionFailure,
             };
@@ -733,6 +755,7 @@ impl ConnectionResult {
                 | ResponseFlags::Http2HandshakeFailure
                 | ResponseFlags::NetworkPolicyError
                 | ResponseFlags::IdentityError
+                | ResponseFlags::CertificateRevoked
         ) {
             self.metrics.connection_failures.get_or_create(tl).inc();
         }
@@ -753,6 +776,7 @@ impl ConnectionResult {
             src.workload = self.src.1.as_deref().map(to_value),
             src.namespace = tl.source_workload_namespace.to_value(),
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
+            src.cluster = tl.source_cluster.to_value(),
 
             dst.addr = %self.dst.0,
             dst.hbone_addr = self.hbone_target.as_ref().map(display),
@@ -760,6 +784,7 @@ impl ConnectionResult {
             dst.workload = self.dst.1.as_deref().map(to_value),
             dst.namespace = tl.destination_workload_namespace.to_value(),
             dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(to_value_owned),
+            dst.cluster = tl.destination_cluster.to_value(),
 
             direction = if tl.reporter == Reporter::source {
                 "outbound"

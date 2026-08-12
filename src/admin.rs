@@ -128,6 +128,8 @@ impl Service {
                 "/debug/pprof/profile" => handle_pprof(req).await,
                 #[cfg(target_os = "linux")]
                 "/debug/pprof/heap" => handle_jemalloc_pprof_heapgen(req).await,
+                #[cfg(target_os = "linux")]
+                "/debug/pprof/heap/profiling" => handle_jemalloc_prof_toggle(req).await,
                 "/quitquitquit" => Ok(handle_server_shutdown(
                     state.shutdown_trigger.clone(),
                     req,
@@ -159,11 +161,16 @@ async fn handle_dashboard(_req: Request<Incoming>) -> Response<Full<Bytes>> {
     let apis = &[
         (
             "debug/pprof/profile",
-            "build profile using the pprof profiler (if supported)",
+            "capture a CPU profile (if supported); \
+             params: seconds (1-300, default 10), frequency in Hz (1-1000, default 100)",
         ),
         (
             "debug/pprof/heap",
             "collect heap profiling data (if supported, requires jmalloc)",
+        ),
+        (
+            "debug/pprof/heap/profiling",
+            "query or toggle heap profiling with ?activate=true|false (requires jmalloc)",
         ),
         ("quitquitquit", "shut down the server"),
         ("config_dump", "dump the current Ztunnel configuration"),
@@ -238,14 +245,47 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
 }
 
 #[cfg(target_os = "linux")]
-async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
+async fn handle_pprof(req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
+    let qp: HashMap<String, String> = req
+        .uri()
+        .query()
+        .map(|v| {
+            url::form_urlencoded::parse(v.as_bytes())
+                .into_owned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let seconds = match qp.get("seconds").map(|s| s.parse::<u64>()) {
+        None => 10,
+        Some(Ok(s)) if (1..=300).contains(&s) => s,
+        Some(_) => {
+            return Ok(plaintext_response(
+                hyper::StatusCode::BAD_REQUEST,
+                "invalid seconds value; expected 1-300\n".into(),
+            ));
+        }
+    };
+    // Default matches Go's CPU profiler. Higher rates severely under-report on a
+    // multi-core-busy process: SIGPROF is non-queuing, so expirations coalesce, and
+    // pprof-rs's handler serializes all threads through one lock and drops samples
+    // that arrive while it is held.
+    let frequency = match qp.get("frequency").map(|s| s.parse::<i32>()) {
+        None => 100,
+        Some(Ok(f)) if (1..=1000).contains(&f) => f,
+        Some(_) => {
+            return Ok(plaintext_response(
+                hyper::StatusCode::BAD_REQUEST,
+                "invalid frequency value; expected 1-1000\n".into(),
+            ));
+        }
+    };
+
     use pprof::protos::Message;
     let guard = pprof::ProfilerGuardBuilder::default()
-        .frequency(1000)
-        // .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+        .frequency(frequency)
         .build()?;
 
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_secs(seconds)).await;
     let report = guard.report().build()?;
     let profile = report.pprof()?;
 
@@ -410,14 +450,17 @@ async fn handle_jemalloc_pprof_heapgen(
     let Some(prof_ctrl) = jemalloc_pprof::PROF_CTL.as_ref() else {
         return Ok(Response::builder()
             .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-            .body("jemalloc profiling is not enabled".into())
+            .body("heap profiling is not enabled".into())
             .expect("builder with known status code should not fail"));
     };
     let mut prof_ctl = prof_ctrl.lock().await;
     if !prof_ctl.activated() {
         return Ok(Response::builder()
             .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-            .body("jemalloc not enabled".into())
+            .body(
+                "heap profiling not active; activate with /debug/pprof/heap/profiling?activate=true"
+                    .into(),
+            )
             .expect("builder with known status code should not fail"));
     }
     let pprof = prof_ctl.dump_pprof()?;
@@ -429,6 +472,55 @@ async fn handle_jemalloc_pprof_heapgen(
 
 #[cfg(not(feature = "jemalloc"))]
 async fn handle_jemalloc_pprof_heapgen(
+    _req: Request<Incoming>,
+) -> anyhow::Result<Response<Full<Bytes>>> {
+    Ok(Response::builder()
+        .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+        .body("jemalloc not enabled".into())
+        .expect("builder with known status code should not fail"))
+}
+
+#[cfg(all(feature = "jemalloc", target_os = "linux"))]
+async fn handle_jemalloc_prof_toggle(
+    req: Request<Incoming>,
+) -> anyhow::Result<Response<Full<Bytes>>> {
+    let Some(prof_ctrl) = jemalloc_pprof::PROF_CTL.as_ref() else {
+        return Ok(Response::builder()
+            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+            .body("jemalloc profiling is not enabled".into())
+            .expect("builder with known status code should not fail"));
+    };
+    let qp: HashMap<String, String> = req
+        .uri()
+        .query()
+        .map(|v| {
+            url::form_urlencoded::parse(v.as_bytes())
+                .into_owned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut prof_ctl = prof_ctrl.lock().await;
+    // Dumps from /debug/pprof/heap only include allocations sampled while
+    // profiling is active; allocations made before activation are not visible.
+    match qp.get("activate").map(String::as_str) {
+        Some("true") => prof_ctl.activate()?,
+        Some("false") => prof_ctl.deactivate()?,
+        Some(v) => {
+            return Ok(plaintext_response(
+                hyper::StatusCode::BAD_REQUEST,
+                format!("invalid activate value {v:?}; expected true or false\n"),
+            ));
+        }
+        None => {}
+    }
+    Ok(plaintext_response(
+        hyper::StatusCode::OK,
+        format!("heap profiling active: {}\n", prof_ctl.activated()),
+    ))
+}
+
+#[cfg(not(feature = "jemalloc"))]
+async fn handle_jemalloc_prof_toggle(
     _req: Request<Incoming>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
     Ok(Response::builder()
@@ -683,6 +775,7 @@ mod tests {
             }],
             subject_alt_names: vec!["SAN1".to_string(), "SAN2".to_string()],
             waypoint: None,
+            weighted_waypoints: vec![],
             load_balancing: Some(XdsLoadBalancing {
                 routing_preference: vec![1, 2],
                 mode: 1,
@@ -691,6 +784,7 @@ mod tests {
             ip_families: 0,
             extensions: Default::default(),
             canonical: true,
+            visibility: 0,
         };
 
         let auth = XdsAuthorization {

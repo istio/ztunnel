@@ -435,14 +435,20 @@ impl ProxyState {
 
         let options = match svc.load_balancer {
             Some(ref lb) if lb.mode != LoadBalancerMode::Standard => {
+                let network_preferred = !lb.routing_preferences.is_empty()
+                    && lb.routing_preferences[0] == LoadBalancerScopes::Network;
                 let ranks = endpoints
                     .filter_map(|(ep, wl)| {
                         // Load balancer will define N targets we want to match
                         // Consider [network, region, zone]
-                        // Rank = 3 means we match all of them
-                        // Rank = 2 means network and region match
+                        // Rank = 5 means we match all of them
+                        // Rank = 4 means network and region match
+                        // Rank = 3 means network match
+                        // Rank = 2 means region and zone match
+                        // Rank = 1 means region match
                         // Rank = 0 means none match
                         let mut rank = 0;
+                        let mut adjust = 0;
                         for target in &lb.routing_preferences {
                             let matches = match target {
                                 LoadBalancerScopes::Region => {
@@ -454,7 +460,18 @@ impl ProxyState {
                                 }
                                 LoadBalancerScopes::Node => src.node == wl.node,
                                 LoadBalancerScopes::Cluster => src.cluster_id == wl.cluster_id,
-                                LoadBalancerScopes::Network => src.network == wl.network,
+                                LoadBalancerScopes::Network => {
+                                    let m = src.network == wl.network;
+                                    if network_preferred {
+                                        if m {
+                                            adjust = lb.routing_preferences.len() - 1;
+                                        } else {
+                                            // try the other scopes
+                                            continue;
+                                        }
+                                    }
+                                    m
+                                }
                             };
                             if matches {
                                 rank += 1;
@@ -468,6 +485,8 @@ impl ProxyState {
                         {
                             return None;
                         }
+                        // adjust for the network match
+                        rank += adjust;
                         Some((rank, ep, wl))
                     })
                     .collect::<Vec<_>>();
@@ -516,6 +535,24 @@ impl DemandProxyState {
             .services
             .get_by_workload(wl)
     }
+}
+
+/// sample_weighted_waypoint picks one waypoint from a service's weighted set, proportional to
+/// each entry's weight (used to shift a share of connections between waypoints during a canary).
+/// Returns None when there is no usable weighted set — an empty set, or one that is not samplable
+/// (e.g. all weights zero) — in which case the caller falls back to the single `waypoint` field.
+fn sample_weighted_waypoint<'a>(
+    service: &'a Service,
+    rng: &mut impl rand::Rng,
+) -> Option<&'a GatewayAddress> {
+    if service.weighted_waypoints.is_empty() {
+        return None;
+    }
+    service
+        .weighted_waypoints
+        .choose_weighted(rng, |ww| ww.weight)
+        .ok()
+        .map(|ww| &ww.destination)
 }
 
 impl DemandProxyState {
@@ -996,9 +1033,17 @@ impl DemandProxyState {
         source_workload: &Workload,
         original_destination_address: SocketAddr,
     ) -> Result<Option<Upstream>, Error> {
-        let Some(gw_address) = &service.waypoint else {
-            // no waypoint
-            return Ok(None);
+        // Choose a weighted waypoint, else fall back to the single
+        // `waypoint` field, preserving existing behavior.
+        let gw_address = match sample_weighted_waypoint(service, &mut rand::rng()) {
+            Some(gw_address) => gw_address,
+            None => {
+                let Some(gw_address) = &service.waypoint else {
+                    // no waypoint
+                    return Ok(None);
+                };
+                gw_address
+            }
         };
         self.fetch_waypoint(gw_address, source_workload, original_destination_address)
             .await
@@ -1173,6 +1218,8 @@ mod tests {
     use crate::state::workload::{HealthStatus, Locality};
     use prometheus_client::registry::Registry;
     use rbac::StringMatch;
+    use std::cmp::max;
+    use std::collections::HashSet;
     use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
     use self::workload::{ApplicationTunnel, application_tunnel::Protocol as AppProtocol};
@@ -1182,6 +1229,114 @@ mod tests {
 
     use crate::{strng, test_helpers};
     use test_case::test_case;
+
+    #[test]
+    fn test_sample_weighted_waypoint() {
+        use crate::state::service::WeightedWaypoint;
+        let ga = |ip: &str| GatewayAddress {
+            destination: Destination::Address(NetworkAddress {
+                network: "".into(),
+                address: ip.parse().unwrap(),
+            }),
+            hbone_mtls_port: 15008,
+        };
+        let svc = |waypoint: Option<GatewayAddress>, weighted: Vec<WeightedWaypoint>| Service {
+            waypoint,
+            weighted_waypoints: weighted,
+            ..test_helpers::mock_default_service()
+        };
+        let a = ga("10.0.0.1");
+        let b = ga("10.0.0.2");
+        // Seed deterministically so the distribution assertion below cannot flake.
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(0);
+
+        // No weighted set -> None (caller falls back to the single `waypoint` field).
+        assert_eq!(sample_weighted_waypoint(&svc(None, vec![]), &mut rng), None);
+
+        // A zero-weight entry is never selected: [100, 0] always picks the first (primary).
+        let primary_only = svc(
+            None,
+            vec![
+                WeightedWaypoint {
+                    destination: a.clone(),
+                    weight: 100,
+                },
+                WeightedWaypoint {
+                    destination: b.clone(),
+                    weight: 0,
+                },
+            ],
+        );
+        for _ in 0..50 {
+            assert_eq!(sample_weighted_waypoint(&primary_only, &mut rng), Some(&a));
+        }
+
+        // [0, 100] always picks the second (canary fully promoted).
+        let canary_only = svc(
+            None,
+            vec![
+                WeightedWaypoint {
+                    destination: a.clone(),
+                    weight: 0,
+                },
+                WeightedWaypoint {
+                    destination: b.clone(),
+                    weight: 100,
+                },
+            ],
+        );
+        for _ in 0..50 {
+            assert_eq!(sample_weighted_waypoint(&canary_only, &mut rng), Some(&b));
+        }
+
+        // All-zero weights are not samplable -> None (fall back to primary).
+        let all_zero = svc(
+            Some(a.clone()),
+            vec![
+                WeightedWaypoint {
+                    destination: a.clone(),
+                    weight: 0,
+                },
+                WeightedWaypoint {
+                    destination: b.clone(),
+                    weight: 0,
+                },
+            ],
+        );
+        assert_eq!(sample_weighted_waypoint(&all_zero, &mut rng), None);
+
+        // A genuine split tracks the configured weights across many samples.
+        // 75/25 is asymmetric so the assertion would catch a swapped or ignored weight.
+        let split = svc(
+            None,
+            vec![
+                WeightedWaypoint {
+                    destination: a.clone(),
+                    weight: 75,
+                },
+                WeightedWaypoint {
+                    destination: b.clone(),
+                    weight: 25,
+                },
+            ],
+        );
+        let n = 10_000;
+        let (mut count_a, mut count_b) = (0, 0);
+        for _ in 0..n {
+            match sample_weighted_waypoint(&split, &mut rng) {
+                Some(x) if *x == a => count_a += 1,
+                Some(x) if *x == b => count_b += 1,
+                other => panic!("unexpected selection: {other:?}"),
+            }
+        }
+        // Expect ~75/25. With a fixed seed and a wide tolerance this is stable, not statistical.
+        let frac_a = count_a as f64 / n as f64;
+        assert!(
+            (0.70..0.80).contains(&frac_a),
+            "expected ~75% for a, got {frac_a} (a={count_a}, b={count_b})"
+        );
+    }
 
     #[tokio::test]
     async fn test_wait_for_workload() {
@@ -1750,6 +1905,7 @@ mod tests {
             trust_domain: "cluster.local".into(),
             service_account: "default".into(),
             workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))],
+            network: "network".into(),
             ..test_helpers::test_default_workload()
         };
         let wl_match = Workload {
@@ -1782,6 +1938,21 @@ mod tests {
             },
             ..test_helpers::test_default_workload()
         };
+        let wl_other = Workload {
+            uid: "cluster1//v1/Pod/default/wl_other".into(),
+            name: "wl_other".into(),
+            namespace: "default".into(),
+            trust_domain: "cluster.local".into(),
+            service_account: "default".into(),
+            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))],
+            network: "other".into(),
+            locality: Locality {
+                region: "reg".into(),
+                zone: "zone".into(),
+                subzone: "".into(),
+            },
+            ..test_helpers::test_default_workload()
+        };
         let wl_empty_ip = Workload {
             uid: "cluster1//v1/Pod/default/wl_empty_ip".into(),
             name: "wl_empty_ip".into(),
@@ -1798,36 +1969,6 @@ mod tests {
             ..test_helpers::test_default_workload()
         };
 
-        let _ep_almost = Workload {
-            uid: "cluster1//v1/Pod/default/ep_almost".into(),
-            name: "wl_almost".into(),
-            namespace: "default".into(),
-            trust_domain: "cluster.local".into(),
-            service_account: "default".into(),
-            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 4))],
-            network: "network".into(),
-            locality: Locality {
-                region: "reg".into(),
-                zone: "other-not-zone".into(),
-                subzone: "".into(),
-            },
-            ..test_helpers::test_default_workload()
-        };
-        let _ep_no_match = Workload {
-            uid: "cluster1//v1/Pod/default/ep_no_match".into(),
-            name: "wl_almost".into(),
-            namespace: "default".into(),
-            trust_domain: "cluster.local".into(),
-            service_account: "default".into(),
-            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))],
-            network: "not-network".into(),
-            locality: Locality {
-                region: "not-reg".into(),
-                zone: "unmatched-zone".into(),
-                subzone: "".into(),
-            },
-            ..test_helpers::test_default_workload()
-        };
         let endpoints = EndpointSet::from_list([
             Endpoint {
                 workload_uid: "cluster1//v1/Pod/default/ep_almost".into(),
@@ -1835,12 +1976,22 @@ mod tests {
                 status: HealthStatus::Healthy,
             },
             Endpoint {
-                workload_uid: "cluster1//v1/Pod/default/ep_no_match".into(),
+                workload_uid: "cluster1//v1/Pod/default/wl_match".into(),
                 port: HashMap::from([(80u16, 80u16)]),
                 status: HealthStatus::Healthy,
             },
             Endpoint {
-                workload_uid: "cluster1//v1/Pod/default/wl_match".into(),
+                workload_uid: "cluster1//v1/Pod/default/wl_almost".into(),
+                port: HashMap::from([(80u16, 80u16)]),
+                status: HealthStatus::Healthy,
+            },
+            Endpoint {
+                workload_uid: "cluster1//v1/Pod/default/wl_no_locality".into(),
+                port: HashMap::from([(80u16, 80u16)]),
+                status: HealthStatus::Healthy,
+            },
+            Endpoint {
+                workload_uid: "cluster1//v1/Pod/default/wl_other".into(),
                 port: HashMap::from([(80u16, 80u16)]),
                 status: HealthStatus::Healthy,
             },
@@ -1878,23 +2029,29 @@ mod tests {
             ports: HashMap::from([(80u16, 80u16)]),
             ..test_helpers::mock_default_service()
         };
-        state.workloads.insert(Arc::new(wl_no_locality.clone()));
         state.workloads.insert(Arc::new(wl_match.clone()));
         state.workloads.insert(Arc::new(wl_almost.clone()));
+        state.workloads.insert(Arc::new(wl_no_locality.clone()));
+        state.workloads.insert(Arc::new(wl_other.clone()));
         state.workloads.insert(Arc::new(wl_empty_ip.clone()));
         state.services.insert(strict_svc.clone());
         state.services.insert(failover_svc.clone());
 
         let assert_endpoint = |src: &Workload, svc: &Service, workloads: Vec<&str>, desc: &str| {
-            let got = state
-                .load_balance(src, svc, 80, ServiceResolutionMode::Standard)
-                .map(|(ep, _)| ep.workload_uid.to_string());
-            if workloads.is_empty() {
-                assert!(got.is_none(), "{}", desc);
-            } else {
-                let want: Vec<String> = workloads.iter().map(ToString::to_string).collect();
-                assert!(want.contains(&got.unwrap()), "{}", desc);
+            let want: Vec<String> = workloads.iter().map(ToString::to_string).collect();
+            let tries = max(1, workloads.len() * 10);
+            let mut gots = HashSet::new();
+            for _ in 0..tries {
+                let got = state
+                    .load_balance(src, svc, 80, ServiceResolutionMode::Standard)
+                    .map(|(ep, _)| ep.workload_uid.to_string());
+                if workloads.is_empty() {
+                    assert!(got.is_none(), "{} {:?}", desc, got);
+                } else {
+                    gots.insert(got.unwrap());
+                }
             }
+            assert_eq!(HashSet::from_iter(want), gots, "{}", desc);
         };
         let assert_not_endpoint =
             |src: &Workload, svc: &Service, uid: &str, tries: usize, desc: &str| {
@@ -1907,13 +2064,9 @@ mod tests {
             };
 
         assert_endpoint(
-            &wl_no_locality,
-            &strict_svc,
-            vec![],
-            "strict no match should not select",
-        );
-        assert_endpoint(
-            &wl_almost,
+            &Workload {
+                ..test_helpers::test_default_workload()
+            },
             &strict_svc,
             vec![],
             "strict no match should not select",
@@ -1926,36 +2079,98 @@ mod tests {
         );
 
         assert_endpoint(
-            &wl_no_locality,
+            &Workload {
+                network: "no-match".into(),
+                locality: Locality {
+                    region: "no-match".into(),
+                    zone: "no-match".into(),
+                    subzone: "".into(),
+                },
+                ..test_helpers::test_default_workload()
+            },
             &failover_svc,
             vec![
-                "cluster1//v1/Pod/default/ep_almost",
-                "cluster1//v1/Pod/default/ep_no_match",
                 "cluster1//v1/Pod/default/wl_match",
+                "cluster1//v1/Pod/default/wl_almost",
+                "cluster1//v1/Pod/default/wl_no_locality",
+                "cluster1//v1/Pod/default/wl_other",
             ],
             "failover no match can select any endpoint",
         );
         assert_endpoint(
-            &wl_almost,
-            &failover_svc,
-            vec![
-                "cluster1//v1/Pod/default/ep_almost",
-                "cluster1//v1/Pod/default/wl_match",
-            ],
-            "failover almost match can select any close matches",
-        );
-        assert_endpoint(
-            &wl_match,
+            &Workload {
+                network: "network".into(),
+                locality: Locality {
+                    region: "reg".into(),
+                    zone: "zone".into(),
+                    subzone: "".into(),
+                },
+                ..test_helpers::test_default_workload()
+            },
             &failover_svc,
             vec!["cluster1//v1/Pod/default/wl_match"],
-            "failover full match selects closest match",
+            "failover matches network+region+zone",
+        );
+        assert_endpoint(
+            &Workload {
+                network: "network".into(),
+                locality: Locality {
+                    region: "reg".into(),
+                    zone: "".into(),
+                    subzone: "".into(),
+                },
+                ..test_helpers::test_default_workload()
+            },
+            &failover_svc,
+            vec![
+                "cluster1//v1/Pod/default/wl_match",
+                "cluster1//v1/Pod/default/wl_almost",
+            ],
+            "failover matches network+region",
+        );
+        assert_endpoint(
+            &Workload {
+                network: "network".into(),
+                locality: Locality {
+                    region: "no-match".into(),
+                    zone: "no-match".into(),
+                    subzone: "".into(),
+                },
+                ..test_helpers::test_default_workload()
+            },
+            &failover_svc,
+            vec![
+                "cluster1//v1/Pod/default/wl_match",
+                "cluster1//v1/Pod/default/wl_almost",
+                "cluster1//v1/Pod/default/wl_no_locality",
+            ],
+            "failover matches network",
+        );
+        assert_endpoint(
+            &Workload {
+                network: "no-match".into(),
+                locality: Locality {
+                    region: "reg".into(),
+                    zone: "zone".into(),
+                    subzone: "".into(),
+                },
+                ..test_helpers::test_default_workload()
+            },
+            &failover_svc,
+            vec![
+                "cluster1//v1/Pod/default/wl_match",
+                "cluster1//v1/Pod/default/wl_other",
+            ],
+            "failover matches region+zone",
         );
         assert_not_endpoint(
-            &wl_no_locality,
+            &Workload {
+                ..test_helpers::test_default_workload()
+            },
             &failover_svc,
             "cluster1//v1/Pod/default/wl_empty_ip",
             10,
-            "failover no match can select any endpoint",
+            "failover never selects missing ip",
         );
     }
 }

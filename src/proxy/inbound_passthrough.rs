@@ -241,7 +241,8 @@ impl InboundPassthrough {
             .await
         };
 
-        let res = handle_connection!(conn_guard, send);
+        // Plaintext passthrough has no client cert, so there is no CRL revocation signal to watch.
+        let res = handle_connection!(conn_guard, None, send);
         result_tracker.record(res);
     }
 }

@@ -220,17 +220,73 @@ impl<S> Server<S> {
         &mut self.state
     }
 
+    /// Serve connections using the specialized callback. The callback receives a
+    /// shared reference to the server state and the request, and returns a
+    /// `Response<Full<Bytes>>`. Any error is mapped to a 500 response so it does
+    /// not abort the connection.
     pub fn spawn<F, R>(self, f: F)
     where
         S: Send + Sync + 'static,
         F: Fn(Arc<S>, Request<hyper::body::Incoming>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<Full<Bytes>>, anyhow::Error>> + Send + Sync + 'static,
     {
+        let f = Arc::new(f);
+        self.serve(move |state: Arc<S>| {
+            let f = f.clone();
+            hyper::service::service_fn(move |req| {
+                let state = state.clone();
+                let f = f.clone();
+                // Failures would abort the whole connection; we just want to return an HTTP error
+                f(state, req).or_else(|err| async move {
+                    Ok::<Response<Full<Bytes>>, Infallible>(
+                        Response::builder()
+                            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(err.to_string().into())
+                            .expect("builder with known status code should not fail"),
+                    )
+                })
+            })
+        })
+    }
+
+    /// Serve connections using a `hyper::service::Service` produced per
+    /// connection by `make_service`. This supports arbitrary response body
+    /// types (e.g. a tower stack adapted via `TowerToHyperService`), unlike
+    /// [`Server::spawn`] which is fixed to `Response<Full<Bytes>>`.
+    pub fn spawn_service<MakeSvc, Svc, B>(self, make_service: MakeSvc)
+    where
+        S: Send + Sync + 'static,
+        MakeSvc: Fn(Arc<S>) -> Svc + Send + Sync + 'static,
+        Svc: hyper::service::Service<Request<hyper::body::Incoming>, Response = Response<B>>
+            + Send
+            + 'static,
+        Svc::Future: Send + 'static,
+        Svc::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+        B: http_body::Body + Send + 'static,
+        B::Data: Send,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.serve(make_service)
+    }
+
+    fn serve<MakeSvc, Svc, B>(self, make_service: MakeSvc)
+    where
+        S: Send + Sync + 'static,
+        MakeSvc: Fn(Arc<S>) -> Svc + Send + Sync + 'static,
+        Svc: hyper::service::Service<Request<hyper::body::Incoming>, Response = Response<B>>
+            + Send
+            + 'static,
+        Svc::Future: Send + 'static,
+        Svc::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+        B: http_body::Body + Send + 'static,
+        B::Data: Send,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
         use futures_util::StreamExt as OtherStreamExt;
         let address = self.address();
         let drain = self.drain_rx;
         let state = Arc::new(self.state);
-        let f = Arc::new(f);
+        let make_service = Arc::new(make_service);
         info!(
             %address,
             component=self.name,
@@ -241,35 +297,21 @@ impl<S> Server<S> {
             let drain_connections = drain.clone();
             let state = state.clone();
             let name = self.name.clone();
-            let f = f.clone();
+            let make_service = make_service.clone();
             tokio::spawn(async move {
                 let stream = tokio_stream::wrappers::TcpListenerStream::new(bind);
                 let mut stream = stream.take_until(Box::pin(drain_stream.wait_for_drain()));
                 while let Some(Ok(socket)) = stream.next().await {
                     socket.set_nodelay(true).unwrap();
                     let drain = drain_connections.clone();
-                    let f = f.clone();
                     let state = state.clone();
+                    let service = make_service(state);
                     tokio::spawn(async move {
-                        let serve =
-                            http1_server()
-                                .half_close(true)
-                                .header_read_timeout(Duration::from_secs(2))
-                                .max_buf_size(8 * 1024)
-                                .serve_connection(
-                                    hyper_util::rt::TokioIo::new(socket),
-                                    hyper::service::service_fn(move |req| {
-                                        let state = state.clone();
-
-                                        // Failures would abort the whole connection; we just want to return an HTTP error
-                                        f(state, req).or_else(|err| async move {
-                                            Ok::<Response<Full<Bytes>>, Infallible>(Response::builder()
-                                                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-                                                .body(err.to_string().into())
-                                                .expect("builder with known status code should not fail"))
-                                        })
-                                    }),
-                                );
+                        let serve = http1_server()
+                            .half_close(true)
+                            .header_read_timeout(Duration::from_secs(2))
+                            .max_buf_size(8 * 1024)
+                            .serve_connection(hyper_util::rt::TokioIo::new(socket), service);
                         // Wait for drain to signal or connection serving to complete
                         match futures_util::future::select(Box::pin(drain.wait_for_drain()), serve)
                             .await

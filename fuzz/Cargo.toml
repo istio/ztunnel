@@ -15,6 +15,10 @@ anyhow = "1.0"
 
 [dependencies.ztunnel]
 path = ".."
+# No default features: jemalloc's unprefixed malloc/free conflicts with the
+# sanitizers cargo-fuzz/OSS-Fuzz build with (ASan heap interceptors).
+default-features = false
+features = ["tls-aws-lc"]
 
 # Prevent this from interfering with workspaces
 [workspace]

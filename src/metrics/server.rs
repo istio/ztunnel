@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ::hyper_util::service::TowerToHyperService;
 use bytes::Bytes;
 use std::sync::Mutex;
 use std::{net::SocketAddr, sync::Arc};
+use tower::ServiceBuilder;
+use tower_http::compression::CompressionLayer;
 
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -51,11 +54,19 @@ impl Server {
     }
 
     pub fn spawn(self) {
-        self.s.spawn(|registry, req| async move {
-            match req.uri().path() {
-                "/metrics" | "/stats/prometheus" => Ok(handle_metrics(registry, req).await),
-                _ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
-            }
+        self.s.spawn_service(|registry: Arc<Mutex<Registry>>| {
+            let service = ServiceBuilder::new()
+                .layer(CompressionLayer::new())
+                .service_fn(move |req: Request<Incoming>| {
+                    let registry = registry.clone();
+                    async move {
+                        Ok::<_, std::convert::Infallible>(match req.uri().path() {
+                            "/metrics" | "/stats/prometheus" => handle_metrics(registry, req).await,
+                            _ => hyper_util::empty_response(hyper::StatusCode::NOT_FOUND),
+                        })
+                    }
+                });
+            TowerToHyperService::new(service)
         })
     }
 }

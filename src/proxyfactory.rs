@@ -59,7 +59,7 @@ impl ProxyFactory {
 
         // Initialize CRL manager if crl_path is set
         let crl_manager = if let Some(crl_path) = &config.crl_path {
-            match tls::crl::CrlManager::new(crl_path.clone()) {
+            match tls::crl::CrlManager::new(crl_path.clone(), proxy_metrics.clone()) {
                 Ok(manager) => {
                     let manager_arc = Arc::new(manager);
 

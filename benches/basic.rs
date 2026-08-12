@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use bytes::Bytes;
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use profiler::{Output, PProfProfiler};
 use prometheus_client::registry::Registry;
@@ -27,13 +27,15 @@ use tokio::runtime::Runtime;
 use ztunnel::state::workload::{NetworkAddress, Workload};
 use ztunnel::state::{DemandProxyState, ProxyState, ServiceResolutionMode};
 use ztunnel::strng;
-use ztunnel::xds::ProxyStateUpdateMutator;
+use ztunnel::xds::istio::workload::Address as XdsAddress;
 use ztunnel::xds::istio::workload::LoadBalancing;
 use ztunnel::xds::istio::workload::Port;
 use ztunnel::xds::istio::workload::Service as XdsService;
 use ztunnel::xds::istio::workload::Workload as XdsWorkload;
+use ztunnel::xds::istio::workload::address::Type as XdsAddressType;
 use ztunnel::xds::istio::workload::load_balancing;
 use ztunnel::xds::istio::workload::{NetworkAddress as XdsNetworkAddress, PortList};
+use ztunnel::xds::{Handler, ProxyStateUpdateMutator, ProxyStateUpdater, XdsResource, XdsUpdate};
 
 pub fn xds(c: &mut Criterion) {
     use ztunnel::xds::istio::workload::Port;
@@ -290,12 +292,185 @@ fn build_cidr_vip_state(n: usize) -> (Arc<RwLock<ProxyState>>, NetworkAddress, N
     (Arc::new(RwLock::new(state)), miss, hit)
 }
 
+fn one_service(hostname: &str, addr: [u8; 4]) -> XdsService {
+    XdsService {
+        hostname: hostname.to_string(),
+        addresses: vec![XdsNetworkAddress {
+            network: "".to_string(),
+            address: addr.to_vec(),
+            length: None,
+        }],
+        ports: vec![Port {
+            service_port: 80,
+            target_port: 0,
+        }],
+        ..Default::default()
+    }
+}
+
+fn build_workloads(n: usize, svc_for: impl Fn(usize) -> Option<String>) -> Vec<XdsWorkload> {
+    (0..n)
+        .map(|i| {
+            let services = match svc_for(i) {
+                Some(h) => std::collections::HashMap::from([(
+                    h,
+                    PortList {
+                        ports: vec![Port {
+                            service_port: 80,
+                            target_port: 1234,
+                        }],
+                    },
+                )]),
+                None => std::collections::HashMap::new(),
+            };
+            XdsWorkload {
+                uid: format!("cluster1//v1/Pod/default/{i}"),
+                addresses: vec![Bytes::copy_from_slice(&[
+                    127,
+                    0,
+                    (i / 255) as u8,
+                    (i % 255) as u8,
+                ])],
+                services,
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+fn wl_update(w: XdsWorkload) -> XdsUpdate<XdsAddress> {
+    XdsUpdate::Update(XdsResource {
+        name: w.uid.as_str().into(),
+        resource: XdsAddress {
+            r#type: Some(XdsAddressType::Workload(w)),
+        },
+    })
+}
+
+fn svc_update(s: XdsService) -> XdsUpdate<XdsAddress> {
+    XdsUpdate::Update(XdsResource {
+        name: s.hostname.as_str().into(),
+        resource: XdsAddress {
+            r#type: Some(XdsAddressType::Service(s)),
+        },
+    })
+}
+
+// Measures the cost of applying a batch of workloads under the (simulated) write
+// lock, varying how endpoints are distributed across services:
+//   - shared-service:   all N workloads are endpoints of ONE service. Each
+//                        insert_endpoint deep-clones the service's whole
+//                        EndpointSet, so building the service is O(N^2).
+//   - distinct-service: each workload is the sole endpoint of its own service.
+//                        Linear control.
+//   - no-service:       workloads belong to no service; the endpoint path is
+//                        never hit. Isolates conversion + workload-store cost.
+// Throughput is set per-element, so a quadratic shared-service path shows up as a
+// per-insert time that rises with N across the sweep.
+pub fn endpoint_insert(c: &mut Criterion) {
+    let mut g = c.benchmark_group("endpoint_insert");
+    g.measurement_time(Duration::from_secs(3));
+    g.sample_size(10);
+
+    for &n in &[250usize, 1000, 4000] {
+        g.throughput(Throughput::Elements(n as u64));
+
+        let shared = build_workloads(n, |_| Some("/example.com".to_string()));
+        g.bench_function(format!("shared-service/{n}"), |b| {
+            b.iter_batched(
+                || {
+                    let mut state = ProxyState::new(None);
+                    let updater = ProxyStateUpdateMutator::new_no_fetch();
+                    updater
+                        .insert_service(&mut state, one_service("example.com", [127, 0, 0, 3]))
+                        .unwrap();
+                    (state, updater, shared.clone())
+                },
+                |(mut state, updater, wls)| {
+                    for w in wls {
+                        updater.insert_workload(&mut state, w).unwrap();
+                    }
+                },
+                BatchSize::SmallInput,
+            )
+        });
+
+        let distinct = build_workloads(n, |i| Some(format!("/svc{i}.example.com")));
+        g.bench_function(format!("distinct-service/{n}"), |b| {
+            b.iter_batched(
+                || {
+                    let mut state = ProxyState::new(None);
+                    let updater = ProxyStateUpdateMutator::new_no_fetch();
+                    for i in 0..n {
+                        updater
+                            .insert_service(
+                                &mut state,
+                                one_service(
+                                    &format!("svc{i}.example.com"),
+                                    [127, 1, (i / 255) as u8, (i % 255) as u8],
+                                ),
+                            )
+                            .unwrap();
+                    }
+                    (state, updater, distinct.clone())
+                },
+                |(mut state, updater, wls)| {
+                    for w in wls {
+                        updater.insert_workload(&mut state, w).unwrap();
+                    }
+                },
+                BatchSize::SmallInput,
+            )
+        });
+
+        let bare = build_workloads(n, |_| None);
+        g.bench_function(format!("no-service/{n}"), |b| {
+            b.iter_batched(
+                || {
+                    let state = ProxyState::new(None);
+                    let updater = ProxyStateUpdateMutator::new_no_fetch();
+                    (state, updater, bare.clone())
+                },
+                |(mut state, updater, wls)| {
+                    for w in wls {
+                        updater.insert_workload(&mut state, w).unwrap();
+                    }
+                },
+                BatchSize::SmallInput,
+            )
+        });
+
+        // batched-service: same N endpoints on ONE service, but applied as a
+        // single xDS push through Handler<XdsAddress>. The accumulator coalesces
+        // them into one clone + reindex, so this should track the linear
+        // distinct-service curve rather than shared-service's O(N^2).
+        g.bench_function(format!("batched-service/{n}"), |b| {
+            b.iter_batched(
+                || {
+                    let state = Arc::new(RwLock::new(ProxyState::new(None)));
+                    let updater = ProxyStateUpdater::new_no_fetch(state.clone());
+                    let mut batch: Vec<XdsUpdate<XdsAddress>> = Vec::with_capacity(n + 1);
+                    batch.push(svc_update(one_service("example.com", [127, 0, 0, 3])));
+                    batch.extend(shared.iter().cloned().map(wl_update));
+                    (updater, batch)
+                },
+                |(updater, batch)| {
+                    let handler = &updater as &dyn Handler<XdsAddress>;
+                    handler.handle(Box::new(&mut batch.into_iter())).unwrap();
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
+    g.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(100, Output::Protobuf))
         .warm_up_time(Duration::from_millis(1));
-    targets = xds, load_balance, vip_match
+    targets = xds, load_balance, vip_match, endpoint_insert
 }
 
 criterion_main!(benches);

@@ -1561,10 +1561,12 @@ mod tests {
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
+                    weighted_waypoints: vec![],
                     load_balancing: None,
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    visibility: 0,
                 },
             )
             .unwrap();
@@ -1598,10 +1600,12 @@ mod tests {
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
+                    weighted_waypoints: vec![],
                     load_balancing: None,
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    visibility: 0,
                 },
             )
             .unwrap();
@@ -1660,10 +1664,12 @@ mod tests {
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
+                    weighted_waypoints: vec![],
                     load_balancing: None,
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    visibility: 0,
                 },
             )
             .unwrap();
@@ -1982,10 +1988,12 @@ mod tests {
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
+                    weighted_waypoints: vec![],
                     load_balancing: None,
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    visibility: 0,
                 },
             )
             .unwrap();
@@ -2007,6 +2015,7 @@ mod tests {
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
+                    weighted_waypoints: vec![],
                     load_balancing: Some(LoadBalancing {
                         routing_preference: vec![],
                         mode: 0,
@@ -2015,6 +2024,7 @@ mod tests {
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    visibility: 0,
                 },
             )
             .unwrap();
@@ -2060,6 +2070,7 @@ mod tests {
             }],
             subject_alt_names: vec![],
             waypoint: None,
+            weighted_waypoints: vec![],
             load_balancing: Some(LoadBalancing {
                 routing_preference: vec![],
                 mode: 0,
@@ -2068,6 +2079,7 @@ mod tests {
             ip_families: 0,
             extensions: Default::default(),
             canonical: true,
+            visibility: 0,
         };
         updater
             .insert_service(
@@ -2087,10 +2099,12 @@ mod tests {
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
+                    weighted_waypoints: vec![],
                     load_balancing: None,
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    visibility: 0,
                 },
             )
             .unwrap();

@@ -19,7 +19,7 @@ use serde::{Deserializer, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
-use tracing::trace;
+use tracing::{debug, trace};
 
 use xds::istio::workload::Service as XdsService;
 
@@ -53,6 +53,13 @@ pub struct Service {
     #[serde(default, skip_serializing_if = "is_default")]
     pub waypoint: Option<GatewayAddress>,
 
+    /// When non-empty, a weighted set of waypoints for this service. The client samples one
+    /// per connection proportional to weight (see [WeightedWaypoint]); used to shift a
+    /// share of connections between waypoints during a canary. When empty, `waypoint` is used
+    /// as before. `waypoint` stays populated with the primary for backward compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub weighted_waypoints: Vec<WeightedWaypoint>,
+
     #[serde(default, skip_serializing_if = "is_default")]
     pub load_balancer: Option<LoadBalancer>,
 
@@ -61,6 +68,20 @@ pub struct Service {
 
     #[serde(default)]
     pub canonical: bool,
+
+    // Always rendered (no skip_serializing_if) so a service's visibility is visible in a
+    // ztunnel config dump even when it is the default PUBLIC.
+    #[serde(default)]
+    pub visibility: Visibility,
+}
+
+/// WeightedWaypoint is a candidate waypoint plus its relative selection weight, used to shift a
+/// share of a service's connections between waypoints (see [Service::weighted_waypoints]).
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WeightedWaypoint {
+    pub destination: GatewayAddress,
+    pub weight: u32,
 }
 
 /// EndpointSet is an abstraction over a set of endpoints.
@@ -104,6 +125,20 @@ impl EndpointSet {
         self.inner.insert(k, Arc::new(v));
     }
 
+    pub fn extend(&mut self, eps: impl IntoIterator<Item = (Strng, Endpoint)>) {
+        for (k, v) in eps {
+            self.inner.insert(k, Arc::new(v));
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     pub fn contains(&self, key: &Strng) -> bool {
         self.inner.contains_key(key)
     }
@@ -112,8 +147,8 @@ impl EndpointSet {
         self.inner.get(key).map(Arc::as_ref)
     }
 
-    pub fn remove(&mut self, key: &Strng) {
-        self.inner.remove(key);
+    pub fn remove(&mut self, key: &Strng) -> bool {
+        self.inner.remove(key).is_some()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Endpoint> {
@@ -231,6 +266,35 @@ impl IpFamily {
     }
 }
 
+/// Visibility controls which clients can resolve and route to a service.
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub enum Visibility {
+    /// Visible to every client the control plane serves (default / legacy behavior).
+    #[default]
+    Public,
+    /// Visible only to clients in the same namespace as the service.
+    Namespace,
+}
+
+impl From<xds::istio::workload::service::Visibility> for Visibility {
+    fn from(value: xds::istio::workload::service::Visibility) -> Self {
+        use xds::istio::workload::service::Visibility as XdsVisibility;
+        match value {
+            XdsVisibility::Public => Visibility::Public,
+            XdsVisibility::Namespace => Visibility::Namespace,
+        }
+    }
+}
+
+impl Service {
+    /// visible_to reports whether a client in the given namespace may resolve and route to
+    /// this service. Namespace-scoped services are only visible within their own namespace;
+    /// all others are visible everywhere the control plane serves.
+    pub fn visible_to(&self, client_namespace: &Strng) -> bool {
+        self.visibility != Visibility::Namespace || &self.namespace == client_namespace
+    }
+}
+
 impl Service {
     pub fn namespaced_hostname(&self) -> NamespacedHostname {
         NamespacedHostname {
@@ -318,6 +382,20 @@ impl TryFrom<&XdsService> for Service {
             Some(w) => Some(GatewayAddress::try_from(w)?),
             None => None,
         };
+        let weighted_waypoints = s
+            .weighted_waypoints
+            .iter()
+            .map(|ww| {
+                let dest = ww
+                    .destination
+                    .as_ref()
+                    .ok_or(WorkloadError::MissingGatewayAddress)?;
+                Ok(WeightedWaypoint {
+                    destination: GatewayAddress::try_from(dest)?,
+                    weight: ww.weight,
+                })
+            })
+            .collect::<Result<Vec<_>, WorkloadError>>()?;
         let lb = if let Some(lb) = &s.load_balancing {
             Some(LoadBalancer {
                 routing_preferences: lb
@@ -352,9 +430,14 @@ impl TryFrom<&XdsService> for Service {
             endpoints: Default::default(), // Will be populated once inserted into the store.
             subject_alt_names: s.subject_alt_names.iter().map(strng::new).collect(),
             waypoint,
+            weighted_waypoints,
             load_balancer: lb,
             ip_families,
             canonical: s.canonical,
+            // Unknown values fall back to PUBLIC (fail open) rather than dropping the Service.
+            visibility: xds::istio::workload::service::Visibility::try_from(s.visibility)
+                .unwrap_or_default()
+                .into(),
         };
         Ok(svc)
     }
@@ -380,6 +463,12 @@ pub struct ServiceStore {
     /// service for a given hostname. However, `ServiceEntry` allows hostnames to be overridden
     /// on a per-namespace basis.
     pub(super) by_host: HashMap<Strng, Vec<Arc<Service>>>,
+
+    /// Counts endpoint-only reindexes (one per service per [Self::apply_endpoints]
+    /// that mutates an existing service). Used by tests to assert that a push
+    /// clones each service at most once, not once per endpoint.
+    #[cfg(test)]
+    endpoint_reindexes: usize,
 }
 
 impl ServiceStore {
@@ -390,9 +479,10 @@ impl ServiceStore {
     }
 
     /// Returns the "best" [Service] matching the given VIP.
-    /// If a namespace is provided, a Service from that namespace is preferred.
+    /// If a namespace is provided, filter for visibility.
+    /// Next, prefer a Service from that namespace.
     /// Next, a Service marked `canonical` is preferred.
-    /// Falls back to CIDR matching if no exact VIP match: namespace match wins
+    /// Fall back to CIDR matching if no exact VIP match: namespace match wins
     /// over specificity, then longest-prefix, then canonical.
     pub fn get_best_by_vip(
         &self,
@@ -400,7 +490,26 @@ impl ServiceStore {
         ns: Option<&Strng>,
     ) -> Option<Arc<Service>> {
         if let Some(services) = self.by_vip.get(vip) {
-            return Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone());
+            // only return a service that is visible to the passed in workload's namespace
+            if let Some(m) = ServiceMatch::find_best_match(
+                services.iter().filter(|s| {
+                    let visible = ns.is_none_or(|n| s.visible_to(n));
+                    if !visible {
+                        debug!(
+                            hostname = %s.hostname,
+                            service_namespace = %s.namespace,
+                            client_namespace = ns.map(Strng::as_str).unwrap_or(""),
+                            vip = %vip.address,
+                            "visibility filtering: service not visible to client namespace"
+                        );
+                    }
+                    visible
+                }),
+                ns,
+                None,
+            ) {
+                return Some(m.clone());
+            }
         }
         self.get_best_by_cidr_vip(vip, ns)
     }
@@ -416,6 +525,18 @@ impl ServiceStore {
         let mut best: Option<RankedMatch<'_>> = None;
         for (nc, svc) in &self.by_cidr_vip {
             if nc.network != vip.network || !nc.cidr.contains(&vip.address) {
+                continue;
+            }
+            // Skip services not visible to the client's namespace (see get_best_by_vip); only
+            // enforced when a client namespace is provided.
+            if ns.is_some_and(|n| !svc.visible_to(n)) {
+                debug!(
+                    hostname = %svc.hostname,
+                    service_namespace = %svc.namespace,
+                    client_namespace = ns.map(Strng::as_str).unwrap_or(""),
+                    vip = %vip.address,
+                    "visibility filtering: service not visible to client namespace"
+                );
                 continue;
             }
             let rank = CidrMatchRank {
@@ -446,7 +567,28 @@ impl ServiceStore {
     // Next, a Service marked `canonical` is prerferred.
     pub fn get_best_by_host(&self, hostname: &Strng, ns: Option<&Strng>) -> Option<Arc<Service>> {
         let services = self.by_host.get(hostname)?;
-        Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone())
+        // When a client namespace is provided, skip services not visible to it so a NAMESPACE-scoped
+        // service is not resolvable by hostname from another namespace. The namespace also ranks the
+        // match (find_best_match).
+        Some(
+            ServiceMatch::find_best_match(
+                services.iter().filter(|s| {
+                    let visible = ns.is_none_or(|n| s.visible_to(n));
+                    if !visible {
+                        debug!(
+                            hostname = %s.hostname,
+                            service_namespace = %s.namespace,
+                            client_namespace = ns.map(Strng::as_str).unwrap_or(""),
+                            "visibility filtering: service not visible to client namespace"
+                        );
+                    }
+                    visible
+                }),
+                ns,
+                None,
+            )?
+            .clone(),
+        )
     }
 
     pub fn get_by_workload(&self, workload: &Workload) -> Vec<Arc<Service>> {
@@ -482,62 +624,61 @@ impl ServiceStore {
     }
 
     /// Adds an endpoint for the service VIP.
-    pub fn insert_endpoint(&mut self, service_name: NamespacedHostname, ep: Endpoint) {
-        let ep_uid = ep.workload_uid.clone();
-        if let Some(svc) = self.get_by_namespaced_host(&service_name) {
-            // We may or may not accept the endpoint based on it's health
-            if !svc.should_include_endpoint(ep.status) {
-                trace!(
-                    "service doesn't accept pod with status {:?}, skip",
-                    ep.status
-                );
-                return;
-            }
+    /// Applies a batch of endpoint upserts and removals to a single service with
+    /// a single clone + single reindex (or a single staged-map update when the
+    /// service has not been received yet). The xDS push handler uses this to
+    /// coalesce all of a service's endpoint changes in one push, avoiding the
+    /// O(E²) cost of cloning the service's whole [EndpointSet] per endpoint.
+    ///
+    /// Removals are applied before upserts, so a uid present in both (a
+    /// re-inserted workload) reflects the upsert — or, if the upsert is
+    /// health-filtered out, is correctly left removed.
+    pub fn apply_endpoints(
+        &mut self,
+        service_name: &NamespacedHostname,
+        upserts: HashMap<Strng, Endpoint>,
+        removals: HashSet<Strng>,
+    ) {
+        if let Some(svc) = self.get_by_namespaced_host(service_name) {
             let mut svc = Arc::unwrap_or_clone(svc);
+            let mut changed = false;
 
-            // Clone the service and add the endpoint.
-            svc.endpoints.insert(ep_uid, ep);
+            for uid in &removals {
+                changed |= svc.endpoints.remove(uid);
+            }
 
-            // Update the service.
-            self.insert_endpoint_update(svc);
+            // We may or may not accept an endpoint based on its health.
+            let accepted: Vec<(Strng, Endpoint)> = upserts
+                .into_iter()
+                .filter(|(_, ep)| svc.should_include_endpoint(ep.status))
+                .collect();
+            if !accepted.is_empty() {
+                changed = true;
+                svc.endpoints.extend(accepted);
+            }
+
+            // Single reindex for the whole batch.
+            if changed {
+                self.insert_endpoint_update(svc);
+            }
         } else {
             // We received workload endpoints, but don't have the Service yet.
-            // This can happen due to ordering issues.
-            trace!("pod has service {}, but service not found", service_name);
-
-            // Add a staged entry. This will be added to the service once we receive it.
-            self.staged_services
-                .entry(service_name.clone())
-                .or_default()
-                .insert(ep_uid, ep.clone());
-        }
-    }
-
-    /// Removes entries for the given endpoint address.
-    pub fn remove_endpoint(&mut self, prev_workload: &Workload) {
-        let mut services_to_update = HashSet::new();
-        let workload_uid = &prev_workload.uid;
-        for svc in prev_workload.services.iter() {
-            // Remove the endpoint from the staged services.
-            self.staged_services
-                .entry(svc.clone())
-                .or_default()
-                .remove(workload_uid);
-            if self.staged_services[svc].is_empty() {
-                self.staged_services.remove(svc);
+            // This can happen due to ordering issues. Stage them; they are
+            // health-filtered at flush time (see insert_internal). Apply removals
+            // before upserts, matching the present-service path.
+            if !removals.is_empty()
+                && let Some(staged) = self.staged_services.get_mut(service_name)
+            {
+                staged.retain(|uid, _| !removals.contains(uid));
+                if staged.is_empty() {
+                    self.staged_services.remove(service_name);
+                }
             }
-
-            services_to_update.insert(svc.clone());
-        }
-
-        // Now remove the endpoint from all Services.
-        for svc in &services_to_update {
-            if let Some(svc) = self.get_by_namespaced_host(svc) {
-                let mut svc = Arc::unwrap_or_clone(svc);
-                svc.endpoints.remove(workload_uid);
-
-                // Update the service.
-                self.insert_endpoint_update(svc);
+            if !upserts.is_empty() {
+                self.staged_services
+                    .entry(service_name.clone())
+                    .or_default()
+                    .extend(upserts);
             }
         }
     }
@@ -553,6 +694,10 @@ impl ServiceStore {
     }
 
     fn insert_internal(&mut self, mut service: Service, endpoint_update_only: bool) {
+        #[cfg(test)]
+        if endpoint_update_only {
+            self.endpoint_reindexes += 1;
+        }
         let namespaced_hostname = service.namespaced_hostname();
         // If we're replacing an existing service, remove the old one from all data structures.
         if !endpoint_update_only {
@@ -686,6 +831,11 @@ impl ServiceStore {
     pub fn num_staged_services(&self) -> usize {
         self.staged_services.len()
     }
+
+    #[cfg(test)]
+    pub fn endpoint_reindexes(&self) -> usize {
+        self.endpoint_reindexes
+    }
 }
 
 /// Ranking for a CIDR-VIP match. Ordered lexicographically over
@@ -732,6 +882,9 @@ impl<'a> From<ServiceMatch<'a>> for Option<&'a Arc<Service>> {
 impl<'a> ServiceMatch<'a> {
     /// Finds the best matching service from an iterator using fold_while.
     /// Short-circuits on Namespace match - the best possible result.
+    /// Picks the best service among candidates sharing a key (VIP, CIDR-VIP, or hostname). Ranking:
+    /// a service in `client_ns` first, then a `canonical` service, then one in `preferred_namespace`,
+    /// then the first seen.
     pub fn find_best_match(
         mut services: impl Iterator<Item = &'a Arc<Service>>,
         client_ns: Option<&Strng>,
@@ -793,9 +946,11 @@ mod tests {
             endpoints: EndpointSet::from_list([]),
             subject_alt_names: vec![],
             waypoint: None,
+            weighted_waypoints: vec![],
             load_balancer: None,
             ip_families: None,
             canonical: false,
+            visibility: Visibility::Public,
         }
     }
 
@@ -809,6 +964,21 @@ mod tests {
 
     fn ip6(segments: [u16; 8]) -> IpAddr {
         IpAddr::V6(Ipv6Addr::from(segments))
+    }
+
+    fn nshost(name: &str, ns: &str) -> NamespacedHostname {
+        NamespacedHostname {
+            namespace: ns.into(),
+            hostname: format!("{name}.{ns}.svc.cluster.local").into(),
+        }
+    }
+
+    fn endpoint(uid: &str, status: HealthStatus) -> Endpoint {
+        Endpoint {
+            workload_uid: uid.into(),
+            port: HashMap::new(),
+            status,
+        }
     }
 
     #[test]
@@ -890,6 +1060,145 @@ mod tests {
         assert_eq!(store.num_services(), 0);
         assert!(store.get_by_vip(&nw(shared)).is_none());
         assert!(store.get_by_vip(&nw(only_b)).is_none());
+    }
+
+    #[test]
+    fn namespace_visibility_vip() {
+        let mut store = ServiceStore::default();
+        let ns_a: Strng = "ns-a".into();
+        let ns_b: Strng = "ns-b".into();
+
+        // Exact-VIP path: a NAMESPACE-scoped service.
+        let vip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut nslocal = make_service("nslocal", "ns-a", vec![vip], vec![]);
+        nslocal.visibility = Visibility::Namespace;
+        store.insert(nslocal);
+
+        // Same-namespace client resolves it.
+        assert_eq!(
+            store
+                .get_best_by_vip(&nw(vip), Some(&ns_a))
+                .unwrap()
+                .namespace,
+            ns_a,
+        );
+        // Out-of-namespace client sees no match -> caller falls through to passthrough.
+        assert!(store.get_best_by_vip(&nw(vip), Some(&ns_b)).is_none());
+        // No client namespace (e.g. inbound path) -> visibility is not enforced, so it resolves.
+        assert!(store.get_best_by_vip(&nw(vip), None).is_some());
+
+        // CIDR-VIP path: same behavior.
+        let cidr_vip = IpAddr::V4(Ipv4Addr::new(10, 1, 0, 5));
+        let mut cidr_svc = make_service("cidrlocal", "ns-a", vec![], vec![cidr("10.1.0.0/16")]);
+        cidr_svc.visibility = Visibility::Namespace;
+        store.insert(cidr_svc);
+        assert!(store.get_best_by_vip(&nw(cidr_vip), Some(&ns_a)).is_some());
+        assert!(store.get_best_by_vip(&nw(cidr_vip), Some(&ns_b)).is_none());
+    }
+
+    #[test]
+    fn visibility_filtered_exact_vip_falls_through_to_cidr() {
+        // Regression: when a VIP is present in by_vip but its only service is filtered out by
+        // visibility, the lookup must fall through to the CIDR-VIP path rather than short-circuiting
+        // to None. (A `?` on the exact-VIP match previously returned None and skipped CIDR.)
+        let mut store = ServiceStore::default();
+        let ns_a: Strng = "ns-a".into();
+        let ns_b: Strng = "ns-b".into();
+        let vip = IpAddr::V4(Ipv4Addr::new(10, 2, 0, 5));
+
+        // Exact-VIP service, NAMESPACE-scoped to ns-a.
+        let mut exact = make_service("exactlocal", "ns-a", vec![vip], vec![]);
+        exact.visibility = Visibility::Namespace;
+        store.insert(exact);
+
+        // A PUBLIC service in ns-b whose CIDR-VIP covers the same address.
+        store.insert(make_service(
+            "cidrpublic",
+            "ns-b",
+            vec![],
+            vec![cidr("10.2.0.0/16")],
+        ));
+
+        // Same-namespace client: the visible exact-VIP match wins (checked before CIDR).
+        assert_eq!(
+            store
+                .get_best_by_vip(&nw(vip), Some(&ns_a))
+                .unwrap()
+                .namespace,
+            ns_a,
+        );
+
+        // Cross-namespace client: the exact-VIP service is filtered out, so the lookup must fall
+        // through to the CIDR-VIP and return the PUBLIC service instead of None.
+        assert_eq!(
+            store
+                .get_best_by_vip(&nw(vip), Some(&ns_b))
+                .expect("cross-ns client should fall through to the CIDR-VIP match, not None")
+                .namespace,
+            ns_b,
+        );
+    }
+
+    #[test]
+    fn namespace_visibility_host() {
+        let mut store = ServiceStore::default();
+        let ns_a: Strng = "ns-a".into();
+        let ns_b: Strng = "ns-b".into();
+
+        // NAMESPACE-scoped service, resolvable by hostname.
+        let mut nslocal = make_service("hostlocal", "ns-a", vec![ip(10, 3, 0, 1)], vec![]);
+        nslocal.visibility = Visibility::Namespace;
+        let ns_host = nslocal.hostname.clone();
+        store.insert(nslocal);
+
+        // Same-namespace client resolves it.
+        assert_eq!(
+            store
+                .get_best_by_host(&ns_host, Some(&ns_a))
+                .unwrap()
+                .namespace,
+            ns_a,
+        );
+        // Out-of-namespace client: not visible -> no match (caller gets NoHostname).
+        assert!(store.get_best_by_host(&ns_host, Some(&ns_b)).is_none());
+        // No client namespace (e.g. no verified mTLS peer) -> visibility not enforced.
+        assert!(store.get_best_by_host(&ns_host, None).is_some());
+
+        // A PUBLIC service is resolvable by hostname from any namespace.
+        let pub_svc = make_service("hostpublic", "ns-a", vec![ip(10, 3, 0, 2)], vec![]);
+        let pub_host = pub_svc.hostname.clone();
+        store.insert(pub_svc);
+        assert!(store.get_best_by_host(&pub_host, Some(&ns_b)).is_some());
+
+        // Two services share one hostname across namespaces (SEs may define the same host): a
+        // NAMESPACE service in ns-a and a PUBLIC service in ns-b.
+        let shared_host: Strng = "shared.example.com".into();
+        let mut shared_ns = make_service("sharedlocal", "ns-a", vec![ip(10, 3, 0, 3)], vec![]);
+        shared_ns.hostname = shared_host.clone();
+        shared_ns.visibility = Visibility::Namespace;
+        store.insert(shared_ns);
+        let mut shared_pub = make_service("sharedpublic", "ns-b", vec![ip(10, 3, 0, 4)], vec![]);
+        shared_pub.hostname = shared_host.clone();
+        store.insert(shared_pub);
+
+        // A client in a third namespace: the NAMESPACE candidate is filtered out, so the lookup
+        // returns the surviving PUBLIC service rather than None or the invisible one.
+        let ns_c: Strng = "ns-c".into();
+        assert_eq!(
+            store
+                .get_best_by_host(&shared_host, Some(&ns_c))
+                .expect("cross-ns client should resolve the visible PUBLIC service, not None")
+                .namespace,
+            ns_b,
+        );
+        // A client in ns-a still gets its co-located NAMESPACE service (client_ns ranks first).
+        assert_eq!(
+            store
+                .get_best_by_host(&shared_host, Some(&ns_a))
+                .unwrap()
+                .namespace,
+            ns_a,
+        );
     }
 
     #[test]
@@ -1128,9 +1437,11 @@ mod tests {
             endpoints: EndpointSet::from_list([]),
             subject_alt_names: vec![],
             waypoint: None,
+            weighted_waypoints: vec![],
             load_balancer: None,
             ip_families: None,
             canonical: false,
+            visibility: Visibility::Public,
         };
         store.insert(svc);
 
@@ -1258,5 +1569,130 @@ mod tests {
             .get_best_by_vip(&nw(ip(10, 0, 1, 5)), Some(&ns_other))
             .unwrap();
         assert_eq!(svc.name, "local");
+    }
+
+    // Endpoints arriving before their service are staged, not reindexed, until the
+    // service materializes; on flush the unhealthy one is filtered out.
+    #[test]
+    fn apply_endpoints_stages_and_filters_on_flush() {
+        let mut store = ServiceStore::default();
+        let host = nshost("svc", "ns");
+
+        let mut upserts = HashMap::new();
+        upserts.insert(
+            "ep-healthy".into(),
+            endpoint("ep-healthy", HealthStatus::Healthy),
+        );
+        upserts.insert(
+            "ep-unhealthy".into(),
+            endpoint("ep-unhealthy", HealthStatus::Unhealthy),
+        );
+        store.apply_endpoints(&host, upserts, HashSet::new());
+
+        // Staged, not applied: no service exists yet, so nothing is reindexed.
+        assert_eq!(store.num_staged_services(), 1);
+        assert_eq!(store.endpoint_reindexes(), 0);
+        assert!(store.get_by_namespaced_host(&host).is_none());
+
+        // Once the service arrives, staged endpoints are flushed and the unhealthy
+        // one is filtered out.
+        store.insert(make_service("svc", "ns", vec![ip(10, 0, 0, 1)], vec![]));
+        assert_eq!(store.num_staged_services(), 0);
+        let svc = store.get_by_namespaced_host(&host).unwrap();
+        assert_eq!(svc.endpoints.len(), 1);
+        assert!(svc.endpoints.contains(&"ep-healthy".into()));
+        assert!(!svc.endpoints.contains(&"ep-unhealthy".into()));
+    }
+
+    // Removals against staged (not-yet-received) services: pruning an entry keeps
+    // the service key staged, emptying the staged map drops the key, and a removal
+    // with nothing staged is a no-op (no panic, no empty entry created).
+    #[test]
+    fn apply_endpoints_staged_removals() {
+        let mut store = ServiceStore::default();
+        let host = nshost("svc", "ns");
+
+        let mut upserts = HashMap::new();
+        upserts.insert("ep1".into(), endpoint("ep1", HealthStatus::Healthy));
+        upserts.insert("ep2".into(), endpoint("ep2", HealthStatus::Healthy));
+        store.apply_endpoints(&host, upserts, HashSet::new());
+        assert_eq!(store.num_staged_services(), 1);
+
+        // Remove one of two staged endpoints: the service key remains staged.
+        store.apply_endpoints(&host, HashMap::new(), HashSet::from(["ep1".into()]));
+        assert_eq!(store.num_staged_services(), 1);
+
+        // Removing the last staged endpoint drops the staged service entirely.
+        store.apply_endpoints(&host, HashMap::new(), HashSet::from(["ep2".into()]));
+        assert_eq!(store.num_staged_services(), 0);
+
+        // Removing again with nothing staged is a no-op: no empty entry created.
+        store.apply_endpoints(&host, HashMap::new(), HashSet::from(["missing".into()]));
+        assert_eq!(store.num_staged_services(), 0);
+        assert_eq!(store.endpoint_reindexes(), 0);
+    }
+
+    // A workload going unhealthy on re-insertion (same uid in both the removal and
+    // the upsert) must still evict its previously-healthy endpoint.
+    #[test]
+    fn apply_endpoints_present_unhealthy_reinsert_evicts() {
+        let mut store = ServiceStore::default();
+        let host = nshost("svc", "ns");
+
+        // Service present, with a healthy endpoint already applied.
+        store.insert(make_service("svc", "ns", vec![ip(10, 0, 0, 1)], vec![]));
+        let mut upserts = HashMap::new();
+        upserts.insert("ep1".into(), endpoint("ep1", HealthStatus::Healthy));
+        store.apply_endpoints(&host, upserts, HashSet::new());
+        assert_eq!(store.endpoint_reindexes(), 1);
+        assert!(
+            store
+                .get_by_namespaced_host(&host)
+                .unwrap()
+                .endpoints
+                .contains(&"ep1".into())
+        );
+
+        // Re-insertion of the same uid, now unhealthy: the removal drops the stale
+        // endpoint and the unhealthy upsert is filtered out, so ep1 disappears.
+        let mut upserts = HashMap::new();
+        upserts.insert("ep1".into(), endpoint("ep1", HealthStatus::Unhealthy));
+        store.apply_endpoints(&host, upserts, HashSet::from(["ep1".into()]));
+        assert_eq!(store.endpoint_reindexes(), 2);
+        let svc = store.get_by_namespaced_host(&host).unwrap();
+        assert_eq!(svc.endpoints.len(), 0);
+        assert!(!svc.endpoints.contains(&"ep1".into()));
+    }
+
+    // A healthy re-upsert of an already-present uid (same uid in both the removal and the upsert) must
+    // leave the new endpoint in place.
+    #[test]
+    fn apply_endpoints_present_removal_applied_before_upsert() {
+        let mut store = ServiceStore::default();
+        let host = nshost("svc", "ns");
+
+        // Service present, with the original endpoint (port 80 -> 8080).
+        store.insert(make_service("svc", "ns", vec![ip(10, 0, 0, 1)], vec![]));
+        let mut old = endpoint("ep1", HealthStatus::Healthy);
+        old.port = HashMap::from([(80, 8080)]);
+        store.apply_endpoints(&host, HashMap::from([("ep1".into(), old)]), HashSet::new());
+
+        // Same uid removed and re-upserted (healthy) in one batch, now port 90 -> 9090.
+        let mut new = endpoint("ep1", HealthStatus::Healthy);
+        new.port = HashMap::from([(90, 9090)]);
+        store.apply_endpoints(
+            &host,
+            HashMap::from([("ep1".into(), new)]),
+            HashSet::from(["ep1".into()]),
+        );
+
+        // The new endpoint survives (not deleted by its own removal) and reflects
+        // the upsert, not the stale port mapping.
+        let svc = store.get_by_namespaced_host(&host).unwrap();
+        assert_eq!(svc.endpoints.len(), 1);
+        assert_eq!(
+            svc.endpoints.get(&"ep1".into()).unwrap().port,
+            HashMap::from([(90, 9090)])
+        );
     }
 }

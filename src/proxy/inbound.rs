@@ -14,13 +14,14 @@
 
 use futures_util::TryFutureExt;
 use http::{Method, Response, StatusCode};
+use rustls::CommonState;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 use tls_listener::AsyncTls;
 use tokio::sync::watch;
 
-use tracing::{Instrument, debug, error, info, info_span, trace_span};
+use tracing::{Instrument, debug, error, info, info_span, trace_span, warn};
 
 use super::{
     ConnectionResult, ConnectionResultBuilder, Error, HboneAddress, LocalWorkloadInformation,
@@ -113,20 +114,16 @@ impl Inbound {
                 let force_shutdown = force_shutdown.clone();
                 let pi = self.pi.clone();
                 let dst = to_canonical(raw_socket.local_addr().expect("local_addr available"));
-                let network = pi.cfg.network.clone();
                 let acceptor = crate::tls::InboundAcceptor::new(acceptor.clone());
 
                 let socket_labels = metrics::SocketLabels {
                     reporter: Reporter::destination,
                 };
                 pi.metrics.record_socket_open(&socket_labels);
-                let metrics_for_socket_close = pi.metrics.clone();
 
                 let serve_client = async move {
-                    let _socket_guard = metrics::SocketCloseGuard::new(
-                        metrics_for_socket_close,
-                        Reporter::destination,
-                    );
+                    let _socket_guard =
+                        metrics::SocketCloseGuard::new(pi.metrics.clone(), Reporter::destination);
                     let tls = match acceptor.accept(raw_socket).await {
                         Ok(tls) => tls,
                         Err(e) => {
@@ -140,15 +137,21 @@ impl Inbound {
                     };
                     debug!(latency=?start.elapsed(), "accepted TLS connection");
                     let (_, ssl) = tls.get_ref();
-                    let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
+                    let src_identity = {
+                        let x509_cert = tls::certificate_from_connection(ssl);
+                        tls::identity(&x509_cert)
+                    };
                     let conn = Connection {
-                        src_identity,
+                        src_identity: src_identity.clone(),
                         src,
-                        dst_network: network.clone(), // inbound request must be on our network
+                        dst_network: pi.cfg.network.clone(), // inbound request must be on our network
                         dst,
                     };
                     debug!(%conn, "accepted connection");
                     let cfg = pi.cfg.clone();
+                    // Enforce CRL revocation on this existing connection when a CRL is configured
+                    let revocation = Box::pin(Self::build_revocation(&pi, ssl, src_identity)).await;
+                    let revoked_rx = revocation.as_ref().map(|r| r.subscribe_revoked());
                     let request_handler = move |req| {
                         let id = Self::extract_traceparent(&req);
                         let peer = conn.src;
@@ -156,6 +159,7 @@ impl Inbound {
                             pi.clone(),
                             conn.clone(),
                             self.enable_orig_src,
+                            revoked_rx.clone(),
                             req,
                         )
                         .instrument(info_span!("inbound", %id, %peer));
@@ -169,16 +173,17 @@ impl Inbound {
                         tls,
                         drain,
                         force_shutdown,
+                        revocation,
                         request_handler,
                     );
                     // This is per HBONE connection, so while would be nice to be small, at least it
                     // is pooled so typically fewer of these.
-                    let serve = Box::pin(assertions::size_between(6000, 8000, serve_conn));
+                    let serve = Box::pin(assertions::size_between(6000, 7000, serve_conn));
                     serve.await
                 };
                 // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
                 // and measured above.
-                assertions::size_between_ref(1000, 1600, &serve_client);
+                assertions::size_between_ref(1000, 1650, &serve_client);
                 tokio::task::spawn(serve_client.in_current_span());
             }
         };
@@ -190,6 +195,34 @@ impl Inbound {
             accept,
         )
         .await
+    }
+
+    /// Builds this connection's CRL revocation state, or `None` when CRL enforcement is disabled.
+    /// Kept as its own `async fn` (and boxed at the call site) so the `fetch_certificate` await
+    /// doesn't grow the size of the caller's future.
+    async fn build_revocation(
+        pi: &ProxyInputs,
+        ssl: &CommonState,
+        peer_identity: Option<Identity>,
+    ) -> Option<crate::tls::revocation::RevocationHandle> {
+        let crl_manager = pi.crl_manager.as_ref()?;
+        match pi.local_workload_information.fetch_certificate().await {
+            Ok(cert) => Some(crl_manager.register(
+                crate::tls::revocation::ConnRegistration::from_conn(
+                    ssl,
+                    peer_identity,
+                    cert.root_store(),
+                    webpki::KeyUsage::client_auth(),
+                    crate::proxy::metrics::Reporter::destination,
+                ),
+            )),
+            Err(e) => {
+                warn!("failed to fetch certificate for CRL revocation enforcement: {e}");
+                pi.metrics
+                    .record_crl_untracked_connection(crate::proxy::metrics::Reporter::destination);
+                None
+            }
+        }
     }
 
     fn extract_traceparent(req: &H2Request) -> TraceParent {
@@ -206,6 +239,7 @@ impl Inbound {
         pi: Arc<ProxyInputs>,
         conn: Connection,
         enable_original_source: bool,
+        revoked: Option<watch::Receiver<bool>>,
         req: H2Request,
     ) {
         let src = conn.src;
@@ -344,7 +378,7 @@ impl Inbound {
                 .instrument(trace_span!("hbone server"))
                 .await
             });
-        let res = handle_connection!(conn_guard, send);
+        let res = handle_connection!(conn_guard, revoked, send);
         ri.result_tracker.record(res);
     }
 
@@ -490,8 +524,8 @@ impl Inbound {
         })
     }
 
-    // Selects a service by hostname without the explicit knowledge of the namespace
-    // There is no explicit mapping from hostname to namespace (e.g. foo.com)
+    // Select a service by hostname, preferring one in the namespace of the given workload.
+    // The given workload may be in the perspective of outbound or inbound.
     fn find_service_by_hostname(
         state: &DemandProxyState,
         local_workload: &Workload,
@@ -784,7 +818,7 @@ mod tests {
         rbac::Connection,
         state::{
             self, DemandProxyState, WorkloadInfo,
-            service::{Endpoint, EndpointSet, Service},
+            service::{Endpoint, EndpointSet, Service, Visibility},
             workload::{
                 ApplicationTunnel, GatewayAddress, HealthStatus, InboundProtocol, NetworkAddress,
                 NetworkMode, Workload, application_tunnel::Protocol as AppProtocol,
@@ -1021,9 +1055,11 @@ mod tests {
             }]),
             subject_alt_names: vec![strng::format!("{name}.default.svc.cluster.local")],
             waypoint: waypoint.service_attached(),
+            weighted_waypoints: vec![],
             load_balancer: None,
             ip_families: None,
             canonical: true,
+            visibility: Visibility::Public,
         });
 
         let workloads = vec![

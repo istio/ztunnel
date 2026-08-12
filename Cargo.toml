@@ -6,7 +6,7 @@ rust-version = "1.90"
 autobenches = false # benches must be explicitly declared
 
 [features]
-default = ["tls-aws-lc"]
+default = ["tls-aws-lc", "jemalloc"]
 jemalloc = ["dep:tikv-jemallocator", "dep:jemalloc_pprof"]
 tls-boring = ["dep:boring", "dep:boring-sys", "boring-rustls-provider/fips-only"]
 tls-ring = ["dep:ring", "rustls/ring", "tokio-rustls/ring", "hyper-rustls/ring", "dep:rcgen"]
@@ -52,6 +52,7 @@ base64 = "0.22"
 byteorder = "1.5"
 bytes = { version = "1.11", features = ["serde"] }
 chrono = "0.4"
+crossbeam-channel = "0.5"
 duration-str = "0.21"
 futures = "0.3"
 futures-core = "0.3"
@@ -116,11 +117,12 @@ http = "1.4"
 split-iter = "0.1"
 arcstr = { version = "1.2", features = ["serde"] }
 tracing-core = "0.1"
-tracing-appender = "0.2"
 tokio-util = { version = "0.7", features = ["io-util"] }
 educe = "0.6"
 tempfile = { version = "3.27", optional = true}
 time = { version = "0.3", optional = true }
+tower-http = { version = "0.7", features = ["compression-full"] }
+async-compression = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.2"

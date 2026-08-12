@@ -31,11 +31,11 @@ if [[ "$TLS_MODE" == "boring" ]]; then
     # TODO(https://github.com/istio/ztunnel/issues/357) clean up this hack
     sed -i 's/x86_64/arm64/g' .cargo/config.toml
   fi
-  cargo build --release --no-default-features -F tls-boring
+  cargo build --release --no-default-features -F tls-boring -F jemalloc
 elif [[ "$TLS_MODE" == "aws-lc" ]]; then
-  cargo build --release --no-default-features -F tls-aws-lc
+  cargo build --release --no-default-features -F tls-aws-lc -F jemalloc
 elif [[ "$TLS_MODE" == "openssl" ]]; then
-  cargo build --release --no-default-features -F tls-openssl
+  cargo build --release --no-default-features -F tls-openssl -F jemalloc
 else
   cargo build --release
 fi
@@ -49,13 +49,18 @@ if [[ "$CI" == "" && "$DEST" == "gs://istio-build/ztunnel" ]]; then
   echo "Outside of CI, DEST must be explicitly set"
   exit 1
 fi
-gsutil cp "${WD}/../out/rust/release/ztunnel" "${DEST}/${RELEASE_NAME}"
+# FIXME(sjinxuan) get ridof this once we fully migrate to AWS.
+if [[ -z "${AWS_CONTAINER_CREDENTIALS_FULL_URI}" ]]; then
+    gsutil cp "${WD}/../out/rust/release/ztunnel" "${DEST}/${RELEASE_NAME}"
+fi
 
 R2_DEST="${DEST/gs:\/\//s3:\/\/}"
 ENDPOINT=$(echo "${CF_CREDENTIALS}" | jq -r '.endpoint')
+R2_REGION=$(echo "${CF_CREDENTIALS}" | jq -r '.region')
 AWS_ACCESS_KEY_ID=$(echo "${CF_CREDENTIALS}" | jq -r '.access_key') \
     AWS_SECRET_ACCESS_KEY=$(echo "${CF_CREDENTIALS}" | jq -r '.secret_key') \
     AWS_SESSION_TOKEN=$(echo "${CF_CREDENTIALS}" | jq -r '.session_token') \
+    AWS_REGION="${R2_REGION}" \
     aws s3 cp "${WD}/../out/rust/release/ztunnel" \
     "${R2_DEST}/${RELEASE_NAME}" \
     --endpoint-url "${ENDPOINT}"

@@ -412,6 +412,9 @@ pub enum Error {
     #[error("connection closed due to policy change")]
     AuthorizationPolicyLateRejection,
 
+    #[error("connection closed: peer certificate revoked by CRL")]
+    CertificateRevoked,
+
     #[error("connection closed due to policy rejection: {0}")]
     AuthorizationPolicyRejection(AuthorizationRejectionError),
 

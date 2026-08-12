@@ -31,14 +31,14 @@ impl ProcessMetrics {
     fn encode_open_fds(&self, encoder: &mut DescriptorEncoder) -> Result<(), std::fmt::Error> {
         // Count open fds by listing /proc/self/fd
         let open_fds = match std::fs::read_dir(FD_PATH) {
-            Ok(entries) => entries.count() as u64,
+            // exclude the fd used to read the directory
+            Ok(entries) => entries.count() as u64 - 1,
             Err(e) => {
                 error!("Failed to read {}: {}", FD_PATH, e);
                 0
             }
         };
-        // exclude the fd used to read the directory
-        let gauge = metrics::gauge::ConstGauge::new(open_fds - 1);
+        let gauge = metrics::gauge::ConstGauge::new(open_fds);
         let metric_encoder = encoder.encode_descriptor(
             "process_open_fds",
             "Number of open file descriptors",
