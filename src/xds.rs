@@ -677,6 +677,7 @@ mod tests {
             ports: vec![Port {
                 service_port: 80,
                 target_port: 80,
+                app_protocol: 0,
             }],
             ..Default::default()
         }
@@ -698,6 +699,7 @@ mod tests {
                     ports: vec![Port {
                         service_port: 80,
                         target_port: 8080,
+                        app_protocol: 0,
                     }],
                 },
             )]),
