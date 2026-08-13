@@ -26,7 +26,7 @@ There are a variety of config options that can be used to replace components wit
 * `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sudo -E"`: have cargo run as sudo
 * `PROXY_MODE=dedicated`: Dedicated mode is the single-tenant proxy mode and is strongly recommended for local development, as it works for 95% of cases and doesn't require manually constructing Linux network namespaces to use.
 
-The following command (with `--no-default-features` if you have FIPS disabled) can be used to run entirely locally, without a Kubernetes or Istiod dependency.
+The following command can be used to run entirely locally, without a Kubernetes or Istiod dependency. To use the `ring` TLS provider instead of the default, use `--no-default-features --features tls-ring,testing`.
 
 ```shell
 FAKE_CA="true" \
