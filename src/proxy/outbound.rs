@@ -33,7 +33,9 @@ use crate::proxy::{
     BAGGAGE_HEADER, Error, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent,
     X_FORWARDED_NETWORK_HEADER, util,
 };
-use crate::proxy::{ConnectionOpen, ConnectionResultBuilder, DerivedWorkload, metrics};
+use crate::proxy::{
+    ConnectionOpen, ConnectionResult, ConnectionResultBuilder, DerivedWorkload, metrics,
+};
 
 use crate::baggage::{self, Baggage};
 use crate::drain::DrainWatcher;
@@ -128,7 +130,7 @@ impl Outbound {
                             debug!(component="outbound", dur=?start.elapsed(), "connection completed");
                         }.instrument(span);
 
-                        assertions::size_between_ref(1000, 2000, &serve_outbound_connection);
+                        assertions::size_between_ref(1000, 1700, &serve_outbound_connection);
                         tokio::spawn(serve_outbound_connection);
                     }
                     Err(e) => {
@@ -149,6 +151,26 @@ impl Outbound {
         )
         .await
     }
+}
+
+/// An established upstream connection, before any downstream bytes have moved.
+///
+/// Named `ConnectedUpstream` because `crate::state::Upstream` already exists. Double HBONE collapses
+/// into `Hbone` too: by the time we splice, its inner `H2Stream` is indistinguishable from a
+/// single-hop one.
+enum ConnectedUpstream {
+    Hbone {
+        stream: H2Stream,
+        /// CRL revocation signal of each tunnel leg the stream rides on, outermost first. Double
+        /// HBONE fills both (outer gateway, inner destination); a single hop leaves the second
+        /// `None`, which `await_revocation` parks on forever. The splice therefore races a fixed two
+        /// arms and attributes revocation identically on both paths.
+        revoked: [Option<watch::Receiver<bool>>; 2],
+        /// Graceful termination signal for double HBONE's inner tunnel, fired once the copy is done.
+        /// A single hop's tunnel is pooled, so the pool owns its draining and this is `None`.
+        inner_drain: Option<watch::Sender<bool>>,
+    },
+    Tcp(TcpStream),
 }
 
 pub(super) struct OutboundConnection {
@@ -214,7 +236,7 @@ impl OutboundConnection {
 
         let metrics = self.pi.metrics.clone();
         let hbone_target = req.hbone_target_destination.clone();
-        let connection_result_builder = Box::new(ConnectionResultBuilder::new(
+        let mut connection_result_builder = Box::new(ConnectionResultBuilder::new(
             source_addr,
             req.actual_destination,
             hbone_target,
@@ -223,181 +245,205 @@ impl OutboundConnection {
             metrics,
         ));
 
-        match req.protocol {
+        // Establish the upstream connection. This half touches no part of the downstream socket and
+        // copies nothing, so on failure `source_stream` is still owned and untouched here.
+        let connected = match req.protocol {
             OutboundProtocol::DOUBLEHBONE => {
                 // We box this since its not a common path and it would make the future really big.
-                Box::pin(self.proxy_to_double_hbone(
-                    source_stream,
-                    source_addr,
-                    &req,
-                    connection_result_builder,
-                ))
+                Box::pin(self.connect_hbone_double(source_addr, &req)).await
+            }
+            OutboundProtocol::HBONE => self
+                .connect_hbone(source_addr, &req)
                 .await
-            }
-            OutboundProtocol::HBONE => {
-                self.proxy_to_hbone(source_stream, source_addr, &req, connection_result_builder)
-                    .await
-            }
-            OutboundProtocol::TCP => {
-                self.proxy_to_tcp(source_stream, &req, connection_result_builder)
-                    .await
+                .map(|upstream| (upstream, None)),
+            OutboundProtocol::TCP => self
+                .connect_tcp(&req)
+                .await
+                .map(|upstream| (upstream, None)),
+        };
+
+        let (connected, derived_workload) = match connected {
+            Ok(connected) => connected,
+            Err(e) => {
+                // The single terminal-failure path, shared by every protocol above.
+                connection_result_builder.build().record(Err(e));
+                return;
             }
         };
+
+        // Only double HBONE learns anything about the destination while connecting (from the peer's
+        // baggage). Grafting it on here keeps the connect half free of metrics entirely.
+        if let Some(derived_workload) = derived_workload {
+            *connection_result_builder =
+                connection_result_builder.with_derived_destination(&derived_workload);
+        }
+        // `build()` emits the "connection open" access log entry, so it happens exactly once, after
+        // the connect has settled.
+        let connection_stats = Box::new(connection_result_builder.build());
+        debug!(
+            dst=%req.actual_destination,
+            target=?req.hbone_target_destination,
+            "starting copy",
+        );
+        let res = Box::pin(self.splice(source_stream, connected, &connection_stats)).await;
+        connection_stats.record(res);
     }
 
-    async fn proxy_to_double_hbone(
+    /// Connects a request through two layers of HBONE.
+    ///
+    /// Called directly rather than through a shared connect dispatcher, because this is the only
+    /// connect that learns something about the destination on the way: the `DerivedWorkload` built
+    /// from the peer's baggage, which the caller grafts onto the access log record.
+    async fn connect_hbone_double(
         &mut self,
-        stream: TcpStream,
         remote_addr: SocketAddr,
         req: &Request,
-        mut connection_stats_builder: Box<ConnectionResultBuilder>,
-    ) {
-        // async move block allows use of ? operator
-        let res = (async move {
-            // Create the outer HBONE stream. The outer tunnel's revocation signal
-            // is captured here so it can still be attributed downstream.
-            let (upgraded, _, outer_revoked) =
-                Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-            // Wrap upgraded to implement tokio's Async{Write,Read}
-            let upgraded = TokioH2Stream::new(upgraded);
+    ) -> Result<(ConnectedUpstream, Option<DerivedWorkload>), Error> {
+        // Create the outer HBONE stream. The outer tunnel's revocation signal is captured here so
+        // it can still be attributed once we are splicing over the inner tunnel.
+        let (upgraded, _, outer_revoked) =
+            Box::pin(self.send_hbone_request(remote_addr, req)).await?;
+        // Wrap upgraded to implement tokio's Async{Write,Read}
+        let upgraded = TokioH2Stream::new(upgraded);
 
-            // For the inner one, we do it manually to avoid connection pooling.
-            // Otherwise, we would only ever reach one workload in the remote cluster.
-            // We also need to abort tasks the right way to get graceful terminations.
-            let wl_key = WorkloadKey {
-                src_id: req.source.identity(),
-                dst_id: req.final_sans.clone(),
-                src: remote_addr.ip(),
-                dst: req.actual_destination,
-            };
+        // For the inner one, we do it manually to avoid connection pooling.
+        // Otherwise, we would only ever reach one workload in the remote cluster.
+        // We also need to abort tasks the right way to get graceful terminations.
+        let wl_key = WorkloadKey {
+            src_id: req.source.identity(),
+            dst_id: req.final_sans.clone(),
+            src: remote_addr.ip(),
+            dst: req.actual_destination,
+        };
 
-            // Fetch certs and establish inner TLS connection.
-            let cert = self
-                .pi
-                .local_workload_information
-                .fetch_certificate()
-                .await?;
-            let connector =
-                cert.outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())?;
-            let tls_stream = connector.connect(upgraded).await.inspect_err(|e| {
-                if crate::tls::io_error_is_cert_revoked(e) {
-                    self.pi
-                        .metrics
-                        .record_crl_rejection(crate::proxy::metrics::Reporter::source);
-                }
-            })?;
-            let (_, ssl) = tls_stream.get_ref();
-            let peer_identity = {
-                let x509_cert = tls::certificate_from_connection(ssl);
-                tls::identity(&x509_cert)
-            };
-
-            // Spawn inner CONNECT tunnel
-            let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
-            // Enforce CRL revocation on this inner tunnel for its lifetime
-            let revocation = self.pi.crl_manager.as_ref().map(|crl_manager| {
-                crl_manager.register(crate::tls::revocation::ConnRegistration::from_conn(
-                    ssl,
-                    peer_identity.clone(),
-                    cert.root_store(),
-                    webpki::KeyUsage::server_auth(),
-                    crate::proxy::metrics::Reporter::source,
-                ))
-            });
-            let mut sender = super::h2::client::spawn_connection(
-                self.pi.cfg.clone(),
-                tls_stream,
-                drain_rx,
-                wl_key,
-                revocation,
-            )
+        // Fetch certs and establish inner TLS connection.
+        let cert = self
+            .pi
+            .local_workload_information
+            .fetch_certificate()
             .await?;
-            // The inner tunnel's revocation signal
-            let inner_revoked = sender.revoked_receiver();
-            let origin_network = &self.pi.cfg.network;
-            let http_request = self.create_hbone_request(remote_addr, req, Some(origin_network));
-            let (inner_upgraded, baggage) = sender.send_request(http_request).await?;
-
-            // Proxy
-            let derived_workload = baggage.map(|baggage| DerivedWorkload {
-                workload_name: baggage.workload_name,
-                app: baggage.service_name,
-                namespace: baggage.namespace,
-                identity: peer_identity,
-                cluster_id: baggage.cluster_id,
-                region: baggage.region,
-                zone: baggage.zone,
-                revision: baggage.revision,
-            });
-            Result::<_, Error>::Ok((
-                derived_workload,
-                drain_tx,
-                inner_upgraded,
-                outer_revoked,
-                inner_revoked,
-            ))
-        })
-        .await;
-
-        match res {
-            Err(e) => {
-                let connection_stats = connection_stats_builder.build();
-                connection_stats.record(Err(e));
+        let connector =
+            cert.outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())?;
+        let tls_stream = connector.connect(upgraded).await.inspect_err(|e| {
+            if crate::tls::io_error_is_cert_revoked(e) {
+                self.pi
+                    .metrics
+                    .record_crl_rejection(crate::proxy::metrics::Reporter::source);
             }
-            Ok((derived_workload, drain_tx, inner_upgraded, outer_revoked, inner_revoked)) => {
-                if let Some(derived_workload) = derived_workload {
-                    *connection_stats_builder =
-                        connection_stats_builder.with_derived_destination(&derived_workload);
-                }
+        })?;
+        let (_, ssl) = tls_stream.get_ref();
+        let peer_identity = {
+            let x509_cert = tls::certificate_from_connection(ssl);
+            tls::identity(&x509_cert)
+        };
 
-                let connection_stats = connection_stats_builder.build();
-                // Race the copy against BOTH tunnels' revocation signals (inner = final dest, outer = e/w gw).
-                // `biased` with the revocation arms first makes attribution deterministic,
-                // so a teardown from either hop surfaces as CERT_REVOKED rather than generic reset.
+        // Spawn inner CONNECT tunnel
+        let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+        // Enforce CRL revocation on this inner tunnel for its lifetime
+        let revocation = self.pi.crl_manager.as_ref().map(|crl_manager| {
+            crl_manager.register(crate::tls::revocation::ConnRegistration::from_conn(
+                ssl,
+                peer_identity.clone(),
+                cert.root_store(),
+                webpki::KeyUsage::server_auth(),
+                crate::proxy::metrics::Reporter::source,
+            ))
+        });
+        let mut sender = super::h2::client::spawn_connection(
+            self.pi.cfg.clone(),
+            tls_stream,
+            drain_rx,
+            wl_key,
+            revocation,
+        )
+        .await?;
+        // The inner tunnel's revocation signal
+        let inner_revoked = sender.revoked_receiver();
+        let origin_network = &self.pi.cfg.network;
+        let http_request = self.create_hbone_request(remote_addr, req, Some(origin_network));
+        let (inner_upgraded, baggage) = sender.send_request(http_request).await?;
+
+        let derived_workload = baggage.map(|baggage| DerivedWorkload {
+            workload_name: baggage.workload_name,
+            app: baggage.service_name,
+            namespace: baggage.namespace,
+            identity: peer_identity,
+            cluster_id: baggage.cluster_id,
+            region: baggage.region,
+            zone: baggage.zone,
+            revision: baggage.revision,
+        });
+        Ok((
+            ConnectedUpstream::Hbone {
+                stream: inner_upgraded,
+                revoked: [outer_revoked, inner_revoked],
+                inner_drain: Some(drain_tx),
+            },
+            derived_workload,
+        ))
+    }
+
+    /// Connects a single HBONE tunnel to `req.actual_destination`.
+    async fn connect_hbone(
+        &mut self,
+        remote_addr: SocketAddr,
+        req: &Request,
+    ) -> Result<ConnectedUpstream, Error> {
+        let (stream, _, revoked) = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
+        Ok(ConnectedUpstream::Hbone {
+            stream,
+            // Single hop: there is no inner leg, and `await_revocation(None)` parks forever.
+            revoked: [revoked, None],
+            // The tunnel is pooled, so the pool owns its draining.
+            inner_drain: None,
+        })
+    }
+
+    /// Copies bytes between the downstream socket and an established upstream until one side closes.
+    ///
+    /// Unlike the connect half this consumes `source`, so it cannot be re-run: once it has been
+    /// entered, downstream bytes may already have moved.
+    async fn splice(
+        &self,
+        source: TcpStream,
+        upstream: ConnectedUpstream,
+        connection_stats: &ConnectionResult,
+    ) -> Result<(), Error> {
+        match upstream {
+            ConnectedUpstream::Hbone {
+                stream: upstream,
+                revoked: [outer_revoked, inner_revoked],
+                inner_drain,
+            } => {
+                // Race the data copy against every tunnel leg's revocation signal (for double HBONE,
+                // inner = final dest, outer = e/w gw). `biased` with the revocation arms first makes
+                // attribution deterministic: the driver sets the signal before tearing the tunnel
+                // down, so a teardown from either hop surfaces as CERT_REVOKED rather than the
+                // generic reset the copy observed.
                 let res = tokio::select! {
                     biased;
                     _ = await_revocation(outer_revoked) => Err(Error::CertificateRevoked),
                     _ = await_revocation(inner_revoked) => Err(Error::CertificateRevoked),
                     res = copy::copy_bidirectional(
-                        copy::TcpStreamSplitter(stream),
-                        inner_upgraded,
-                        &connection_stats,
+                        copy::TcpStreamSplitter(source),
+                        upstream,
+                        connection_stats,
                     ) => res,
                 };
-                let _ = drain_tx.send(true);
-
-                connection_stats.record(res);
+                if let Some(inner_drain) = inner_drain {
+                    let _ = inner_drain.send(true);
+                }
+                res
+            }
+            ConnectedUpstream::Tcp(upstream) => {
+                copy::copy_bidirectional(
+                    copy::TcpStreamSplitter(source),
+                    copy::TcpStreamSplitter(upstream),
+                    connection_stats,
+                )
+                .await
             }
         }
-    }
-
-    async fn proxy_to_hbone(
-        &mut self,
-        stream: TcpStream,
-        remote_addr: SocketAddr,
-        req: &Request,
-        connection_stats_builder: Box<ConnectionResultBuilder>,
-    ) {
-        let connection_stats = Box::new(connection_stats_builder.build());
-        let res = (async {
-            let (upgraded, _, revoked) =
-                Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-            // Race the data copy against the tunnel's revocation signal. `biased` with the
-            // revocation arm first makes attribution deterministic: the driver sets the signal
-            // before tearing the tunnel down, so whenever a teardown is due to revocation this arm
-            // wins and `record` logs `CERT_REVOKED` rather than the generic reset the copy observed.
-            tokio::select! {
-                biased;
-                _ = await_revocation(revoked) => Err(Error::CertificateRevoked),
-                res = copy::copy_bidirectional(
-                    copy::TcpStreamSplitter(stream),
-                    upgraded,
-                    &connection_stats,
-                ) => res,
-            }
-        })
-        .await;
-        connection_stats.record(res);
     }
 
     fn create_hbone_request(
@@ -457,32 +503,15 @@ impl OutboundConnection {
         Ok((upgraded, baggage, revoked))
     }
 
-    async fn proxy_to_tcp(
-        &mut self,
-        stream: TcpStream,
-        req: &Request,
-        connection_stats_builder: Box<ConnectionResultBuilder>,
-    ) {
-        let connection_stats = Box::new(connection_stats_builder.build());
-
-        let res = (async {
-            let outbound = super::freebind_connect(
-                None, // No need to spoof source IP on outbound
-                req.actual_destination,
-                self.pi.socket_factory.as_ref(),
-            )
-            .await?;
-
-            // Proxying data between downstream and upstream
-            copy::copy_bidirectional(
-                copy::TcpStreamSplitter(stream),
-                copy::TcpStreamSplitter(outbound),
-                &connection_stats,
-            )
-            .await
-        })
-        .await;
-        connection_stats.record(res);
+    /// Connects a plaintext TCP stream to `req.actual_destination`.
+    async fn connect_tcp(&self, req: &Request) -> Result<ConnectedUpstream, Error> {
+        let outbound = super::freebind_connect(
+            None, // No need to spoof source IP on outbound
+            req.actual_destination,
+            self.pi.socket_factory.as_ref(),
+        )
+        .await?;
+        Ok(ConnectedUpstream::Tcp(outbound))
     }
 
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {
