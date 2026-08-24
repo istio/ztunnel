@@ -27,6 +27,7 @@ use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{Duration, Instant, sleep_until};
 
+use crate::state::WorkloadInfo;
 use crate::{strng, tls};
 
 use super::CaClient;
@@ -34,6 +35,7 @@ use super::Error::{self, Spiffe};
 
 use crate::strng::Strng;
 use backoff::{ExponentialBackoff, backoff::Backoff};
+use educe::Educe;
 use keyed_priority_queue::KeyedPriorityQueue;
 
 const CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL: Duration = Duration::from_secs(150);
@@ -145,7 +147,51 @@ impl Default for Identity {
 
 #[async_trait]
 pub trait CaClientTrait: Send + Sync {
-    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error>;
+    async fn fetch_certificate(&self, key: &CacheKey) -> Result<tls::WorkloadCertificate, Error>;
+}
+
+/// Cache key for [`SecretManager`].
+///
+/// [`CacheKey::Identity`] gives all workloads with one SPIFFE identity one
+/// shared entry. Per-identity issuers (Istio CA) use this variant.
+///
+/// [`CacheKey::Workload`] keys the entry by (identity, pod UID). Per-workload
+/// issuers (the SPIFFE Broker: istio/ztunnel#1936, istio/istio#42339) attest
+/// the pod on every fetch and refresh. The `workload` field carries that
+/// context as payload. Hash/Eq exclude it, so it does not change the key and
+/// needs no side table.
+///
+/// The payload must be a pure function of (id, uid). The map keeps the first
+/// inserted key and ignores the payload of later lookups.
+#[derive(Educe, Debug, Clone, Eq)]
+#[educe(PartialEq, Hash)]
+pub enum CacheKey {
+    Identity(Identity),
+    Workload {
+        id: Identity,
+        uid: Strng,
+        #[educe(Hash(ignore), PartialEq(ignore))]
+        workload: Arc<WorkloadInfo>,
+    },
+}
+
+impl CacheKey {
+    pub fn identity(&self) -> &Identity {
+        match self {
+            CacheKey::Identity(id) => id,
+            CacheKey::Workload { id, .. } => id,
+        }
+    }
+}
+
+impl fmt::Display for CacheKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            CacheKey::Identity(id) => write!(f, "{id}"),
+            // Print identity and pod UID only, never the payload.
+            CacheKey::Workload { id, uid, .. } => write!(f, "{id} (uid={uid})"),
+        }
+    }
 }
 
 #[derive(PartialOrd, PartialEq, Eq, Ord, Debug, Copy, Clone)]
@@ -215,8 +261,8 @@ struct Worker {
     //
     // TODO: Change tls::Certs to use Instant instead of SystemTime.
     time_conv: crate::time::Converter,
-    // Maps Identity to the certificate state.
-    certs: Mutex<HashMap<Identity, CertChannel>>,
+    // Maps each cache key to its certificate state (see [`CacheKey`]).
+    certs: Mutex<HashMap<CacheKey, CertChannel>>,
     // How many concurrent fetch_certificate calls can be pending at a time.
     concurrency: u16,
 }
@@ -243,8 +289,8 @@ impl Worker {
         (worker, tokio::spawn(async move { w.run(requests).await }))
     }
 
-    async fn has_id(&self, id: &Identity) -> bool {
-        self.certs.lock().await.contains_key(id)
+    async fn has_key(&self, key: &CacheKey) -> bool {
+        self.certs.lock().await.contains_key(key)
     }
 
     // Manages certificate updates. Since all the work is done in a single task, the code is
@@ -259,13 +305,13 @@ impl Worker {
             Forgetting,
         }
 
-        // A set of futures refreshing the certificates. Each future completes with the identity for
-        // which it was invoked and a resulting certificate or error.
+        // A set of futures refreshing the certificates. Each future completes with the cache key
+        // for which it was invoked and a resulting certificate or error.
         let mut fetches = FuturesUnordered::new();
-        // The set of identities for which there are pending fetches. Elements of `fetches` and
+        // The set of cache keys for which there are pending fetches. Elements of `fetches` and
         // `processing` correspond to each other.
-        let mut processing: HashMap<Identity, Fetch> = HashMap::new();
-        // Identities for which we will need to refresh certificates in the future, ordered by the
+        let mut processing: HashMap<CacheKey, Fetch> = HashMap::new();
+        // Cache keys for which we will need to refresh certificates in the future, ordered by the
         // priority and time at which the refresh needs to happen.
         //
         // Note that while the sorting criteria may seem too simple, it is in fact correct due to
@@ -273,12 +319,12 @@ impl Worker {
         // the future, for all other priorities Instant::now() is used as the scheduled time of the
         // refresh. In other words, at any point in time, there are no high-priority
         // (not Background) items scheduled to run in the future.
-        let mut pending: KeyedPriorityQueue<Identity, PendingPriority> = KeyedPriorityQueue::new();
-        // The set of pending Identity requests with backoffs (i.e. pending requests that have already failed at least once).
+        let mut pending: KeyedPriorityQueue<CacheKey, PendingPriority> = KeyedPriorityQueue::new();
+        // The set of pending cache keys with backoffs (i.e. pending requests that have already failed at least once).
         // Basically, each cert fetch attempt gets its own backoff.
-        // This avoids delays where a fetch of identity A for pod A needlessly stalls the refetch of
-        // identity B for pod B. Kept separate from the `pending` KeyedPriorityKey for convenience.
-        let mut pending_backoffs_by_id: HashMap<Identity, ExponentialBackoff> = HashMap::new();
+        // This avoids delays where a failing fetch for one workload needlessly stalls the refetch
+        // for other workloads. Kept separate from the `pending` KeyedPriorityKey for convenience.
+        let mut pending_backoffs_by_key: HashMap<CacheKey, ExponentialBackoff> = HashMap::new();
 
         'main: loop {
             let next = pending.peek().map(|(_, PendingPriority(_, ts))| *ts);
@@ -292,42 +338,46 @@ impl Worker {
                 // map, but the Fetch and Forget requests arriving in the reverse order in the
                 // worker here.
                 //
-                // For that reason, we check the `certs` map (via the has_id call) before processing
+                // For that reason, we check the `certs` map (via the has_key call) before processing
                 // each request to decide if it's still relevant. After the check we are free to
                 // not worry about ordering and proceed with handling the request - a contradicting
                 // call made later by the client would result in another request being delivered to
                 // the worker.
                 res = requests.recv() => match res {
-                    Some(Request::Fetch(id, pri)) => {
-                        if !self.has_id(&id).await {
-                            // Nobody interested in the Identity anymore, do nothing.
+                    Some(Request::Fetch(key, pri)) => {
+                        if !self.has_key(&key).await {
+                            // Nobody interested in the key anymore, do nothing.
                             continue 'main;
                         }
-                        match processing.get(&id) {
+                        match processing.get(&key) {
                             None => {
-                                push_increase(&mut pending, id, PendingPriority(pri, Instant::now()));
+                                push_increase(&mut pending, key, PendingPriority(pri, Instant::now()));
                             },
                             Some(Fetch::Forgetting) => {
                                 // Once the associated future completes, the result will be dropped
                                 // instead of communicated back to the `certs` map and queued for
                                 // refresh.
-                                processing.insert(id, Fetch::Processing);
+                                processing.insert(key, Fetch::Processing);
                             },
                             Some(Fetch::Processing) => (),
                         }
                     },
-                    Some(Request::Forget(id)) => {
-                        if self.has_id(&id).await {
+                    Some(Request::Forget(key)) => {
+                        // A forget destroys the entry, so its retry backoff dies with
+                        // it. Remove before the has_key check so a forgotten key never
+                        // keeps backoff state.
+                        pending_backoffs_by_key.remove(&key);
+                        if self.has_key(&key).await {
                             // After the forget was queued, there was another request to start
-                            // managing the Identity. Do nothing.
+                            // managing the key. Do nothing.
                             continue 'main;
                         }
-                        match processing.get(&id) {
+                        match processing.get(&key) {
                             None => {
-                                pending.remove(&id);
+                                pending.remove(&key);
                             },
                             Some(Fetch::Processing) => {
-                                processing.insert(id, Fetch::Forgetting);
+                                processing.insert(key, Fetch::Forgetting);
                             },
                             Some(Fetch::Forgetting) => (),
                         }
@@ -336,9 +386,9 @@ impl Worker {
                 },
 
                 // Handle fetch results.
-                Some((id, res)) = fetches.next() => {
-                    tracing::trace!(%id, "fetch complete");
-                    match processing.remove(&id) {
+                Some((key, res)) = fetches.next() => {
+                    tracing::trace!(id = %key, "fetch complete");
+                    match processing.remove(&key) {
                         Some(Fetch::Processing) => (),
                         Some(Fetch::Forgetting) => continue 'main,
                         None => unreachable!("processing should represent all fetches"),
@@ -346,7 +396,7 @@ impl Worker {
                     let (state, refresh_at) = match res {
                         Err(err) => {
                             // Check if we should retain the existing valid certificate
-                            let existing_cert_info = self.get_existing_cert_info(&id).await;
+                            let existing_cert_info = self.get_existing_cert_info(&key).await;
 
                             // Use the next backoff to determine when to retry the fetch and default
                             // to the constant value if the backoff has been reset. In the case of
@@ -362,11 +412,11 @@ impl Worker {
                             // randomized interval =
                             //     retry_interval * (random value in range [1 - randomization_factor, 1 + randomization_factor])
                             //
-                            // Note that we are using a backoff-per-unique-identity-request. This is to prevent issues
-                            // when a cert cannot be fetched for Pod A, but that should not stall retries for
-                            // pods B, C, and D.
+                            // Note that we are using a backoff-per-unique-key. This is to prevent issues
+                            // when a cert cannot be fetched for one workload, but that should not stall
+                            // retries for other workloads.
 
-                            let mut keyed_backoff = match pending_backoffs_by_id.remove(&id) {
+                            let mut keyed_backoff = match pending_backoffs_by_key.remove(&key) {
                                 Some(backoff) => {
                                     backoff
                                 },
@@ -388,27 +438,27 @@ impl Worker {
                             };
                             let retry_delay = keyed_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
                             // Store the per-key backoff, we're gonna retry.
-                            pending_backoffs_by_id.insert(id.clone(), keyed_backoff);
+                            pending_backoffs_by_key.insert(key.clone(), keyed_backoff);
                             let refresh_at = Instant::now() + retry_delay;
 
                             match existing_cert_info {
                                 // we do have a valid existing certificate, schedule retry
                                 Some((valid_cert, cert_expiry_instant)) => {
                                     let effective_refresh_at = std::cmp::min(refresh_at, cert_expiry_instant);
-                                    tracing::info!(%id, "certificate renewal failed ({err}); retaining existing valid certificate until {:?}; next retry at {:?}", cert_expiry_instant, effective_refresh_at);
+                                    tracing::info!(id = %key, "certificate renewal failed ({err}); retaining existing valid certificate until {:?}; next retry at {:?}", cert_expiry_instant, effective_refresh_at);
                                     (CertState::Available(valid_cert), effective_refresh_at)
                                 },
                                 // we don't have a valid existing certificate
                                 None => {
-                                    tracing::warn!(%id, "certificate fetch failed ({err}) and no valid existing certificate; will retry in {retry_delay:?} (backoff capped at {CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL:?})");
+                                    tracing::warn!(id = %key, "certificate fetch failed ({err}) and no valid existing certificate; will retry in {retry_delay:?} (backoff capped at {CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL:?})");
                                     (CertState::Unavailable(err), refresh_at)
                                 }
                             }
                         },
                         Ok(certs) => {
-                             tracing::debug!(%id, "certificate fetch succeeded");
+                             tracing::debug!(id = %key, "certificate fetch succeeded");
                             // Reset (pop and drop) the backoff on success.
-                            pending_backoffs_by_id.remove(&id);
+                            pending_backoffs_by_key.remove(&key);
                             let certs: tls::WorkloadCertificate = certs; // Type annotation.
                             let refresh_at = self.time_conv.system_time_to_instant(certs.refresh_at());
                             let refresh_at = if let Some(t) = refresh_at {
@@ -427,17 +477,17 @@ impl Worker {
                             (CertState::Available(Arc::new(certs)), refresh_at)
                         },
                     };
-                    if self.update_certs(&id, state).await {
-                        push_increase(&mut pending, id, PendingPriority(Priority::Background, refresh_at));
+                    if self.update_certs(&key, state).await {
+                        push_increase(&mut pending, key, PendingPriority(Priority::Background, refresh_at));
                     }
                 },
                 // Initiate the next fetch.
                 true = maybe_sleep_until(next), if fetches.len() < self.concurrency as usize => {
-                    let (id, _) = pending.pop().expect("pending should always have an element at this point");
-                    processing.insert(id.to_owned(), Fetch::Processing);
+                    let (key, _) = pending.pop().expect("pending should always have an element at this point");
+                    processing.insert(key.clone(), Fetch::Processing);
                     fetches.push(async move {
-                        let res = self.client.fetch_certificate(&id).await;
-                        (id, res)
+                        let res = self.client.fetch_certificate(&key).await;
+                        (key, res)
                     });
                 },
             };
@@ -446,13 +496,13 @@ impl Worker {
         while fetches.next().await.is_some() {}
     }
 
-    // Returns whether the Identity is still managed.
-    async fn update_certs(&self, id: &Identity, certs: CertState) -> bool {
+    // Returns whether the cache key is still managed.
+    async fn update_certs(&self, key: &CacheKey, certs: CertState) -> bool {
         // Both errors (lack of entry in the `certs` map and a send error) are handled the same way
         // (by returning false): either (a) there was no entry in the `certs` map due to a
         // forget_certificate call some time ago or (b) a forget_certificate call was made and
         // finished just after the lock was released (but before certs was sent)
-        match self.certs.lock().await.get(id) {
+        match self.certs.lock().await.get(key) {
             Some(state) => {
                 state.tx.send(certs).expect("state.rx cannot be gone");
                 true
@@ -464,9 +514,9 @@ impl Worker {
     /// Returns existing valid certificate and its expiry time, or None if unavailable/expired
     async fn get_existing_cert_info(
         &self,
-        id: &Identity,
+        key: &CacheKey,
     ) -> Option<(Arc<tls::WorkloadCertificate>, Instant)> {
-        if let Some(cert_channel) = self.certs.lock().await.get(id) {
+        if let Some(cert_channel) = self.certs.lock().await.get(key) {
             match &*cert_channel.rx.borrow() {
                 CertState::Available(cert) => {
                     let now = self
@@ -479,16 +529,16 @@ impl Worker {
                             if let Some(expiry_instant) =
                                 self.time_conv.system_time_to_instant(cert_expiry)
                             {
-                                tracing::debug!(%id, "existing certificate valid until {:?}", cert_expiry);
+                                tracing::debug!(id = %key, "existing certificate valid until {:?}", cert_expiry);
                                 return Some((cert.clone(), expiry_instant.into()));
                             }
                         } else {
-                            tracing::debug!(%id, "existing certificate expired at {:?}", cert_expiry);
+                            tracing::debug!(id = %key, "existing certificate expired at {:?}", cert_expiry);
                         }
                     }
                 }
                 _ => {
-                    tracing::debug!(%id, "no valid certificate available to retain");
+                    tracing::debug!(id = %key, "no valid certificate available to retain");
                 }
             }
         }
@@ -508,9 +558,9 @@ async fn maybe_sleep_until(till: Option<Instant>) -> bool {
     }
 }
 
-pub enum Request {
-    Fetch(Identity, Priority),
-    Forget(Identity),
+enum Request {
+    Fetch(CacheKey, Priority),
+    Forget(CacheKey),
 }
 
 pub struct SecretManagerConfig {
@@ -534,9 +584,9 @@ fn push_increase<TKey: Hash + Eq, TPriority: Ord>(
 #[derive(Clone)]
 pub struct SecretManager {
     worker: Arc<Worker>,
-    // Channel to which certificate requests are sent to. The Identity for which request is being
-    // sent for must have a corresponding entry in the worker's certs map (which is where the
-    // result can be read from).
+    // Channel to which worker requests are sent. A Fetch key must have an entry in the
+    // worker's certs map, which is where the result is read from. A Forget key was
+    // already removed from the map; the worker re-checks the map to confirm.
     requests: mpsc::Sender<Request>,
 }
 
@@ -600,9 +650,18 @@ impl SecretManager {
         id: &Identity,
         pri: Priority,
     ) -> Result<watch::Receiver<CertState>, Error> {
+        self.start_fetch_key(CacheKey::Identity(id.clone()), pri)
+            .await
+    }
+
+    async fn start_fetch_key(
+        &self,
+        key: CacheKey,
+        pri: Priority,
+    ) -> Result<watch::Receiver<CertState>, Error> {
         let mut certs = self.worker.certs.lock().await;
-        match certs.get(id) {
-            // Identity found in cache and is already being refreshed. Bump the priority if needed.
+        match certs.get(&key) {
+            // Key found in cache and is already being refreshed. Bump the priority if needed.
             Some(st) => {
                 let rx = st.rx.clone();
                 drop(certs);
@@ -610,17 +669,17 @@ impl SecretManager {
                 if let Some(existing_pri) = init_pri(&rx)
                     && pri > existing_pri
                 {
-                    self.post(Request::Fetch(id.clone(), pri)).await;
+                    self.post(Request::Fetch(key, pri)).await;
                 }
                 Ok(rx)
             }
-            // New identity, start managing it and return the newly created channel.
+            // New key, start managing it and return the newly created channel.
             None => {
                 let (tx, rx) = watch::channel(CertState::Initializing(pri));
-                certs.insert(id.to_owned(), CertChannel { rx: rx.clone(), tx });
+                certs.insert(key.clone(), CertChannel { rx: rx.clone(), tx });
                 drop(certs);
                 // Notify the background worker to start refreshing the certificate.
-                self.post(Request::Fetch(id.to_owned(), pri)).await;
+                self.post(Request::Fetch(key, pri)).await;
                 Ok(rx)
             }
         }
@@ -669,20 +728,68 @@ impl SecretManager {
         self.fetch_certificate_pri(id, Priority::RealTime).await
     }
 
+    /// Fetches (or waits for) the certificate for one workload.
+    ///
+    /// The entry is cached under [`CacheKey::Workload`]. Two workloads that
+    /// share an identity each get their own certificate. The key carries the
+    /// workload context for issuers that attest every fetch.
+    ///
+    /// Per-identity issuers (Istio CA) must use
+    /// [`SecretManager::fetch_certificate`] instead.
+    pub async fn fetch_certificate_by_workload(
+        &self,
+        id: &Identity,
+        workload: Arc<WorkloadInfo>,
+        uid: Strng,
+    ) -> Result<Arc<tls::WorkloadCertificate>, Error> {
+        let key = CacheKey::Workload {
+            id: id.clone(),
+            uid,
+            workload,
+        };
+        self.wait(self.start_fetch_key(key, Priority::RealTime).await?)
+            .await
+    }
+
     pub async fn forget_certificate(&self, id: &Identity) {
         // TODO: consider keeping the cert around for a minute or so to avoid churn
         // We would ideally drop any pending or new requests to rotate.
-        if self.worker.certs.lock().await.remove(id).is_some() {
-            self.post(Request::Forget(id.clone())).await;
+        //
+        // Removes the identity-keyed entry only. Workload-keyed entries are
+        // removed by forget_certificate_by_workload.
+        self.forget_key(CacheKey::Identity(id.clone())).await
+    }
+
+    /// Removes the [`CacheKey::Workload`] entry for `(id, uid)`. All other
+    /// entries for the identity stay. The arguments mirror
+    /// [`SecretManager::fetch_certificate_by_workload`] so the lookup is a
+    /// direct remove; Hash/Eq ignore the workload payload.
+    pub async fn forget_certificate_by_workload(
+        &self,
+        id: &Identity,
+        workload: Arc<WorkloadInfo>,
+        uid: Strng,
+    ) {
+        self.forget_key(CacheKey::Workload {
+            id: id.clone(),
+            uid,
+            workload,
+        })
+        .await
+    }
+
+    async fn forget_key(&self, key: CacheKey) {
+        if self.worker.certs.lock().await.remove(&key).is_some() {
+            self.post(Request::Forget(key)).await;
         }
     }
 
     // TODO(qfel): It would be much nicer to have something like map_certs returning an iterator,
     // but due to locking that would require a self-referential type.
-    pub async fn collect_certs<R>(&self, f: impl Fn(&Identity, &CertState) -> R) -> Vec<R> {
+    pub async fn collect_certs<R>(&self, f: impl Fn(&CacheKey, &CertState) -> R) -> Vec<R> {
         let mut ret = Vec::new();
-        for (id, chan) in self.worker.certs.lock().await.iter() {
-            ret.push(f(id, &chan.rx.borrow()));
+        for (key, chan) in self.worker.certs.lock().await.iter() {
+            ret.push(f(key, &chan.rx.borrow()));
         }
         ret
     }
@@ -1161,7 +1268,11 @@ mod tests {
     async fn test_get_existing_cert_info_basic() {
         let test = setup(1);
         let id = identity("basic-test");
-        let info = test.secret_manager.worker.get_existing_cert_info(&id).await;
+        let info = test
+            .secret_manager
+            .worker
+            .get_existing_cert_info(&CacheKey::Identity(id))
+            .await;
         assert!(info.is_none());
 
         // cleanup
@@ -1181,7 +1292,12 @@ mod tests {
 
         // simulate ca errors
         test.caclient.set_error(true).await;
-        assert!(test.caclient.fetch_certificate(&id).await.is_err());
+        assert!(
+            test.caclient
+                .fetch_certificate(&CacheKey::Identity(id.clone()))
+                .await
+                .is_err()
+        );
 
         // wait for background refresh
         tokio::time::sleep_until(start + CERT_HALFLIFE + SEC).await;
@@ -1195,6 +1311,224 @@ mod tests {
         assert_eq!(initial_serial, current_serial);
 
         test.tear_down().await;
+    }
+
+    fn workload_info(name: &str) -> Arc<WorkloadInfo> {
+        Arc::new(WorkloadInfo::new(
+            name.to_string(),
+            "test".to_string(),
+            "test".to_string(),
+        ))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_workload_keyed_certs_are_per_pod() {
+        let test = setup(2);
+        let id = identity("shared-sa");
+
+        let cert_a = test
+            .secret_manager
+            .fetch_certificate_by_workload(&id, workload_info("pod-a"), "uid-a".into())
+            .await
+            .unwrap();
+        let cert_b = test
+            .secret_manager
+            .fetch_certificate_by_workload(&id, workload_info("pod-b"), "uid-b".into())
+            .await
+            .unwrap();
+
+        // Two workloads sharing one identity get their own cache entries and
+        // their own certificates.
+        assert_eq!(test.secret_manager.cache_len().await, 2);
+        assert!(!Arc::ptr_eq(&cert_a, &cert_b));
+        assert_ne!(cert_a.cert.serial(), cert_b.cert.serial());
+
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_workload_keyed_cert_rotation_carries_workload() {
+        let test = setup(1);
+        let id = identity("rotation");
+        let wl = workload_info("pod-a");
+        let uid: Strng = "uid-a".into();
+        let start = Instant::now();
+
+        let initial = test
+            .secret_manager
+            .fetch_certificate_by_workload(&id, wl.clone(), uid.clone())
+            .await
+            .unwrap();
+
+        // The background refresh fires at the certificate half-life. The mock
+        // fetch takes 1s (fetch_latency), so by half-life + 3s the rotated
+        // certificate must be in the cache.
+        tokio::time::sleep_until(start + CERT_HALFLIFE + 3 * SEC).await;
+
+        let rotated = test
+            .secret_manager
+            .fetch_certificate_by_workload(&id, wl.clone(), uid.clone())
+            .await
+            .unwrap();
+        assert_ne!(initial.cert.serial(), rotated.cert.serial());
+
+        // The initial fetch and every background refresh must carry the
+        // per-workload key. A per-workload issuer needs it on every fetch.
+        let fetches = test.caclient.fetches().await;
+        assert!(
+            fetches.len() >= 2,
+            "expected a background refresh, got {fetches:?}"
+        );
+        for key in &fetches {
+            match key {
+                CacheKey::Workload {
+                    id: kid,
+                    uid: kuid,
+                    workload: kwl,
+                } => {
+                    assert_eq!(kid, &id);
+                    assert_eq!(kuid, &uid);
+                    assert_eq!(kwl, &wl);
+                }
+                CacheKey::Identity(_) => panic!("fetch used identity-only key: {key}"),
+            }
+        }
+
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_forget_certificate_leaves_workload_entries() {
+        let test = setup(2);
+        let id = identity("forget-identity");
+        let other = identity("other");
+
+        test.secret_manager.fetch_certificate(&id).await.unwrap();
+        test.secret_manager
+            .fetch_certificate_by_workload(&id, workload_info("pod-a"), "uid-a".into())
+            .await
+            .unwrap();
+        test.secret_manager
+            .fetch_certificate_by_workload(&id, workload_info("pod-b"), "uid-b".into())
+            .await
+            .unwrap();
+        test.secret_manager.fetch_certificate(&other).await.unwrap();
+        assert_eq!(test.secret_manager.cache_len().await, 4);
+
+        // Forgetting the identity removes the identity-keyed entry only. The
+        // workload-keyed entries have their own removal path.
+        test.secret_manager.forget_certificate(&id).await;
+        assert_eq!(test.secret_manager.cache_len().await, 3);
+
+        // The worker stops refreshes for the forgotten key only. Advance past
+        // the refresh point: no identity-keyed fetch for `id`, while its
+        // workload-keyed entries and `other` keep refreshing.
+        let fetches_before = test.caclient.fetches().await.len();
+        tokio::time::sleep(CERT_HALFLIFE + 3 * SEC).await;
+        let fetches = test.caclient.fetches().await;
+        let after = &fetches[fetches_before..];
+        assert!(
+            after
+                .iter()
+                .all(|k| !matches!(k, CacheKey::Identity(kid) if kid == &id)),
+            "forgotten identity entry must not refresh: {fetches:?}"
+        );
+        assert!(
+            after
+                .iter()
+                .any(|k| matches!(k, CacheKey::Workload { id: kid, .. } if kid == &id)),
+            "workload entries for the identity must keep refreshing: {fetches:?}"
+        );
+        assert!(
+            after.iter().any(|k| k.identity() == &other),
+            "other identity must keep refreshing: {fetches:?}"
+        );
+
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_forget_certificate_by_workload_is_per_pod() {
+        let test = setup(2);
+        let id = identity("forget-one-pod");
+        let uid_a: Strng = "uid-a".into();
+
+        test.secret_manager.fetch_certificate(&id).await.unwrap();
+        test.secret_manager
+            .fetch_certificate_by_workload(&id, workload_info("pod-a"), uid_a.clone())
+            .await
+            .unwrap();
+        test.secret_manager
+            .fetch_certificate_by_workload(&id, workload_info("pod-b"), "uid-b".into())
+            .await
+            .unwrap();
+        assert_eq!(test.secret_manager.cache_len().await, 3);
+
+        // Forgetting one pod removes only that pod's entry. The payload here is
+        // a fresh value; the key ignores it.
+        test.secret_manager
+            .forget_certificate_by_workload(&id, workload_info("pod-a"), uid_a.clone())
+            .await;
+        assert_eq!(test.secret_manager.cache_len().await, 2);
+
+        // The identity entry and the sibling keep refreshing. The forgotten
+        // pod does not.
+        let fetches_before = test.caclient.fetches().await.len();
+        tokio::time::sleep(CERT_HALFLIFE + 3 * SEC).await;
+        let fetches = test.caclient.fetches().await;
+        let after = &fetches[fetches_before..];
+        assert!(
+            after
+                .iter()
+                .all(|k| !matches!(k, CacheKey::Workload { uid, .. } if uid == &uid_a)),
+            "forgotten pod must not refresh: {fetches:?}"
+        );
+        assert!(
+            after
+                .iter()
+                .any(|k| matches!(k, CacheKey::Workload { uid, .. } if uid == "uid-b")),
+            "sibling must keep refreshing: {fetches:?}"
+        );
+        assert!(
+            after.iter().any(|k| matches!(k, CacheKey::Identity(_))),
+            "identity entry must keep refreshing: {fetches:?}"
+        );
+
+        test.tear_down().await;
+    }
+
+    #[test]
+    fn cache_key_is_keyed_by_identity_and_uid_only() {
+        use std::hash::{DefaultHasher, Hasher};
+
+        let id = identity("key-semantics");
+        let a = CacheKey::Workload {
+            id: id.clone(),
+            uid: "uid-1".into(),
+            workload: workload_info("pod-a"),
+        };
+        let b = CacheKey::Workload {
+            id: id.clone(),
+            uid: "uid-1".into(),
+            workload: workload_info("pod-b"),
+        };
+        let c = CacheKey::Workload {
+            id,
+            uid: "uid-2".into(),
+            workload: workload_info("pod-a"),
+        };
+
+        let hash = |k: &CacheKey| {
+            let mut h = DefaultHasher::new();
+            k.hash(&mut h);
+            h.finish()
+        };
+        // The payload must not affect the key. A lookup with a different
+        // WorkloadInfo hits the same entry.
+        assert_eq!(a, b);
+        assert_eq!(hash(&a), hash(&b));
+        // The pod UID must split the key.
+        assert_ne!(a, c);
     }
 
     #[test]
