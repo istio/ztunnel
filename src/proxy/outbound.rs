@@ -957,6 +957,7 @@ mod tests {
                     ports: vec![Port {
                         service_port: 80,
                         target_port: 8080,
+                        app_protocol: 0,
                     }],
                     ..Default::default()
                 }),
@@ -970,6 +971,7 @@ mod tests {
                             ports: vec![Port {
                                 service_port: 80,
                                 target_port: 8080,
+                                app_protocol: 0,
                             }],
                         },
                     )]),
@@ -999,6 +1001,7 @@ mod tests {
                     ports: vec![Port {
                         service_port: 80,
                         target_port: 8080,
+                        app_protocol: 0,
                     }],
                     ..Default::default()
                 }),
@@ -1024,6 +1027,7 @@ mod tests {
                             ports: vec![Port {
                                 service_port: 80,
                                 target_port: 8080,
+                                app_protocol: 0,
                             }],
                         },
                     )]),
@@ -1059,6 +1063,7 @@ mod tests {
                     ports: vec![Port {
                         service_port: 80,
                         target_port: 8080,
+                        app_protocol: 0,
                     }],
                     ..Default::default()
                 }),
@@ -1072,6 +1077,7 @@ mod tests {
                     ports: vec![Port {
                         service_port: 15009,
                         target_port: 15009,
+                        app_protocol: 0,
                     }],
                     ..Default::default()
                 }),
@@ -1096,6 +1102,7 @@ mod tests {
                             ports: vec![Port {
                                 service_port: 80,
                                 target_port: 8080,
+                                app_protocol: 0,
                             }],
                         },
                     )]),
@@ -1111,6 +1118,7 @@ mod tests {
                             ports: vec![Port {
                                 service_port: 15009,
                                 target_port: 15008,
+                                app_protocol: 0,
                             }],
                         },
                     )]),
@@ -1140,6 +1148,7 @@ mod tests {
                     ports: vec![Port {
                         service_port: 80,
                         target_port: 8080,
+                        app_protocol: 0,
                     }],
                     waypoint: Some(xds::istio::workload::GatewayAddress {
                         destination: Some(
@@ -1164,6 +1173,7 @@ mod tests {
                     ports: vec![Port {
                         service_port: 15008,
                         target_port: 15008,
+                        app_protocol: 0,
                     }],
                     ..Default::default()
                 }),
@@ -1189,6 +1199,7 @@ mod tests {
                             ports: vec![Port {
                                 service_port: 15008,
                                 target_port: 15008,
+                                app_protocol: 0,
                             }],
                         },
                     )]),
@@ -1225,6 +1236,7 @@ mod tests {
             ports: vec![Port {
                 service_port: 80,
                 target_port: 8080,
+                app_protocol: 0,
             }],
             // Prefer routing to workloads on the same network, but when nothing is healthy locally
             // allow failing over to remote networks.
@@ -1263,6 +1275,7 @@ mod tests {
                     ports: vec![Port {
                         service_port: 80,
                         target_port: 8080,
+                        app_protocol: 0,
                     }],
                 },
             )]),
@@ -1279,6 +1292,7 @@ mod tests {
                     ports: vec![Port {
                         service_port: 80,
                         target_port: 8080,
+                        app_protocol: 0,
                     }],
                 },
             )]),
@@ -1296,6 +1310,7 @@ mod tests {
                     ports: vec![Port {
                         service_port: 80,
                         target_port: 8080,
+                        app_protocol: 0,
                     }],
                 },
             )]),
@@ -1539,6 +1554,7 @@ mod tests {
                 ports: vec![Port {
                     service_port: 80,
                     target_port: 8080,
+                    app_protocol: 0,
                 }],
                 waypoint: Some(xds::istio::workload::GatewayAddress {
                     destination: Some(xds::istio::workload::gateway_address::Destination::Address(
@@ -1576,6 +1592,7 @@ mod tests {
                 ports: vec![Port {
                     service_port: 80,
                     target_port: 8080,
+                    app_protocol: 0,
                 }],
                 ..Default::default()
             }),
@@ -1602,10 +1619,12 @@ mod tests {
                         Port {
                             service_port: 80,
                             target_port: 0, // named port
+                            app_protocol: 0,
                         },
                         Port {
                             service_port: 8080,
                             target_port: 0, // named port
+                            app_protocol: 0,
                         },
                     ],
                     ..Default::default()
@@ -1619,6 +1638,7 @@ mod tests {
                             ports: vec![Port {
                                 service_port: 80,
                                 target_port: 1234,
+                                app_protocol: 0,
                             }],
                         },
                     )]),
@@ -1634,6 +1654,7 @@ mod tests {
                             ports: vec![Port {
                                 service_port: 8080,
                                 target_port: 9999,
+                                app_protocol: 0,
                             }],
                         },
                     )]),
@@ -1663,6 +1684,7 @@ mod tests {
                 ports: vec![Port {
                     service_port: 80,
                     target_port: 80,
+                    app_protocol: 0,
                 }],
                 ..Default::default()
             }),
@@ -1677,6 +1699,7 @@ mod tests {
                         ports: vec![Port {
                             service_port: 80,
                             target_port: 80,
+                            app_protocol: 0,
                         }],
                     },
                 )]),
@@ -1803,6 +1826,7 @@ mod tests {
                 ports: vec![Port {
                     service_port: 80,
                     target_port: 80,
+                    app_protocol: 0,
                 }],
                 ..Default::default()
             };
@@ -1886,6 +1910,7 @@ mod tests {
                 ports: vec![Port {
                     service_port: 80,
                     target_port: 80,
+                    app_protocol: 0,
                 }],
                 ..Default::default()
             }),
@@ -1934,6 +1959,7 @@ mod tests {
                 ports: vec![Port {
                     service_port: 80,
                     target_port: 80,
+                    app_protocol: 0,
                 }],
                 ..Default::default()
             }),

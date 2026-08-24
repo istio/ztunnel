@@ -63,11 +63,16 @@ pub enum InboundProtocol {
     HBONE,
 }
 
-impl From<xds::istio::workload::TunnelProtocol> for InboundProtocol {
-    fn from(value: xds::istio::workload::TunnelProtocol) -> Self {
+impl TryFrom<xds::istio::workload::TunnelProtocol> for InboundProtocol {
+    type Error = WorkloadError;
+
+    fn try_from(value: xds::istio::workload::TunnelProtocol) -> Result<Self, Self::Error> {
         match value {
-            xds::istio::workload::TunnelProtocol::Hbone => InboundProtocol::HBONE,
-            xds::istio::workload::TunnelProtocol::None => InboundProtocol::TCP,
+            xds::istio::workload::TunnelProtocol::Hbone => Ok(InboundProtocol::HBONE),
+            xds::istio::workload::TunnelProtocol::None => Ok(InboundProtocol::TCP),
+            xds::istio::workload::TunnelProtocol::LegacyIstioMtls => Err(WorkloadError::EnumParse(
+                "unsupported tunnel protocol: legacy istio mtls".to_string(),
+            )),
         }
     }
 }
@@ -360,6 +365,7 @@ impl From<HashMap<u16, u16>> for PortList {
                 .map(|(k, v)| Port {
                     service_port: *k as u32,
                     target_port: *v as u32,
+                    app_protocol: 0,
                 })
                 .collect(),
         }
@@ -465,9 +471,9 @@ impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
             waypoint: wp,
             network_gateway: network_gw,
 
-            protocol: InboundProtocol::from(xds::istio::workload::TunnelProtocol::try_from(
+            protocol: InboundProtocol::try_from(xds::istio::workload::TunnelProtocol::try_from(
                 resource.tunnel_protocol,
-            )?),
+            )?)?,
             network_mode: NetworkMode::from(xds::istio::workload::NetworkMode::try_from(
                 resource.network_mode,
             )?),
@@ -1057,6 +1063,7 @@ mod tests {
                 ports: vec![XdsPort {
                     service_port: 80,
                     target_port: 8080,
+                    app_protocol: 0,
                 }],
             },
         )]);
@@ -1152,6 +1159,7 @@ mod tests {
                     ports: vec![XdsPort {
                         service_port: 80,
                         target_port: 80,
+                        app_protocol: 0,
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
@@ -1159,6 +1167,7 @@ mod tests {
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    ingress_use_waypoint: false,
                 },
             )
             .unwrap();
@@ -1189,6 +1198,7 @@ mod tests {
                     ports: vec![XdsPort {
                         service_port: 80,
                         target_port: 80,
+                        app_protocol: 0,
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
@@ -1196,6 +1206,7 @@ mod tests {
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    ingress_use_waypoint: false,
                 },
             )
             .unwrap();
@@ -1251,6 +1262,7 @@ mod tests {
                     ports: vec![XdsPort {
                         service_port: 80,
                         target_port: 80,
+                        app_protocol: 0,
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
@@ -1258,6 +1270,7 @@ mod tests {
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    ingress_use_waypoint: false,
                 },
             )
             .unwrap();
@@ -1512,6 +1525,7 @@ mod tests {
                     ports: vec![XdsPort {
                         service_port: 80,
                         target_port: 8080,
+                        app_protocol: 0,
                     }],
                 },
             ),
@@ -1521,6 +1535,7 @@ mod tests {
                     ports: vec![XdsPort {
                         service_port: 80,
                         target_port: 8080,
+                        app_protocol: 0,
                     }],
                 },
             ),
@@ -1570,6 +1585,7 @@ mod tests {
                     ports: vec![XdsPort {
                         service_port: 80,
                         target_port: 80,
+                        app_protocol: 0,
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
@@ -1577,6 +1593,7 @@ mod tests {
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    ingress_use_waypoint: false,
                 },
             )
             .unwrap();
@@ -1595,6 +1612,7 @@ mod tests {
                     ports: vec![XdsPort {
                         service_port: 80,
                         target_port: 80,
+                        app_protocol: 0,
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
@@ -1606,6 +1624,7 @@ mod tests {
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    ingress_use_waypoint: false,
                 },
             )
             .unwrap();
@@ -1648,6 +1667,7 @@ mod tests {
             ports: vec![XdsPort {
                 service_port: 80,
                 target_port: 80,
+                app_protocol: 0,
             }],
             subject_alt_names: vec![],
             waypoint: None,
@@ -1659,6 +1679,7 @@ mod tests {
             ip_families: 0,
             extensions: Default::default(),
             canonical: true,
+            ingress_use_waypoint: false,
         };
         updater
             .insert_service(
@@ -1675,6 +1696,7 @@ mod tests {
                     ports: vec![XdsPort {
                         service_port: 80,
                         target_port: 80,
+                        app_protocol: 0,
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
@@ -1682,6 +1704,7 @@ mod tests {
                     ip_families: 0,
                     extensions: Default::default(),
                     canonical: true,
+                    ingress_use_waypoint: false,
                 },
             )
             .unwrap();
@@ -1696,6 +1719,7 @@ mod tests {
                     ports: vec![XdsPort {
                         service_port: 80,
                         target_port: 8080,
+                        app_protocol: 0,
                     }],
                 },
             ),
@@ -1705,6 +1729,7 @@ mod tests {
                     ports: vec![XdsPort {
                         service_port: 80,
                         target_port: 8080,
+                        app_protocol: 0,
                     }],
                 },
             ),
@@ -1799,6 +1824,7 @@ mod tests {
                 ports: vec![XdsPort {
                     service_port: 80,
                     target_port: 8080,
+                    app_protocol: 0,
                 }],
             },
         )]);
