@@ -693,6 +693,7 @@ mod tests {
                     ports: vec![XdsPort {
                         service_port: 80,
                         target_port: 8080,
+                        app_protocol: 0,
                     }],
                 },
             )]),
@@ -717,6 +718,7 @@ mod tests {
             ports: vec![XdsPort {
                 service_port: 80,
                 target_port: 80,
+                app_protocol: 0,
             }],
             subject_alt_names: vec!["SAN1".to_string(), "SAN2".to_string()],
             waypoint: None,
