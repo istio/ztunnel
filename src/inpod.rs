@@ -12,27 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config as zconfig;
-use crate::readiness;
-use metrics::Metrics;
-use std::sync::Arc;
-use workloadmanager::WorkloadProxyManager;
+//! In-pod (co-located) data plane support.
+//!
+//! The actual in-pod capture backend is platform specific: on Linux it is implemented by
+//! joining each workload's network namespace and putting sockets into that namespace
+//! ([`self::linux`]). Other platforms do not (yet) have a capture backend, so on those
+//! platforms only a [not-supported stub](self::windows) is available.
 
-use crate::proxyfactory::ProxyFactory;
-
-use self::config::InPodConfig;
-
-pub mod admin;
-mod config;
 pub mod metrics;
-pub mod netns;
-pub mod packet;
-mod protocol;
-mod statemanager;
-mod workloadmanager;
+pub use metrics::Metrics;
 
-#[cfg(any(test, feature = "testing"))]
-pub mod test_helpers;
+/// Linux network-namespace capture backend. See the [module](self::linux) for details.
+#[cfg(target_os = "linux")]
+pub mod linux;
+
+/// Capture backend for non-Linux platforms. See the [module](self::windows) for details.
+#[cfg(not(target_os = "linux"))]
+pub mod windows;
 
 pub mod istio {
     pub mod zds {
@@ -54,6 +50,9 @@ pub enum Error {
     ProtocolError(String),
     #[error("announce error: {0}")]
     AnnounceError(String),
+    /// The requested in-pod feature is not supported on this platform.
+    #[error("not supported: {0}")]
+    NotSupported(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
@@ -66,46 +65,4 @@ impl WorkloadUid {
     pub fn into_string(self) -> String {
         self.0
     }
-}
-
-#[derive(Debug)]
-pub struct WorkloadData {
-    netns: std::os::fd::OwnedFd,
-    workload_uid: WorkloadUid,
-    workload_info: Option<istio::zds::WorkloadInfo>,
-}
-
-#[derive(Debug)]
-pub enum WorkloadMessage {
-    AddWorkload(WorkloadData),
-    KeepWorkload(WorkloadUid),
-    WorkloadSnapshotSent,
-    DelWorkload(WorkloadUid),
-}
-
-pub fn init_and_new(
-    metrics: Arc<Metrics>,
-    admin_server: &mut crate::admin::Service,
-    cfg: &zconfig::Config,
-    proxy_gen: ProxyFactory,
-    ready: readiness::Ready,
-) -> anyhow::Result<WorkloadProxyManager> {
-    // verify that we have the permissions for the syscalls we need
-    WorkloadProxyManager::verify_syscalls()?;
-    let admin_handler: Arc<admin::WorkloadManagerAdminHandler> = Default::default();
-    admin_server.add_handler(admin_handler.clone());
-    let inpod_config = crate::inpod::InPodConfig::new(cfg)?;
-
-    let state_mgr = statemanager::WorkloadProxyManagerState::new(
-        proxy_gen,
-        inpod_config,
-        metrics,
-        admin_handler,
-    );
-
-    Ok(WorkloadProxyManager::new(
-        cfg.inpod_uds.clone(),
-        state_mgr,
-        ready,
-    )?)
 }

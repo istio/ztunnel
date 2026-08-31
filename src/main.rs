@@ -14,6 +14,7 @@
 
 extern crate core;
 
+#[cfg(unix)]
 use nix::sys::resource::{Resource, getrlimit, setrlimit};
 use std::sync::Arc;
 use tracing::{info, warn};

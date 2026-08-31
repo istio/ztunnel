@@ -20,9 +20,10 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use tracing::{debug, error, info, warn};
 
-use super::Error;
 use super::statemanager::WorkloadProxyManagerState;
+use crate::inpod::Error;
 
+use super::WorkloadMessage;
 use super::protocol::WorkloadStreamProcessor;
 
 const RETRY_DURATION: Duration = Duration::from_secs(5);
@@ -258,7 +259,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
     async fn read_message_and_retry_proxies(
         &mut self,
         processor: &mut WorkloadStreamProcessor,
-    ) -> anyhow::Result<Option<crate::inpod::WorkloadMessage>> {
+    ) -> anyhow::Result<Option<WorkloadMessage>> {
         let readmsg = processor.read_message();
         // Note: readmsg future is NOT cancel safe, so we want to make sure this function doesn't exit
         // return without completing it.
@@ -386,7 +387,7 @@ pub(crate) mod tests {
 
     use super::*;
 
-    use crate::inpod::test_helpers::{
+    use crate::inpod::linux::test_helpers::{
         self, create_proxy_conflict, new_netns, read_hello, read_msg, send_snap_sent,
         send_workload_added, send_workload_del, uid,
     };

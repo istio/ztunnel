@@ -26,7 +26,6 @@ pub mod dns;
 pub mod drain;
 pub mod hyper_util;
 pub mod identity;
-#[cfg(target_os = "linux")]
 pub mod inpod;
 pub mod metrics;
 pub mod proxy;

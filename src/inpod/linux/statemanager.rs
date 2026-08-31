@@ -17,15 +17,17 @@ use crate::drain::DrainTrigger;
 use std::sync::Arc;
 use tracing::{Instrument, debug, info};
 
-use super::{Error, WorkloadMessage, metrics::Metrics};
+use super::WorkloadMessage;
+use crate::inpod::Error;
+use crate::inpod::metrics::Metrics;
 
 use crate::proxyfactory::ProxyFactory;
 use crate::state::WorkloadInfo;
 
 use super::config::InPodConfig;
 
-use super::WorkloadUid;
 use super::netns::{InpodNetns, NetnsID};
+use crate::inpod::WorkloadUid;
 
 // Note: we can't drain on drop, as drain is async (it waits for the drain to finish).
 pub(super) struct WorkloadState {
@@ -388,8 +390,8 @@ impl WorkloadProxyManagerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inpod::WorkloadData;
-    use crate::inpod::test_helpers::{self, create_proxy_conflict, new_netns, uid};
+    use crate::inpod::linux::WorkloadData;
+    use crate::inpod::linux::test_helpers::{self, create_proxy_conflict, new_netns, uid};
 
     use crate::inpod::istio::zds;
     use matches::assert_matches;

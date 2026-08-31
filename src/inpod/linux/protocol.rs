@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::istio::zds::{self, Ack, Version, WorkloadRequest, WorkloadResponse, ZdsHello};
 use super::{WorkloadData, WorkloadMessage};
 use crate::drain::DrainWatcher;
+use crate::inpod::istio::zds::{self, Ack, Version, WorkloadRequest, WorkloadResponse, ZdsHello};
 use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg, sendmsg};
 use prost::Message;
 use std::io::{IoSlice, IoSliceMut};
@@ -157,17 +157,19 @@ fn get_workload_data(
             let uid = a.uid;
             Ok(WorkloadMessage::AddWorkload(WorkloadData {
                 netns: our_netns,
-                workload_uid: super::WorkloadUid::new(uid),
+                workload_uid: crate::inpod::WorkloadUid::new(uid),
                 workload_info: a.workload_info,
             }))
         }
         (Payload::Add(_), None) => Err(anyhow::anyhow!("No control message")),
         // anything other than Add shouldn't have FDs
         (_, Some(_)) => Err(anyhow::anyhow!("Unexpected control message")),
-        (Payload::Keep(k), None) => Ok(WorkloadMessage::KeepWorkload(super::WorkloadUid::new(
-            k.uid,
-        ))),
-        (Payload::Del(d), None) => Ok(WorkloadMessage::DelWorkload(super::WorkloadUid::new(d.uid))),
+        (Payload::Keep(k), None) => Ok(WorkloadMessage::KeepWorkload(
+            crate::inpod::WorkloadUid::new(k.uid),
+        )),
+        (Payload::Del(d), None) => Ok(WorkloadMessage::DelWorkload(
+            crate::inpod::WorkloadUid::new(d.uid),
+        )),
         (Payload::SnapshotSent(_), None) => Ok(WorkloadMessage::WorkloadSnapshotSent),
     }
 }
@@ -252,9 +254,9 @@ fn validate_ns(fd: &OwnedFd) -> anyhow::Result<()> {
 mod tests {
     use std::os::fd::OwnedFd;
 
-    use super::super::istio;
     use super::*;
-    use crate::inpod::test_helpers::uid;
+    use crate::inpod::istio;
+    use crate::inpod::linux::test_helpers::uid;
 
     use nix::sys::socket::MsgFlags;
     // Helpers to test get_workload_data_from_parts

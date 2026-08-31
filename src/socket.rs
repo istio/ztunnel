@@ -178,6 +178,9 @@ impl Listener {
                 let res = SockRef::from(&stream).set_tcp_keepalive(&ka);
                 tracing::trace!("set keepalive: {:?}", res);
             }
+            #[cfg(target_os = "linux")]
+            // TCP_USER_TIMEOUT is only available on Linux (see `proxy.rs`), and is not exposed
+            // by `socket2` on Windows/macOS build targets.
             if cfg.user_timeout_enabled {
                 let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
                 let res = SockRef::from(&stream).set_tcp_user_timeout(Some(ut));

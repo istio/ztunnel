@@ -28,7 +28,7 @@ use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::istio::zds::{WorkloadInfo, WorkloadRequest, WorkloadResponse, ZdsHello};
+use crate::inpod::istio::zds::{WorkloadInfo, WorkloadRequest, WorkloadResponse, ZdsHello};
 
 use crate::drain::{DrainTrigger, DrainWatcher};
 use crate::{dns, drain};
@@ -163,7 +163,7 @@ pub async fn send_snap_sent(s: &mut UnixStream) {
 
 pub async fn send_workload_added(
     s: &mut UnixStream,
-    uid: super::WorkloadUid,
+    uid: crate::inpod::WorkloadUid,
     info: Option<WorkloadInfo>,
     fd: impl std::os::fd::AsRawFd,
 ) {
@@ -199,7 +199,7 @@ pub async fn send_workload_added(
     .expect("failed to sendmsg");
 }
 
-pub async fn send_workload_del(s: &mut UnixStream, uid: super::WorkloadUid) {
+pub async fn send_workload_del(s: &mut UnixStream, uid: crate::inpod::WorkloadUid) {
     let r = WorkloadRequest {
         payload: Some(crate::inpod::istio::zds::workload_request::Payload::Del(
             crate::inpod::istio::zds::DelWorkload {
@@ -228,7 +228,7 @@ pub async fn send_workload_del(s: &mut UnixStream, uid: super::WorkloadUid) {
 
 pub fn create_proxy_conflict(ns: &std::os::fd::OwnedFd) -> std::os::fd::OwnedFd {
     let inpodns = InpodNetns::new(
-        Arc::new(crate::inpod::netns::InpodNetns::current().unwrap()),
+        Arc::new(crate::inpod::linux::netns::InpodNetns::current().unwrap()),
         ns.try_clone().unwrap(),
     )
     .unwrap();
