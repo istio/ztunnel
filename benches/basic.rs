@@ -77,6 +77,7 @@ pub fn xds(c: &mut Criterion) {
                                     ports: vec![Port {
                                         service_port: 80,
                                         target_port: 1234,
+                                        app_protocol: 0,
                                     }],
                                 },
                             )]),
@@ -144,6 +145,7 @@ fn build_load_balancer(
         ports: vec![Port {
             service_port: 80,
             target_port: 0,
+            app_protocol: 0,
         }],
         load_balancing,
         ..Default::default()
@@ -169,6 +171,7 @@ fn build_load_balancer(
                             ports: vec![Port {
                                 service_port: 80,
                                 target_port: 1234,
+                                app_protocol: 0,
                             }],
                         },
                     )]),
@@ -303,6 +306,7 @@ fn one_service(hostname: &str, addr: [u8; 4]) -> XdsService {
         ports: vec![Port {
             service_port: 80,
             target_port: 0,
+            app_protocol: 0,
         }],
         ..Default::default()
     }
@@ -318,6 +322,7 @@ fn build_workloads(n: usize, svc_for: impl Fn(usize) -> Option<String>) -> Vec<X
                         ports: vec![Port {
                             service_port: 80,
                             target_port: 1234,
+                            app_protocol: 0,
                         }],
                     },
                 )]),

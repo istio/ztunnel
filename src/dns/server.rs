@@ -1946,6 +1946,7 @@ mod tests {
             ports: vec![XdsPort {
                 service_port: 80,
                 target_port: 80,
+                app_protocol: 0,
             }],
             ..Default::default()
         }
@@ -2006,6 +2007,7 @@ mod tests {
                             ports: vec![XdsPort {
                                 service_port: 80,
                                 target_port: 80,
+                                app_protocol: 0,
                             }],
                         },
                     );
