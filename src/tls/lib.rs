@@ -31,7 +31,7 @@ use rustls::crypto::CryptoProvider;
 use rustls::ClientConfig;
 use rustls::ServerConfig;
 
-static MESH_CIPHER_SUITES: Lazy<Vec<String>> = Lazy::new(|| {
+pub static MESH_CIPHER_SUITES: Lazy<Vec<String>> = Lazy::new(|| {
     env::var("MESH_CIPHER_SUITES")
         .ok()
         .map(|s| {
