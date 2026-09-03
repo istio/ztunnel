@@ -107,6 +107,8 @@ macro_rules! impl_parse_cipher_suites {
                 tracing::warn!("all configured cipher suites were unrecognized ({names:?}), falling back to defaults");
                 None
             } else {
+                let applied: Vec<_> = suites.iter().map(|s| s.suite()).collect();
+                tracing::info!("MESH_CIPHER_SUITES: configured cipher suites: {applied:?}");
                 Some(suites)
             }
         }
@@ -400,6 +402,168 @@ pub mod tests {
         // Without ossl350 cfg, PQC cannot be enabled (would panic in provider())
         if *crate::PQC_ENABLED {
             panic!("PQC_ENABLED=true without ossl350 cfg - provider() will panic");
+        }
+    }
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    fn suite_names(suites: &[rustls::SupportedCipherSuite]) -> Vec<rustls::CipherSuite> {
+        suites.iter().map(|s| s.suite()).collect()
+    }
+
+    #[cfg(any(feature = "tls-aws-lc", feature = "tls-ring", feature = "tls-openssl"))]
+    mod parse_cipher_suites_tests {
+        use super::*;
+        use rustls::CipherSuite;
+
+        fn parse(names: &[String]) -> Option<Vec<rustls::SupportedCipherSuite>> {
+            #[cfg(feature = "tls-aws-lc")]
+            return crate::tls::lib::parse_cipher_suites_aws_lc(names);
+            #[cfg(feature = "tls-ring")]
+            return crate::tls::lib::parse_cipher_suites_ring(names);
+            #[cfg(feature = "tls-openssl")]
+            return crate::tls::lib::parse_cipher_suites_openssl(names);
+        }
+
+        #[test]
+        fn empty_input_returns_none() {
+            assert!(parse(&[]).is_none());
+        }
+
+        #[test]
+        fn single_tls13_suite() {
+            let result = parse(&[s("TLS_AES_256_GCM_SHA384")]).unwrap();
+            assert_eq!(suite_names(&result), vec![CipherSuite::TLS13_AES_256_GCM_SHA384]);
+        }
+
+        #[test]
+        fn single_tls12_suite() {
+            let result = parse(&[s("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384")]).unwrap();
+            assert_eq!(
+                suite_names(&result),
+                vec![CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384]
+            );
+        }
+
+        #[test]
+        fn multiple_valid_suites() {
+            let input = vec![
+                s("TLS_AES_256_GCM_SHA384"),
+                s("TLS_AES_128_GCM_SHA256"),
+                s("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
+            ];
+            let result = parse(&input).unwrap();
+            assert_eq!(
+                suite_names(&result),
+                vec![
+                    CipherSuite::TLS13_AES_256_GCM_SHA384,
+                    CipherSuite::TLS13_AES_128_GCM_SHA256,
+                    CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                ]
+            );
+        }
+
+        #[test]
+        fn all_unknown_returns_none() {
+            let input = vec![s("BOGUS_CIPHER"), s("ANOTHER_FAKE")];
+            assert!(parse(&input).is_none());
+        }
+
+        #[test]
+        fn mix_of_valid_and_unknown_keeps_valid() {
+            let input = vec![
+                s("TLS_AES_128_GCM_SHA256"),
+                s("BOGUS_CIPHER"),
+                s("TLS_CHACHA20_POLY1305_SHA256"),
+            ];
+            let result = parse(&input).unwrap();
+            assert_eq!(
+                suite_names(&result),
+                vec![
+                    CipherSuite::TLS13_AES_128_GCM_SHA256,
+                    CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
+                ]
+            );
+        }
+
+        #[test]
+        fn all_nine_supported_suites() {
+            let input = vec![
+                s("TLS_AES_256_GCM_SHA384"),
+                s("TLS_AES_128_GCM_SHA256"),
+                s("TLS_CHACHA20_POLY1305_SHA256"),
+                s("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"),
+                s("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"),
+                s("TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"),
+                s("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
+                s("TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"),
+                s("TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"),
+            ];
+            let result = parse(&input).unwrap();
+            assert_eq!(result.len(), 9);
+        }
+
+        #[test]
+        fn preserves_input_order() {
+            let input = vec![
+                s("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
+                s("TLS_AES_256_GCM_SHA384"),
+            ];
+            let result = parse(&input).unwrap();
+            assert_eq!(
+                suite_names(&result),
+                vec![
+                    CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                    CipherSuite::TLS13_AES_256_GCM_SHA384,
+                ]
+            );
+        }
+    }
+
+    mod mesh_cipher_suites_env_parsing {
+        fn parse_env_value(val: &str) -> Vec<String> {
+            val.split(',')
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .collect()
+        }
+
+        #[test]
+        fn comma_separated() {
+            assert_eq!(
+                parse_env_value("TLS_AES_256_GCM_SHA384,TLS_AES_128_GCM_SHA256"),
+                vec!["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
+            );
+        }
+
+        #[test]
+        fn whitespace_trimmed() {
+            assert_eq!(
+                parse_env_value("  TLS_AES_256_GCM_SHA384 , TLS_AES_128_GCM_SHA256  "),
+                vec!["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
+            );
+        }
+
+        #[test]
+        fn empty_entries_filtered() {
+            assert_eq!(
+                parse_env_value("TLS_AES_256_GCM_SHA384,,, ,TLS_AES_128_GCM_SHA256"),
+                vec!["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
+            );
+        }
+
+        #[test]
+        fn empty_string_produces_empty_vec() {
+            let result: Vec<String> = parse_env_value("");
+            assert!(result.is_empty());
+        }
+
+        #[test]
+        fn only_commas_produces_empty_vec() {
+            let result: Vec<String> = parse_env_value(",,,");
+            assert!(result.is_empty());
         }
     }
 }
