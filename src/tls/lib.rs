@@ -94,12 +94,6 @@ macro_rules! impl_parse_cipher_suites {
                     "TLS_AES_256_GCM_SHA384" => suites.push(cs::TLS13_AES_256_GCM_SHA384),
                     "TLS_AES_128_GCM_SHA256" => suites.push(cs::TLS13_AES_128_GCM_SHA256),
                     "TLS_CHACHA20_POLY1305_SHA256" => suites.push(cs::TLS13_CHACHA20_POLY1305_SHA256),
-                    "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384" => suites.push(cs::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384),
-                    "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" => suites.push(cs::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
-                    "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384" => suites.push(cs::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384),
-                    "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256" => suites.push(cs::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256),
-                    "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256" => suites.push(cs::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256),
-                    "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256" => suites.push(cs::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256),
                     unknown => tracing::warn!("unknown cipher suite '{unknown}', ignoring"),
                 }
             }
@@ -439,12 +433,8 @@ pub mod tests {
         }
 
         #[test]
-        fn single_tls12_suite() {
-            let result = parse(&[s("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384")]).unwrap();
-            assert_eq!(
-                suite_names(&result),
-                vec![CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384]
-            );
+        fn tls12_suite_rejected_as_unknown() {
+            assert!(parse(&[s("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384")]).is_none());
         }
 
         #[test]
@@ -452,7 +442,7 @@ pub mod tests {
             let input = vec![
                 s("TLS_AES_256_GCM_SHA384"),
                 s("TLS_AES_128_GCM_SHA256"),
-                s("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
+                s("TLS_CHACHA20_POLY1305_SHA256"),
             ];
             let result = parse(&input).unwrap();
             assert_eq!(
@@ -460,7 +450,7 @@ pub mod tests {
                 vec![
                     CipherSuite::TLS13_AES_256_GCM_SHA384,
                     CipherSuite::TLS13_AES_128_GCM_SHA256,
-                    CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                    CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
                 ]
             );
         }
@@ -489,33 +479,27 @@ pub mod tests {
         }
 
         #[test]
-        fn all_nine_supported_suites() {
+        fn all_three_supported_suites() {
             let input = vec![
                 s("TLS_AES_256_GCM_SHA384"),
                 s("TLS_AES_128_GCM_SHA256"),
                 s("TLS_CHACHA20_POLY1305_SHA256"),
-                s("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"),
-                s("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"),
-                s("TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"),
-                s("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
-                s("TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"),
-                s("TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"),
             ];
             let result = parse(&input).unwrap();
-            assert_eq!(result.len(), 9);
+            assert_eq!(result.len(), 3);
         }
 
         #[test]
         fn preserves_input_order() {
             let input = vec![
-                s("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
+                s("TLS_CHACHA20_POLY1305_SHA256"),
                 s("TLS_AES_256_GCM_SHA384"),
             ];
             let result = parse(&input).unwrap();
             assert_eq!(
                 suite_names(&result),
                 vec![
-                    CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                    CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
                     CipherSuite::TLS13_AES_256_GCM_SHA384,
                 ]
             );
