@@ -52,20 +52,25 @@ impl<F: ServerCertProvider> InboundAcceptor<F> {
 }
 
 #[derive(Debug)]
+pub(super) enum TrustDomainValidation {
+    Any,
+    Domains(Vec<Strng>),
+}
+
+#[derive(Debug)]
 pub(super) struct TrustDomainVerifier {
     base: Arc<dyn ClientCertVerifier>,
-    trust_domain: Option<Strng>,
+    validation: TrustDomainValidation,
 }
 
 impl TrustDomainVerifier {
-    pub fn new(base: Arc<dyn ClientCertVerifier>, trust_domain: Option<Strng>) -> Arc<Self> {
-        Arc::new(Self { base, trust_domain })
+    pub fn new(base: Arc<dyn ClientCertVerifier>, validation: TrustDomainValidation) -> Arc<Self> {
+        Arc::new(Self { base, validation })
     }
 
     fn verify_trust_domain(&self, client_cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
         use x509_parser::prelude::*;
-        let Some(want_trust_domain) = &self.trust_domain else {
-            // No need to verify
+        let TrustDomainValidation::Domains(trust_domains) = &self.validation else {
             return Ok(());
         };
         let (_, c) = X509Certificate::from_der(client_cert).map_err(|_e| {
@@ -76,18 +81,15 @@ impl TrustDomainVerifier {
                 rustls::CertificateError::ApplicationVerificationFailure,
             )
         })?;
-        trace!(
-            "verifying client identities {ids:?} against trust domain {:?}",
-            want_trust_domain
-        );
+        trace!("verifying client identities {ids:?} against trust domains {trust_domains:?}");
         ids.iter()
             .find(|id| match id {
-                Identity::Spiffe { trust_domain, .. } => trust_domain == want_trust_domain,
+                Identity::Spiffe { trust_domain, .. } => trust_domains.contains(trust_domain),
             })
             .ok_or_else(|| {
                 rustls::Error::InvalidCertificate(rustls::CertificateError::Other(
                     rustls::OtherError(Arc::new(TlsError::SanTrustDomainError(
-                        want_trust_domain.to_string(),
+                        trust_domains.clone(),
                         ids.clone(),
                     ))),
                 ))
