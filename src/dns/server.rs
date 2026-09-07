@@ -1004,7 +1004,7 @@ mod tests {
     use crate::state::WorkloadInfo;
     use crate::test_helpers::dns::{
         a, aaaa, cname, ip, ipv4, ipv6, n, new_message, new_tcp_client, new_udp_client, run_dns,
-        send_request, server_request,
+        send_no_edns_request, send_request, server_request,
     };
     use crate::test_helpers::helpers::initialize_telemetry;
     use crate::test_helpers::{new_proxy_state, test_default_workload};
@@ -1719,6 +1719,66 @@ mod tests {
         assert_eq!(74, resp.answers.len(), "expected UDP to be truncated");
     }
 
+    // https://github.com/istio/ztunnel/issues/2060
+    //
+    // RFC 1035 §4.2.1 limits a UDP DNS message to 512 bytes; that ceiling is only raised when
+    // the requestor advertises a larger buffer via EDNS(0) (RFC 6891). A client that sends no
+    // OPT record at all (e.g. `dig +noedns`, or resolvers like musl libc / Ruby's `Resolv` that
+    // don't implement EDNS(0)) MUST get a response that fits in 512 bytes, truncated (TC bit
+    // set) if necessary — never a larger, silently-truncated-by-the-kernel datagram.
+    #[tokio::test]
+    async fn large_response_no_edns_truncates_to_512() {
+        initialize_telemetry();
+        // Create and start the proxy with an empty state. The forwarder is configured to
+        // return a response that easily fits in a single UDP datagram, but is well over the
+        // RFC 1035 512-byte limit for a non-EDNS(0) client.
+        let (state, local_workload) = state();
+        let forwarder = Arc::new(FakeForwarder {
+            search_domains: vec![],
+            ips: HashMap::from([(n("large.com."), new_non_edns_response())]),
+            additionals: Default::default(),
+        });
+        let domain = "cluster.local".to_string();
+        let (_signal, drain) = drain::new();
+        let factory = crate::proxy::DefaultSocketFactory::default();
+        let server = Server::new(
+            domain,
+            config::Address::Localhost(false, 0),
+            state,
+            forwarder,
+            test_metrics(),
+            drain,
+            &factory,
+            local_workload,
+            None,
+            true, // ipv6_enabled for tests
+        )
+        .await
+        .unwrap();
+        let udp_addr = server.udp_address();
+        tokio::spawn(server.run());
+
+        let mut udp_client = new_udp_client(udp_addr).await;
+
+        // Send a query with no OPT record at all, as a non-EDNS(0) client would.
+        let resp = send_no_edns_request(&mut udp_client, n("large.com."), RecordType::A).await;
+
+        assert!(
+            resp.as_buffer().len() <= 512,
+            "non-EDNS(0) UDP response must not exceed the RFC 1035 512-byte limit, got {} bytes",
+            resp.as_buffer().len()
+        );
+        assert!(
+            resp.metadata.truncation,
+            "response exceeding 512 bytes must set the TC bit"
+        );
+        assert!(
+            resp.answers.len() < 50,
+            "expected the answer set to be truncated, got {} answers",
+            resp.answers.len()
+        );
+    }
+
     #[test]
     fn search_domains() {
         let opts = ResolverOpts::default();
@@ -1783,6 +1843,17 @@ mod tests {
         let mut out = Vec::new();
         for i in 0..256 {
             out.push(ip(format!("240.0.0.{i}")));
+        }
+        out
+    }
+
+    /// Returns a response that comfortably fits within a single UDP datagram (well under the
+    /// old, buggy 4096-byte non-EDNS(0) ceiling), but is over the RFC 1035 512-byte limit that
+    /// applies to a client that didn't advertise EDNS(0) support.
+    fn new_non_edns_response() -> Vec<IpAddr> {
+        let mut out = Vec::new();
+        for i in 0..50 {
+            out.push(ip(format!("241.0.0.{i}")));
         }
         out
     }

@@ -133,6 +133,33 @@ pub async fn send_with_max_size(
         .unwrap()
 }
 
+/// Sends a request that carries no EDNS(0) OPT record, as a non-EDNS(0)-aware client would
+/// (e.g. `dig +noedns`). Per RFC 6891 §7, the absence of an OPT record MUST be treated as the
+/// requestor not implementing EDNS(0) at all, so the response must obey the RFC 1035 §4.2.1
+/// 512-byte UDP message limit.
+pub async fn send_no_edns_request(
+    client: &mut Client<TokioRuntimeProvider>,
+    name: Name,
+    rr_type: RecordType,
+) -> DnsResponse {
+    // Build the request message. Deliberately do not call `message.set_edns(..)`.
+    let mut message: Message =
+        Message::new(rand::random::<u16>(), MessageType::Query, OpCode::Query);
+    let mut query = Query::query(name, rr_type);
+    query.set_query_class(DNSClass::IN);
+    message.add_query(query);
+    message.metadata.recursion_desired = true;
+
+    let mut options = DnsRequestOptions::default();
+    options.use_edns = false;
+    client
+        .send(DnsRequest::new(message, options))
+        .next()
+        .await
+        .expect("dns response stream ended unexpectedly")
+        .unwrap()
+}
+
 /// Constructs a new [Message] of type [MessageType::Query];
 pub fn new_message(name: Name, rr_type: RecordType) -> Message {
     let mut msg = Message::new(123, MessageType::Query, OpCode::Query);
