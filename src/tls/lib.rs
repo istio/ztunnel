@@ -148,7 +148,10 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
 }
 
 #[cfg(feature = "tls-aws-lc")]
-impl_parse_cipher_suites!(parse_cipher_suites_aws_lc, rustls::crypto::aws_lc_rs::cipher_suite);
+impl_parse_cipher_suites!(
+    parse_cipher_suites_aws_lc,
+    rustls::crypto::aws_lc_rs::cipher_suite
+);
 
 #[cfg(feature = "tls-aws-lc")]
 pub(super) fn provider() -> Arc<CryptoProvider> {
@@ -429,7 +432,10 @@ pub mod tests {
         #[test]
         fn single_tls13_suite() {
             let result = parse(&[s("TLS_AES_256_GCM_SHA384")]).unwrap();
-            assert_eq!(suite_names(&result), vec![CipherSuite::TLS13_AES_256_GCM_SHA384]);
+            assert_eq!(
+                suite_names(&result),
+                vec![CipherSuite::TLS13_AES_256_GCM_SHA384]
+            );
         }
 
         #[test]
