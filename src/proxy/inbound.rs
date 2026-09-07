@@ -91,6 +91,7 @@ impl Inbound {
         let acceptor = InboundCertProvider {
             local_workload: self.pi.local_workload_information.clone(),
             crl_manager: self.pi.crl_manager.clone(),
+            trust_domains: self.pi.trust_domain_manager.clone(),
         };
 
         // Safety: we set nodelay directly in tls_server, so it is safe to convert to a normal listener.
@@ -149,36 +150,45 @@ impl Inbound {
                     };
                     debug!(%conn, "accepted connection");
                     let cfg = pi.cfg.clone();
-                    // Enforce CRL revocation on this existing connection when a CRL is configured
-                    let revocation = Box::pin(Self::build_revocation(&pi, ssl, src_identity)).await;
-                    let revoked_rx = revocation.as_ref().map(|r| r.subscribe_revoked());
-                    let request_handler = move |req| {
-                        let id = Self::extract_traceparent(&req);
-                        let peer = conn.src;
-                        let req_handler = Self::serve_connect(
-                            pi.clone(),
-                            conn.clone(),
-                            self.enable_orig_src,
-                            revoked_rx.clone(),
-                            req,
-                        )
-                        .instrument(info_span!("inbound", %id, %peer));
-                        // This is for each user connection, so most important to keep small
-                        assertions::size_between_ref(1500, 2500, &req_handler);
-                        req_handler
-                    };
+                    // Built in its own scope so the per-connection state moved into the HTTP2 layer
+                    // does not also take up space in this future while it is awaited.
+                    let serve = {
+                        // Enforce CRL revocation on this existing connection when a CRL is configured,
+                        // and close it if its peer's trust domain stops being accepted.
+                        let (revocation, trust_domain) =
+                            Box::pin(Self::track_connection(&pi, ssl, src_identity)).await;
+                        let revoked_rx = revocation.as_ref().map(|r| r.subscribe_revoked());
+                        let trust_domain_rx = trust_domain.as_ref().map(|t| t.subscribe());
+                        let request_handler = move |req| {
+                            let id = Self::extract_traceparent(&req);
+                            let peer = conn.src;
+                            let req_handler = Self::serve_connect(
+                                pi.clone(),
+                                conn.clone(),
+                                self.enable_orig_src,
+                                revoked_rx.clone(),
+                                trust_domain_rx.clone(),
+                                req,
+                            )
+                            .instrument(info_span!("inbound", %id, %peer));
+                            // This is for each user connection, so most important to keep small
+                            assertions::size_between_ref(1500, 2500, &req_handler);
+                            req_handler
+                        };
 
-                    let serve_conn = h2::server::serve_connection(
-                        cfg,
-                        tls,
-                        drain,
-                        force_shutdown,
-                        revocation,
-                        request_handler,
-                    );
-                    // This is per HBONE connection, so while would be nice to be small, at least it
-                    // is pooled so typically fewer of these.
-                    let serve = Box::pin(assertions::size_between(6000, 7000, serve_conn));
+                        let serve_conn = h2::server::serve_connection(
+                            cfg,
+                            tls,
+                            drain,
+                            force_shutdown,
+                            revocation,
+                            trust_domain,
+                            request_handler,
+                        );
+                        // This is per HBONE connection, so while would be nice to be small, at least it
+                        // is pooled so typically fewer of these.
+                        Box::pin(assertions::size_between(6000, 7000, serve_conn))
+                    };
                     serve.await
                 };
                 // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
@@ -225,6 +235,46 @@ impl Inbound {
         }
     }
 
+    /// Builds the state that can close this connection after it was accepted: CRL revocation and removal
+    /// of the peer's trust domain from the accepted set. Both are async and held for the connection's
+    /// lifetime, so they are built together to keep the caller's future small.
+    async fn track_connection(
+        pi: &ProxyInputs,
+        ssl: &CommonState,
+        peer_identity: Option<Identity>,
+    ) -> (
+        Option<crate::tls::revocation::RevocationHandle>,
+        Option<crate::tls::trust_domains::TrustDomainHandle>,
+    ) {
+        let trust_domain = Self::track_trust_domain(pi, peer_identity.as_ref()).await;
+        let revocation = Self::build_revocation(pi, ssl, peer_identity).await;
+        (revocation, trust_domain)
+    }
+
+    /// Registers this connection's peer trust domain for tracking, or `None` when there is nothing to
+    /// track: no trust domains are configured, or the peer is in our own trust domain, which is always
+    /// accepted.
+    async fn track_trust_domain(
+        pi: &ProxyInputs,
+        peer_identity: Option<&Identity>,
+    ) -> Option<crate::tls::trust_domains::TrustDomainHandle> {
+        let manager = pi.trust_domain_manager.as_ref()?;
+        let Identity::Spiffe {
+            trust_domain: peer_trust_domain,
+            ..
+        } = peer_identity?;
+        let own_trust_domain = match pi.local_workload_information.fetch_certificate().await {
+            Ok(cert) => cert.identity().map(|id| match id {
+                Identity::Spiffe { trust_domain, .. } => trust_domain,
+            }),
+            Err(e) => {
+                warn!("failed to fetch certificate for trust domain tracking: {e}");
+                None
+            }
+        };
+        manager.register(peer_trust_domain.clone(), own_trust_domain.as_ref())
+    }
+
     fn extract_traceparent(req: &H2Request) -> TraceParent {
         req.headers()
             .get(TRACEPARENT_HEADER)
@@ -240,6 +290,7 @@ impl Inbound {
         conn: Connection,
         enable_original_source: bool,
         revoked: Option<watch::Receiver<bool>>,
+        trust_domain_removed: Option<watch::Receiver<bool>>,
         req: H2Request,
     ) {
         let src = conn.src;
@@ -378,7 +429,7 @@ impl Inbound {
                 .instrument(trace_span!("hbone server"))
                 .await
             });
-        let res = handle_connection!(conn_guard, revoked, send);
+        let res = handle_connection!(conn_guard, revoked, trust_domain_removed, send);
         ri.result_tracker.record(res);
     }
 
@@ -761,6 +812,7 @@ impl InboundFlagError {
 struct InboundCertProvider {
     local_workload: Arc<LocalWorkloadInformation>,
     crl_manager: Option<Arc<tls::crl::CrlManager>>,
+    trust_domains: Option<tls::trust_domains::TrustDomainManager>,
 }
 
 #[async_trait::async_trait]
@@ -771,7 +823,10 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
             "fetching cert"
         );
         let cert = self.local_workload.fetch_certificate().await?;
-        Ok(Arc::new(cert.server_config(self.crl_manager.clone())?))
+        Ok(Arc::new(cert.server_config(
+            self.trust_domains.as_ref(),
+            self.crl_manager.clone(),
+        )?))
     }
 }
 
@@ -1007,6 +1062,7 @@ mod tests {
             None,
             local_workload,
             false,
+            None,
             None,
         ));
         let inbound_request = Inbound::build_inbound_request(&pi, conn, &request_parts).await;

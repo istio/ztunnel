@@ -1794,6 +1794,78 @@ mod namespaced {
         Ok(())
     }
 
+    /// A peer from another trust domain is accepted only while that trust domain is in the configured
+    /// set, and an *already-established* connection from it is closed once the trust domain is removed,
+    /// without restarting ztunnel.
+    #[tokio::test]
+    async fn trust_domain_removal_terminates_existing_connection() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(Shared);
+        manager.deploy_ztunnel(DEFAULT_NODE).await?;
+
+        let trust_domains = tempfile::NamedTempFile::new()?;
+        std::fs::write(trust_domains.path(), "cluster.local\nother.example\n")?;
+        let server_zt = manager
+            .deploy_dedicated_ztunnel(
+                REMOTE_NODE,
+                Some(config::Config {
+                    trust_domains_path: Some(trust_domains.path().to_path_buf()),
+                    ..config::parse_config().unwrap()
+                }),
+                None,
+            )
+            .await?;
+
+        run_tcp_server(
+            manager
+                .workload_builder("server", REMOTE_NODE)
+                .hbone()
+                .register()
+                .await?,
+        )?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .identity(identity::Identity::from_parts(
+                "other.example".into(),
+                "default".into(),
+                "client".into(),
+            ))
+            .register()
+            .await?;
+        let srv = resolve_target(manager.resolver(), "server");
+
+        let (mut tx, rx) = mpsc_ack(1);
+        let client_join_handle = run_long_running_tcp_client(&client, rx, srv)?;
+        info!("connection from other.example should be accepted while it is configured");
+        tx.send_and_wait(()).await?;
+
+        info!("removing other.example from the accepted trust domains");
+        std::fs::write(trust_domains.path(), "cluster.local\n")?;
+        assert_connection_closed_eventually(&mut tx, Duration::from_secs(10)).await;
+        drop(tx);
+        assert!(client_join_handle.join().unwrap().is_err());
+
+        let mut labels = destination_labels();
+        labels.insert(
+            "response_flags".to_string(),
+            "TRUST_DOMAIN_REMOVED".to_string(),
+        );
+        assert_eventually(
+            Duration::from_secs(5),
+            || async {
+                server_zt
+                    .metrics()
+                    .await
+                    .unwrap()
+                    .query_sum("istio_tcp_connections_closed_total", &labels)
+                    > 0
+            },
+            true,
+        )
+        .await;
+
+        Ok(())
+    }
+
     /// An *already-established* outbound HBONE tunnel must be abruptly torn down when a CRL update
     /// (mid-connection) revokes the upstream server workload's certificate, and the source-side
     /// rejection metric must increment. This exercises outbound existing-connection enforcement,
