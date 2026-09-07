@@ -17,6 +17,7 @@ use crate::drain::DrainWatcher;
 use crate::proxy::Error;
 use crate::proxy::h2::{Teardown, TeardownCause};
 use crate::tls::revocation::{self, RevocationHandle};
+use crate::tls::trust_domains::{self, TrustDomainHandle};
 use bytes::Bytes;
 use futures_util::FutureExt;
 use http::Response;
@@ -112,6 +113,7 @@ pub async fn serve_connection<F, Fut>(
     drain: DrainWatcher,
     mut force_shutdown: watch::Receiver<()>,
     mut revocation: Option<RevocationHandle>,
+    mut trust_domain: Option<Box<TrustDomainHandle>>,
     handler: F,
 ) -> Result<(), Error>
 where
@@ -205,6 +207,19 @@ where
                     break;
                 }
             }
+            // Accepted trust domains changed and the peer's is no longer among them: like revocation, it
+            // is no longer trusted, so terminate rather than drain.
+            _ = trust_domains::wait_for_removal(trust_domain.as_deref_mut()) => {
+                if let Some(td) = trust_domain.as_ref() {
+                    debug!(
+                        trust_domain = %td.trust_domain(),
+                        "terminating inbound connection: peer trust domain is no longer accepted"
+                    );
+                    teardown.set(Teardown::TrustDomainRemoved);
+                    conn.abrupt_shutdown(h2::Reason::NO_ERROR);
+                    break;
+                }
+            }
         }
     }
     // Signal to the ping_pong it should also stop.
@@ -281,6 +296,7 @@ mod tests {
             drain,
             force_rx,
             None,
+            None,
             move |req: H2Request| {
                 let _ = req_tx.send(req);
                 async {}
@@ -325,6 +341,7 @@ mod tests {
             server,
             drain,
             force_rx,
+            None,
             None,
             move |req: H2Request| {
                 let _ = req_tx.send(req);
