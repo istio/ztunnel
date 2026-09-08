@@ -198,13 +198,37 @@ impl OutboundConnection {
         self.proxy_to(source_stream, source_addr, dst_addr).await;
     }
 
-    async fn _is_retriable_error(&self, err: &Error) -> bool {
-        match err {
-            Error::NoHealthyUpstream(_) => true,
-            Error::NoValidDestination(_) => true,
-            Error::NoService(_) => true,
-            _ => false,
-        }
+    /// Whether a failed attempt is worth repeating.
+    ///
+    /// Two families qualify. A *build* failure means this ztunnel's view of the mesh may simply
+    /// not have converged yet -- an endpoint list caught mid-rollout is the common case -- and
+    /// rebuilding re-reads state. A *connect* failure means the endpoint we picked did not
+    /// answer; selection deprioritizes it on the way back around, so the retry lands somewhere
+    /// else. Without that deprioritization retrying a connect would be pointless, since it would
+    /// mostly re-pick the same dead endpoint.
+    ///
+    /// Deliberately excluded:
+    /// - `Identity` and `WorkloadHBONEPoolDraining`, which fail identically against every
+    ///   endpoint: the first is a local certificate fetch, the second is our own shutdown.
+    /// - `HttpStatus`, where the peer answered and refused. This carries RBAC denials, and a
+    ///   policy decision does not change on retry.
+    /// - `CertificateRevoked`, which is a deliberate security outcome.
+    /// - `MaybeHBONENetworkPolicyError`, a connect timeout. Its usual cause is a NetworkPolicy
+    ///   blocking 15008 mesh-wide, so every attempt would fail the same way, and each one costs
+    ///   another full timeout rather than failing fast.
+    fn is_retriable_error(err: &Error) -> bool {
+        matches!(
+            err,
+            // Build: our view of the mesh may not have caught up.
+            Error::NoHealthyUpstream(_)
+                | Error::NoValidDestination(_)
+                | Error::NoService(_)
+                // Connect: this endpoint did not answer.
+                | Error::Io(_)
+                | Error::Tls(_)
+                | Error::Http2Handshake(_)
+                | Error::H2(_)
+        )
     }
 
     fn retry_backoff(retries: usize) -> Duration {
@@ -244,7 +268,17 @@ impl OutboundConnection {
 
             let req = match Box::pin(build).await {
                 Ok(req) => Box::new(req),
-                _ => {
+                Err(err) => {
+                    // Nothing was selected, so there is no endpoint to deprioritize; the retry
+                    // just re-reads state, which is the whole point here.
+                    if Self::is_retriable_error(&err) && retries < max_retries {
+                        retries += 1;
+                        tokio::time::sleep(Self::retry_backoff(retries)).await;
+                        continue;
+                    }
+                    // No `ConnectionResultBuilder` exists yet, so this is the only place a build
+                    // failure gets recorded.
+                    metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
                     return None;
                 }
             };
@@ -289,7 +323,7 @@ impl OutboundConnection {
                     return Some((connected, derived_workload, connection_result_builder, req));
                 }
                 Err(e) => {
-                    let retriable = self._is_retriable_error(&e).await;
+                    let retriable = Self::is_retriable_error(&e);
                     // Deprioritize the endpoint we just failed on, so the next `build_request`
                     // prefers a different one. This is the next hop, which for waypointed or
                     // cross-network traffic is the waypoint or E/W gateway rather than the
@@ -2383,45 +2417,52 @@ mod tests {
         assert_eq!(total, Duration::from_millis(600));
     }
 
-    #[tokio::test]
-    async fn is_retriable_error_classification() {
-        let oc = test_outbound_connection(vec![], vec![]).await;
+    #[test]
+    fn is_retriable_error_classification() {
+        let retriable = OutboundConnection::is_retriable_error;
         let addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
 
-        // Errors that mean "the mesh state may not have caught up yet".
-        assert!(
-            oc._is_retriable_error(&Error::NoHealthyUpstream(addr))
-                .await
-        );
-        assert!(
-            oc._is_retriable_error(&Error::NoValidDestination(Box::new(
-                crate::test_helpers::test_default_workload()
-            )))
-            .await
-        );
-        assert!(oc._is_retriable_error(&Error::NoService(addr)).await);
+        // Build failures: our view of the mesh may not have caught up yet.
+        assert!(retriable(&Error::NoHealthyUpstream(addr)));
+        assert!(retriable(&Error::NoValidDestination(Box::new(
+            crate::test_helpers::test_default_workload()
+        ))));
+        assert!(retriable(&Error::NoService(addr)));
 
-        // Everything else is terminal: retrying cannot change the outcome.
-        assert!(!oc._is_retriable_error(&Error::SelfCall).await);
-        assert!(!oc._is_retriable_error(&Error::CertificateRevoked).await);
-        assert!(
-            !oc._is_retriable_error(&Error::Io(std::io::Error::from(
-                std::io::ErrorKind::ConnectionRefused
-            )))
-            .await
-        );
-        assert!(
-            !oc._is_retriable_error(&Error::NoWorkloadEndpoints("example.com".to_string()))
-                .await
-        );
-        assert!(
-            !oc._is_retriable_error(&Error::NoResolvedAddresses("example.com".to_string()))
-                .await
-        );
-        assert!(
-            !oc._is_retriable_error(&Error::UnknownWaypoint("example.com".to_string()))
-                .await
-        );
+        // Connect failures against the endpoint we picked. Retrying these is only worthwhile
+        // because selection deprioritizes that endpoint on the way back around.
+        assert!(retriable(&Error::Io(std::io::Error::from(
+            std::io::ErrorKind::ConnectionRefused
+        ))));
+        assert!(retriable(&Error::Io(std::io::Error::from(
+            std::io::ErrorKind::ConnectionReset
+        ))));
+
+        // A peer that answered and refused: this carries RBAC denials, which a retry cannot
+        // change.
+        assert!(!retriable(&Error::HttpStatus(
+            http::StatusCode::UNAUTHORIZED
+        )));
+        // A deliberate security outcome, not a flaky endpoint.
+        assert!(!retriable(&Error::CertificateRevoked));
+        // Our own shutdown: every endpoint fails the same way.
+        assert!(!retriable(&Error::WorkloadHBONEPoolDraining));
+        // A connect timeout, whose usual cause is mesh-wide. Each retry costs a full timeout.
+        assert!(!retriable(&Error::MaybeHBONENetworkPolicyError(
+            std::io::Error::from(std::io::ErrorKind::TimedOut)
+        )));
+
+        // Nothing a retry can influence.
+        assert!(!retriable(&Error::SelfCall));
+        assert!(!retriable(&Error::NoWorkloadEndpoints(
+            "example.com".to_string()
+        )));
+        assert!(!retriable(&Error::NoResolvedAddresses(
+            "example.com".to_string()
+        )));
+        assert!(!retriable(&Error::UnknownWaypoint(
+            "example.com".to_string()
+        )));
     }
 
     #[tokio::test]
@@ -2453,7 +2494,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_with_retries_gives_up_on_terminal_connect_failure() {
+    async fn connect_with_retries_retries_a_refused_connect() {
         initialize_telemetry();
         // Bind to grab a free port, then drop the listener so the connect is refused.
         let dest = {
@@ -2469,26 +2510,27 @@ mod tests {
             .connect_with_retries("127.0.0.1:1234".parse().unwrap(), dest, 2, start)
             .await;
 
+        // This workload is the only endpoint, so every retry lands back on the same refused
+        // address and the connect still fails -- but it must have been retried.
         assert!(
             res.is_none(),
             "a refused connect must not yield an upstream"
         );
-        // A refused connect surfaces as `Error::Io`, which is not retriable, so we bail out
-        // without ever sleeping.
+        let backoffs: Duration = (1..=2).map(OutboundConnection::retry_backoff).sum();
         assert!(
-            start.elapsed() < OutboundConnection::retry_backoff(1),
-            "a non-retriable error must not be retried"
+            start.elapsed() >= backoffs,
+            "a refused connect is retriable, so both backoffs must have been paid"
         );
     }
 
     #[tokio::test]
-    async fn connect_with_retries_does_not_retry_build_failures() {
+    async fn connect_with_retries_retries_build_failures() {
         initialize_telemetry();
         let target: SocketAddr = "127.0.0.3:80".parse().unwrap();
         let mut oc = test_outbound_connection(vec![], vec![example_service()]).await;
 
-        // Sanity check: this destination fails at the *build* step, with an error that
-        // `_is_retriable_error` considers retriable.
+        // Sanity check: this destination fails at the *build* step, before any endpoint is
+        // selected, with an error that means "state may not have converged yet".
         let local = oc
             .pi
             .local_workload_information
@@ -2505,21 +2547,27 @@ mod tests {
             .await
             .expect_err("a service with no endpoints has no upstream");
         assert!(matches!(err, Error::NoHealthyUpstream(_)));
-        assert!(oc._is_retriable_error(&err).await);
+        assert!(OutboundConnection::is_retriable_error(&err));
 
         let start = Instant::now();
         let res = oc
             .connect_with_retries("127.0.0.1:1234".parse().unwrap(), target, 2, start)
             .await;
 
+        // No endpoint ever appears, so the connect still fails -- but each attempt re-reads
+        // state, which is what rescues a destination caught mid-rollout.
         assert!(res.is_none());
-        // ...but the build arm of the loop returns before the classification runs, so the retry
-        // never happens. This pins today's behavior: if build failures are meant to be retried,
-        // both `connect_with_retries` and this test need to change.
+        let backoffs: Duration = (1..=2).map(OutboundConnection::retry_backoff).sum();
         assert!(
-            start.elapsed() < OutboundConnection::retry_backoff(1),
-            "build failures are currently terminal, so no backoff is paid"
+            start.elapsed() >= backoffs,
+            "a retriable build failure must pay both backoffs"
         );
+        // The failure is still reported, from the build arm's early-deny log. The refactor that
+        // introduced `connect_with_retries` had dropped this entry entirely.
+        crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
+            ("error", "no healthy upstream: 127.0.0.3:80"),
+            ("message", "connection failed"),
+        ]));
     }
 
     #[tokio::test]
