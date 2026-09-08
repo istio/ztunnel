@@ -107,6 +107,7 @@ pub fn load_balance(c: &mut Criterion) {
                         &src_wl,
                         svc_addr,
                         ServiceResolutionMode::Standard,
+                        &Default::default(),
                     )
                     .await
                     .unwrap()

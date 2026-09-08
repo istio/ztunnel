@@ -44,7 +44,7 @@ use crate::proxy::h2::{H2Stream, client::WorkloadKey};
 use crate::state::service::{LoadBalancerMode, Service, ServiceDescription};
 use crate::state::workload::OutboundProtocol;
 use crate::state::workload::{InboundProtocol, NetworkAddress, Workload, address::Address};
-use crate::state::{ServiceResolutionMode, Upstream};
+use crate::state::{DeprioritizedEndpoints, ServiceResolutionMode, Upstream};
 use crate::{assertions, copy, proxy, socket, tls};
 
 use super::h2::TokioH2Stream;
@@ -228,7 +228,9 @@ impl OutboundConnection {
         Box<Request>,
     )> {
         let mut retries = 0;
-        let mut attempted_endpoints = Vec::new();
+        // Endpoints a previous attempt already failed on. Endpoint selection prefers anything
+        // else, so a retry does not just re-roll the dice onto the same dead endpoint.
+        let mut deprioritized = DeprioritizedEndpoints::default();
         loop {
             // First find the source workload of this traffic. If we don't know where the request is from
             // we will reject it.
@@ -236,7 +238,9 @@ impl OutboundConnection {
                 .pi
                 .local_workload_information
                 .get_workload()
-                .and_then(|source| self.build_request(source, source_addr.ip(), dest_addr));
+                .and_then(|source| {
+                    self.build_request(source, source_addr.ip(), dest_addr, &deprioritized)
+                });
 
             let req = match Box::pin(build).await {
                 Ok(req) => Box::new(req),
@@ -244,7 +248,6 @@ impl OutboundConnection {
                     return None;
                 }
             };
-            attempted_endpoints.push(req.actual_destination);
             // TODO: should we use the original address or the actual address? Both seems nice!
             let _conn_guard = self.pi.connection_manager.track_outbound(
                 source_addr,
@@ -287,6 +290,13 @@ impl OutboundConnection {
                 }
                 Err(e) => {
                     let retriable = self._is_retriable_error(&e).await;
+                    // Deprioritize the endpoint we just failed on, so the next `build_request`
+                    // prefers a different one. This is the next hop, which for waypointed or
+                    // cross-network traffic is the waypoint or E/W gateway rather than the
+                    // backend -- the same endpoint that actually failed here.
+                    if let Some(wl) = &req.actual_destination_workload {
+                        deprioritized.push(wl.uid.clone());
+                    }
                     connection_result_builder.build().record(Err(e));
 
                     // The single terminal-failure path, shared by every protocol above.
@@ -626,12 +636,13 @@ impl OutboundConnection {
         // at the moment, so we should always have a service we could use.
         service: &Service,
         target: SocketAddr,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Result<Request, Error> {
         if let Some(gateway) = &upstream.workload.network_gateway {
             let gateway_upstream = self
                 .pi
                 .state
-                .fetch_network_gateway(gateway, &source, target)
+                .fetch_network_gateway(gateway, &source, target, deprioritized)
                 .await?;
             let hbone_target_destination = Some(HboneAddress::SvcHostname(
                 service.hostname.clone(),
@@ -673,6 +684,7 @@ impl OutboundConnection {
         source_workload: Arc<Workload>,
         downstream: IpAddr,
         target: SocketAddr,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Result<Request, Error> {
         let state = &self.pi.state;
 
@@ -690,7 +702,7 @@ impl OutboundConnection {
         {
             // if we have a waypoint for this svc, use it; otherwise route traffic normally
             if let Some(waypoint) = state
-                .fetch_service_waypoint(&target_service, &source_workload, target)
+                .fetch_service_waypoint(&target_service, &source_workload, target, deprioritized)
                 .await?
             {
                 if waypoint.workload.network != source_workload.network {
@@ -701,6 +713,7 @@ impl OutboundConnection {
                             waypoint,
                             &target_service,
                             target,
+                            deprioritized,
                         )
                         .await;
                 }
@@ -737,6 +750,7 @@ impl OutboundConnection {
                 &source_workload,
                 target,
                 ServiceResolutionMode::Standard,
+                deprioritized,
             )
             .await?
         else {
@@ -784,7 +798,13 @@ impl OutboundConnection {
             debug!("picked a workload on remote network");
             let service = service.as_ref().ok_or(Error::NoService(target))?;
             return self
-                .build_request_through_gateway(source_workload.clone(), us, service, target)
+                .build_request_through_gateway(
+                    source_workload.clone(),
+                    us,
+                    service,
+                    target,
+                    deprioritized,
+                )
                 .await;
         }
 
@@ -803,7 +823,7 @@ impl OutboundConnection {
         if !from_waypoint && service.is_none() {
             // For case upstream server has enabled waypoint
             let waypoint = state
-                .fetch_workload_waypoint(&us.workload, &source_workload, target)
+                .fetch_workload_waypoint(&us.workload, &source_workload, target, deprioritized)
                 .await?;
             if let Some(waypoint) = waypoint {
                 let actual_destination =
@@ -1037,7 +1057,12 @@ mod tests {
             .await
             .unwrap();
         let req = outbound
-            .build_request(local, from.parse().unwrap(), to.parse().unwrap())
+            .build_request(
+                local,
+                from.parse().unwrap(),
+                to.parse().unwrap(),
+                &Default::default(),
+            )
             .await
             .ok();
         if let Some(ref r) = req {
@@ -2296,8 +2321,10 @@ mod tests {
         }
     }
 
-    /// A service with no endpoints, so `build_request` fails with `NoHealthyUpstream`.
-    fn endpointless_service() -> XdsService {
+    /// The `example.com` service. Its endpoints come from whichever workloads declare it in
+    /// their `services` map, so with no such workloads `build_request` fails with
+    /// `NoHealthyUpstream`.
+    fn example_service() -> XdsService {
         XdsService {
             hostname: "example.com".to_string(),
             addresses: vec![XdsNetworkAddress {
@@ -2458,7 +2485,7 @@ mod tests {
     async fn connect_with_retries_does_not_retry_build_failures() {
         initialize_telemetry();
         let target: SocketAddr = "127.0.0.3:80".parse().unwrap();
-        let mut oc = test_outbound_connection(vec![], vec![endpointless_service()]).await;
+        let mut oc = test_outbound_connection(vec![], vec![example_service()]).await;
 
         // Sanity check: this destination fails at the *build* step, with an error that
         // `_is_retriable_error` considers retriable.
@@ -2469,7 +2496,12 @@ mod tests {
             .await
             .unwrap();
         let err = oc
-            .build_request(local, "127.0.0.1".parse().unwrap(), target)
+            .build_request(
+                local,
+                "127.0.0.1".parse().unwrap(),
+                target,
+                &Default::default(),
+            )
             .await
             .expect_err("a service with no endpoints has no upstream");
         assert!(matches!(err, Error::NoHealthyUpstream(_)));
@@ -2488,6 +2520,76 @@ mod tests {
             start.elapsed() < OutboundConnection::retry_backoff(1),
             "build failures are currently terminal, so no backoff is paid"
         );
+    }
+
+    #[tokio::test]
+    async fn build_request_skips_deprioritized_endpoint() {
+        initialize_telemetry();
+        let svc_addr: SocketAddr = "127.0.0.3:80".parse().unwrap();
+        let backend = |name: &str, last_octet: u8| XdsWorkload {
+            uid: format!("cluster1//v1/Pod/ns/{name}"),
+            name: name.to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, last_octet])],
+            services: std::collections::HashMap::from([(
+                "/example.com".to_string(),
+                PortList {
+                    ports: vec![Port {
+                        service_port: 80,
+                        target_port: 8080,
+                        app_protocol: 0,
+                    }],
+                },
+            )]),
+            ..Default::default()
+        };
+        let (backend_a, backend_b) = (backend("backend-a", 10), backend("backend-b", 11));
+        let addr_a: SocketAddr = "127.0.0.10:8080".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.11:8080".parse().unwrap();
+
+        let oc = test_outbound_connection(
+            vec![backend_a.clone(), backend_b.clone()],
+            vec![example_service()],
+        )
+        .await;
+        let local = oc
+            .pi
+            .local_workload_information
+            .get_workload()
+            .await
+            .unwrap();
+        let downstream: IpAddr = "127.0.0.1".parse().unwrap();
+
+        let build = async |deprioritized: &DeprioritizedEndpoints| {
+            oc.build_request(local.clone(), downstream, svc_addr, deprioritized)
+                .await
+                .expect("service has healthy endpoints")
+                .actual_destination
+        };
+
+        // Selection is random, so sample it enough times that a preference which only mostly
+        // holds would show up. Baseline: both endpoints get picked.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            seen.insert(build(&Default::default()).await);
+        }
+        assert_eq!(
+            seen,
+            std::collections::HashSet::from_iter([addr_a, addr_b]),
+            "both endpoints must be reachable without a deprioritized list"
+        );
+
+        // Deprioritizing one endpoint pins every build to the other, which is what makes a retry
+        // worth attempting at all.
+        let mut deprioritized = DeprioritizedEndpoints::default();
+        deprioritized.push(backend_a.uid.as_str().into());
+        for _ in 0..50 {
+            assert_eq!(
+                build(&deprioritized).await,
+                addr_b,
+                "a deprioritized endpoint must not be re-selected while another remains"
+            );
+        }
     }
 
     #[derive(PartialEq, Debug)]

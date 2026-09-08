@@ -57,6 +57,30 @@ pub mod policy;
 pub mod service;
 pub mod workload;
 
+/// Endpoints, keyed by workload UID, that an earlier attempt on this connection already tried
+/// and failed to reach.
+///
+/// Selection treats these as a last resort rather than as ineligible: a retry prefers an untried
+/// endpoint, but still falls back to a tried one when nothing else is selectable. The list is
+/// per-connection and holds at most one entry per retry, so a `Vec` scan beats hashing.
+#[derive(Debug, Default, Clone)]
+pub struct DeprioritizedEndpoints(Vec<Strng>);
+
+impl DeprioritizedEndpoints {
+    /// Records `uid` as tried. Duplicates are harmless, so callers need not check first.
+    pub fn push(&mut self, uid: Strng) {
+        self.0.push(uid);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn contains(&self, uid: &Strng) -> bool {
+        self.0.iter().any(|tried| tried == uid)
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct Upstream {
     /// Workload is the workload we are connecting to
@@ -305,6 +329,7 @@ impl ProxyState {
         source_workload: &Workload,
         addr: SocketAddr,
         resolution_mode: ServiceResolutionMode,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Option<UpstreamDestination> {
         if let Some(svc) = self.services.get_best_by_vip(
             &network_addr(network.clone(), addr.ip()),
@@ -320,6 +345,7 @@ impl ProxyState {
                 addr.port(),
                 resolution_mode,
                 svc,
+                deprioritized,
             );
         }
         if let Some(wl) = self
@@ -337,11 +363,17 @@ impl ProxyState {
         svc_port: u16,
         resolution_mode: ServiceResolutionMode,
         svc: Arc<Service>,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Option<UpstreamDestination> {
         // Randomly pick an upstream
         // TODO: do this more efficiently, and not just randomly
-        let Some((ep, wl)) = self.load_balance(source_workload, &svc, svc_port, resolution_mode)
-        else {
+        let Some((ep, wl)) = self.load_balance(
+            source_workload,
+            &svc,
+            svc_port,
+            resolution_mode,
+            deprioritized,
+        ) else {
             debug!("Service {} has no healthy endpoints", svc.hostname);
             return None;
         };
@@ -378,6 +410,7 @@ impl ProxyState {
         svc: &'a Service,
         svc_port: u16,
         resolution_mode: ServiceResolutionMode,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Option<(&'a Endpoint, Arc<Workload>)> {
         let target_port = svc.ports.get(&svc_port).copied();
 
@@ -387,57 +420,96 @@ impl ProxyState {
             return None;
         };
 
-        let endpoints = svc.endpoints.iter().filter_map(|ep| {
-            let Some(wl) = self.workloads.find_uid(&ep.workload_uid) else {
-                debug!("failed to fetch workload for {}", ep.workload_uid);
-                return None;
-            };
-
-            let in_network = wl.network == src.network;
-            let has_network_gateway = wl.network_gateway.is_some();
-            let has_address = !wl.workload_ips.is_empty() || !wl.hostname.is_empty();
-            if !has_address {
-                // Workload has no IP. We can only reach it via a network gateway
-                // WDS is client-agnostic, so we will get a network gateway for a workload
-                // even if it's in the same network; we should never use it.
-                if in_network || !has_network_gateway {
+        let candidates: Vec<_> = svc
+            .endpoints
+            .iter()
+            .filter_map(|ep| {
+                let Some(wl) = self.workloads.find_uid(&ep.workload_uid) else {
+                    debug!("failed to fetch workload for {}", ep.workload_uid);
                     return None;
-                }
-            }
+                };
 
-            match resolution_mode {
-                ServiceResolutionMode::Standard => {
-                    if target_port.unwrap_or_default() == 0 && !ep.port.contains_key(&svc_port) {
-                        // Filter workload out, it doesn't have a matching port
-                        trace!(
-                            "filter endpoint {}, it does not have service port {}",
-                            ep.workload_uid, svc_port
-                        );
+                let in_network = wl.network == src.network;
+                let has_network_gateway = wl.network_gateway.is_some();
+                let has_address = !wl.workload_ips.is_empty() || !wl.hostname.is_empty();
+                if !has_address {
+                    // Workload has no IP. We can only reach it via a network gateway
+                    // WDS is client-agnostic, so we will get a network gateway for a workload
+                    // even if it's in the same network; we should never use it.
+                    if in_network || !has_network_gateway {
                         return None;
                     }
                 }
-                ServiceResolutionMode::Waypoint => {
-                    if target_port.is_none() && wl.application_tunnel.is_none() {
-                        // We ignore this for app_tunnel; in this case, the port does not need to be on the service.
-                        // This is only valid for waypoints, which are not explicitly addressed by users.
-                        // We do happen to do a lookup by `waypoint-svc:15008`, this is not a literal call on that service;
-                        // the port is not required at all if they have application tunnel, as it will be handled by ztunnel on the other end.
-                        trace!(
-                            "filter waypoint endpoint {}, target port is not defined",
-                            ep.workload_uid
-                        );
-                        return None;
+
+                match resolution_mode {
+                    ServiceResolutionMode::Standard => {
+                        if target_port.unwrap_or_default() == 0 && !ep.port.contains_key(&svc_port)
+                        {
+                            // Filter workload out, it doesn't have a matching port
+                            trace!(
+                                "filter endpoint {}, it does not have service port {}",
+                                ep.workload_uid, svc_port
+                            );
+                            return None;
+                        }
+                    }
+                    ServiceResolutionMode::Waypoint => {
+                        if target_port.is_none() && wl.application_tunnel.is_none() {
+                            // We ignore this for app_tunnel; in this case, the port does not need to be on the service.
+                            // This is only valid for waypoints, which are not explicitly addressed by users.
+                            // We do happen to do a lookup by `waypoint-svc:15008`, this is not a literal call on that service;
+                            // the port is not required at all if they have application tunnel, as it will be handled by ztunnel on the other end.
+                            trace!(
+                                "filter waypoint endpoint {}, target port is not defined",
+                                ep.workload_uid
+                            );
+                            return None;
+                        }
                     }
                 }
-            }
-            Some((ep, wl))
-        });
+                Some((ep, wl))
+            })
+            .collect();
 
+        if !deprioritized.is_empty() {
+            let fresh: Vec<_> = candidates
+                .iter()
+                .filter(|(_, wl)| !deprioritized.contains(&wl.uid))
+                .cloned()
+                .collect();
+            // Prefer endpoints no earlier attempt has failed on. This deliberately runs *before*
+            // the locality ranking in `select_endpoint`, so an untried endpoint in a worse
+            // locality beats a tried one in a better locality. Ranking first would pin a Failover
+            // service whose top-ranked tier holds a single endpoint to that same dead endpoint on
+            // every retry.
+            if !fresh.is_empty()
+                && let Some(selected) = self.select_endpoint(src, svc, fresh)
+            {
+                return Some(selected);
+            }
+            // Nothing selectable among the untried endpoints: either there were none, or a Strict
+            // locality LB rejected all of them. Fall through to the full set, since retrying a
+            // tried endpoint beats failing the connection outright. This keeps selection no worse
+            // than it was before the deprioritized list existed.
+        }
+
+        self.select_endpoint(src, svc, candidates)
+    }
+
+    /// Picks one of `candidates`, honoring the service's locality load balancing mode and
+    /// weighting the draw by workload capacity.
+    fn select_endpoint<'a>(
+        &self,
+        src: &Workload,
+        svc: &Service,
+        candidates: Vec<(&'a Endpoint, Arc<Workload>)>,
+    ) -> Option<(&'a Endpoint, Arc<Workload>)> {
         let options = match svc.load_balancer {
             Some(ref lb) if lb.mode != LoadBalancerMode::Standard => {
                 let network_preferred = !lb.routing_preferences.is_empty()
                     && lb.routing_preferences[0] == LoadBalancerScopes::Network;
-                let ranks = endpoints
+                let ranks = candidates
+                    .into_iter()
                     .filter_map(|(ep, wl)| {
                         // Load balancer will define N targets we want to match
                         // Consider [network, region, zone]
@@ -498,7 +570,7 @@ impl ProxyState {
                     .collect();
                 options
             }
-            _ => endpoints.collect(),
+            _ => candidates,
         };
         options
             .choose_weighted(&mut rand::rng(), |(_, wl)| wl.capacity as u64)
@@ -858,6 +930,7 @@ impl DemandProxyState {
         source_workload: &Workload,
         addr: SocketAddr,
         resolution_mode: ServiceResolutionMode,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Result<Option<Upstream>, Error> {
         self.fetch_address(
             &network_addr(network.clone(), addr.ip()),
@@ -865,8 +938,13 @@ impl DemandProxyState {
         )
         .await;
         let upstream = {
-            self.read()
-                .find_upstream(network, source_workload, addr, resolution_mode)
+            self.read().find_upstream(
+                network,
+                source_workload,
+                addr,
+                resolution_mode,
+                deprioritized,
+            )
             // Drop the lock
         };
         tracing::trace!(%addr, ?upstream, "fetch_upstream");
@@ -914,6 +992,7 @@ impl DemandProxyState {
         gw_address: &GatewayAddress,
         source_workload: &Workload,
         original_destination_address: SocketAddr,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Result<Upstream, Error> {
         let (res, target_address) = match &gw_address.destination {
             Destination::Address(ip) => {
@@ -923,6 +1002,7 @@ impl DemandProxyState {
                     source_workload,
                     addr,
                     ServiceResolutionMode::Standard,
+                    deprioritized,
                 );
                 // If the workload references a network gateway by IP, use that IP as the destination.
                 // Note this means that an IPv6 call may be translated to IPv4 if the network
@@ -939,6 +1019,7 @@ impl DemandProxyState {
                             gw_address.hbone_mtls_port,
                             ServiceResolutionMode::Standard,
                             s,
+                            deprioritized,
                         );
                         // For hostname, use the original_destination_address as the target so we can
                         // adapt to the callers IP family.
@@ -973,6 +1054,7 @@ impl DemandProxyState {
         gw_address: &GatewayAddress,
         source_workload: &Workload,
         original_destination_address: SocketAddr,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Result<Upstream, Error> {
         // Waypoint can be referred to by an IP or Hostname.
         // Hostname is preferred as it is a more stable identifier.
@@ -984,6 +1066,7 @@ impl DemandProxyState {
                     source_workload,
                     addr,
                     ServiceResolutionMode::Waypoint,
+                    deprioritized,
                 );
                 // If they referenced a waypoint by IP, use that IP as the destination.
                 // Note this means that an IPv6 call may be translated to IPv4 if the waypoint is specified
@@ -1000,6 +1083,7 @@ impl DemandProxyState {
                             gw_address.hbone_mtls_port,
                             ServiceResolutionMode::Waypoint,
                             s,
+                            deprioritized,
                         );
                         // For hostname, use the original_destination_address as the target so we can
                         // adapt to the callers IP family.
@@ -1032,6 +1116,7 @@ impl DemandProxyState {
         service: &Service,
         source_workload: &Workload,
         original_destination_address: SocketAddr,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Result<Option<Upstream>, Error> {
         // Choose a weighted waypoint, else fall back to the single
         // `waypoint` field, preserving existing behavior.
@@ -1045,9 +1130,14 @@ impl DemandProxyState {
                 gw_address
             }
         };
-        self.fetch_waypoint(gw_address, source_workload, original_destination_address)
-            .await
-            .map(Some)
+        self.fetch_waypoint(
+            gw_address,
+            source_workload,
+            original_destination_address,
+            deprioritized,
+        )
+        .await
+        .map(Some)
     }
 
     pub async fn fetch_workload_waypoint(
@@ -1055,14 +1145,20 @@ impl DemandProxyState {
         wl: &Workload,
         source_workload: &Workload,
         original_destination_address: SocketAddr,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Result<Option<Upstream>, Error> {
         let Some(gw_address) = &wl.waypoint else {
             // no waypoint
             return Ok(None);
         };
-        self.fetch_waypoint(gw_address, source_workload, original_destination_address)
-            .await
-            .map(Some)
+        self.fetch_waypoint(
+            gw_address,
+            source_workload,
+            original_destination_address,
+            deprioritized,
+        )
+        .await
+        .map(Some)
     }
 
     /// Looks for either a workload or service by the destination. If not found locally,
@@ -1595,7 +1691,13 @@ mod tests {
             _ => ServiceResolutionMode::Standard,
         };
 
-        let port = match state.find_upstream("".into(), &wl, "10.0.0.1:80".parse().unwrap(), mode) {
+        let port = match state.find_upstream(
+            "".into(),
+            &wl,
+            "10.0.0.1:80".parse().unwrap(),
+            mode,
+            &Default::default(),
+        ) {
             Some(UpstreamDestination::UpstreamParts(_, port, _)) => port,
             _ => panic!("upstream to be found"),
         };
@@ -2043,7 +2145,13 @@ mod tests {
             let mut gots = HashSet::new();
             for _ in 0..tries {
                 let got = state
-                    .load_balance(src, svc, 80, ServiceResolutionMode::Standard)
+                    .load_balance(
+                        src,
+                        svc,
+                        80,
+                        ServiceResolutionMode::Standard,
+                        &Default::default(),
+                    )
                     .map(|(ep, _)| ep.workload_uid.to_string());
                 if workloads.is_empty() {
                     assert!(got.is_none(), "{} {:?}", desc, got);
@@ -2057,7 +2165,13 @@ mod tests {
             |src: &Workload, svc: &Service, uid: &str, tries: usize, desc: &str| {
                 for _ in 0..tries {
                     let got = state
-                        .load_balance(src, svc, 80, ServiceResolutionMode::Standard)
+                        .load_balance(
+                            src,
+                            svc,
+                            80,
+                            ServiceResolutionMode::Standard,
+                            &Default::default(),
+                        )
                         .map(|(ep, _)| ep.workload_uid.as_str());
                     assert!(got != Some(uid), "{}", desc);
                 }
@@ -2171,6 +2285,149 @@ mod tests {
             "cluster1//v1/Pod/default/wl_empty_ip",
             10,
             "failover never selects missing ip",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_balance_deprioritized_endpoints() {
+        initialize_telemetry();
+        let mut state = ProxyState::new(None);
+
+        // Three interchangeable endpoints in the local network/locality, plus one in a worse
+        // locality so the failover cases below have somewhere to fall back to.
+        let workload = |name: &str, last_octet: u8, zone: &str| Workload {
+            uid: format!("cluster1//v1/Pod/default/{name}").into(),
+            name: name.into(),
+            namespace: "default".into(),
+            trust_domain: "cluster.local".into(),
+            service_account: "default".into(),
+            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, last_octet))],
+            network: "network".into(),
+            locality: Locality {
+                region: "reg".into(),
+                zone: zone.into(),
+                subzone: "".into(),
+            },
+            ..test_helpers::test_default_workload()
+        };
+        let wl_a = workload("wl_a", 1, "zone");
+        let wl_b = workload("wl_b", 2, "zone");
+        let wl_c = workload("wl_c", 3, "zone");
+        let wl_far = workload("wl_far", 4, "other-zone");
+        for wl in [&wl_a, &wl_b, &wl_c, &wl_far] {
+            state.workloads.insert(Arc::new(wl.clone()));
+        }
+
+        let endpoint = |wl: &Workload| Endpoint {
+            workload_uid: wl.uid.clone(),
+            port: HashMap::from([(80u16, 80u16)]),
+            status: HealthStatus::Healthy,
+        };
+        let endpoints = EndpointSet::from_list([
+            endpoint(&wl_a),
+            endpoint(&wl_b),
+            endpoint(&wl_c),
+            endpoint(&wl_far),
+        ]);
+        let svc = Service {
+            endpoints: endpoints.clone(),
+            ports: HashMap::from([(80u16, 80u16)]),
+            ..test_helpers::mock_default_service()
+        };
+        let locality_lb = |mode: LoadBalancerMode| {
+            Some(LoadBalancer {
+                mode,
+                routing_preferences: vec![
+                    LoadBalancerScopes::Network,
+                    LoadBalancerScopes::Region,
+                    LoadBalancerScopes::Zone,
+                ],
+                health_policy: LoadBalancerHealthPolicy::OnlyHealthy,
+            })
+        };
+        let failover_svc = Service {
+            load_balancer: locality_lb(LoadBalancerMode::Failover),
+            ..svc.clone()
+        };
+        let strict_svc = Service {
+            load_balancer: locality_lb(LoadBalancerMode::Strict),
+            ..svc.clone()
+        };
+        state.services.insert(svc.clone());
+
+        let deprioritize = |uids: &[&Workload]| {
+            let mut d = DeprioritizedEndpoints::default();
+            for wl in uids {
+                d.push(wl.uid.clone());
+            }
+            d
+        };
+        // Selection is random, so sample it enough times to catch a preference that only mostly
+        // holds. Returns the set of endpoints that came up.
+        let selected = |src: &Workload, svc: &Service, d: &DeprioritizedEndpoints| {
+            let mut got = HashSet::new();
+            for _ in 0..50 {
+                got.insert(
+                    state
+                        .load_balance(src, svc, 80, ServiceResolutionMode::Standard, d)
+                        .map(|(ep, _)| ep.workload_uid.to_string()),
+                );
+            }
+            got
+        };
+
+        // Baseline: with nothing deprioritized every endpoint is reachable.
+        assert_eq!(
+            selected(&wl_a, &svc, &DeprioritizedEndpoints::default()),
+            HashSet::from_iter([
+                Some(wl_a.uid.to_string()),
+                Some(wl_b.uid.to_string()),
+                Some(wl_c.uid.to_string()),
+                Some(wl_far.uid.to_string()),
+            ]),
+            "without a deprioritized list, selection is unchanged",
+        );
+
+        // Deprioritized endpoints are skipped entirely while any other endpoint remains.
+        assert_eq!(
+            selected(&wl_a, &svc, &deprioritize(&[&wl_a, &wl_b, &wl_far])),
+            HashSet::from_iter([Some(wl_c.uid.to_string())]),
+            "the only untried endpoint must be selected every time",
+        );
+
+        // ...but they are a preference, not a filter: once everything has been tried we must
+        // still hand back an endpoint rather than failing the connection.
+        let all_tried = selected(&wl_a, &svc, &deprioritize(&[&wl_a, &wl_b, &wl_c, &wl_far]));
+        assert!(
+            !all_tried.contains(&None),
+            "exhausting the endpoints must fall back, not return None: {all_tried:?}"
+        );
+
+        // Deprioritization outranks locality: `wl_a`/`wl_b`/`wl_c` are the top-ranked tier for
+        // this source, and once they are all tried a Failover service must reach past its
+        // preferred locality to the untried `wl_far` rather than re-picking a dead endpoint.
+        assert_eq!(
+            selected(&wl_a, &failover_svc, &DeprioritizedEndpoints::default()),
+            HashSet::from_iter([
+                Some(wl_a.uid.to_string()),
+                Some(wl_b.uid.to_string()),
+                Some(wl_c.uid.to_string()),
+            ]),
+            "failover prefers the matching locality when nothing is deprioritized",
+        );
+        assert_eq!(
+            selected(&wl_a, &failover_svc, &deprioritize(&[&wl_a, &wl_b, &wl_c])),
+            HashSet::from_iter([Some(wl_far.uid.to_string())]),
+            "failover must cross the locality boundary rather than reuse a tried endpoint",
+        );
+
+        // Strict is the exception: it may not cross the locality boundary at all. `wl_far` is
+        // ineligible, so exhausting the eligible endpoints falls back within them.
+        let strict_all_tried = selected(&wl_a, &strict_svc, &deprioritize(&[&wl_a, &wl_b, &wl_c]));
+        assert!(
+            !strict_all_tried.contains(&None)
+                && !strict_all_tried.contains(&Some(wl_far.uid.to_string())),
+            "strict must fall back within its locality, never past it: {strict_all_tried:?}"
         );
     }
 }
