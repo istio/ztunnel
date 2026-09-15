@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: "weekly"
     rebase-strategy: "disabled"
+    ignore:
+      # Remove once https://github.com/istio/ztunnel/issues/2100 is fixed.
+      - dependency-name: "h2"
+        versions: [">= 0.4.16"]
     target-branch: "master"
     groups:
       all-dependencies:
@@ -19,6 +23,9 @@ updates:
     ignore:
       - dependency-name: "criterion"
         versions: [">= 0.6"]
+      # Remove once https://github.com/istio/ztunnel/issues/2100 is fixed.
+      - dependency-name: "h2"
+        versions: [">= 0.4.16"]
     target-branch: "release-1.31"
     groups:
       all-dependencies:
@@ -33,6 +40,9 @@ updates:
     ignore:
       - dependency-name: "criterion"
         versions: [">= 0.6"]
+      # Remove once https://github.com/istio/ztunnel/issues/2100 is fixed.
+      - dependency-name: "h2"
+        versions: [">= 0.4.16"]
     target-branch: "release-1.30"
     groups:
       all-dependencies:
@@ -47,6 +57,9 @@ updates:
     ignore:
       - dependency-name: "criterion"
         versions: [">= 0.6"]
+      # Remove once https://github.com/istio/ztunnel/issues/2100 is fixed.
+      - dependency-name: "h2"
+        versions: [">= 0.4.16"]
     target-branch: "release-1.29"
     groups:
       all-dependencies:
@@ -61,6 +74,9 @@ updates:
     ignore:
       - dependency-name: "criterion"
         versions: [">= 0.6"]
+      # Remove once https://github.com/istio/ztunnel/issues/2100 is fixed.
+      - dependency-name: "h2"
+        versions: [">= 0.4.16"]
     target-branch: "release-1.28"
     groups:
       all-dependencies:
@@ -75,6 +91,9 @@ updates:
     ignore:
       - dependency-name: "criterion"
         versions: [">= 0.6"]
+      # Remove once https://github.com/istio/ztunnel/issues/2100 is fixed.
+      - dependency-name: "h2"
+        versions: [">= 0.4.16"]
     target-branch: "release-1.27"
     groups:
       all-dependencies:
