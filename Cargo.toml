@@ -108,7 +108,7 @@ rustls-webpki = { version = "0.103", default-features = false, features = ["allo
 tracing-log = "0.2"
 backoff = "0.4"
 pin-project-lite = "0.2"
-pingora-pool = "0.8"
+pingora-pool = "0.9"
 flurry = "0.5"
 h2 = "0.4"
 http = "1.4"
@@ -117,7 +117,7 @@ arcstr = { version = "1.2", features = ["serde"] }
 tracing-core = "0.1"
 tracing-appender = "0.2"
 tokio-util = { version = "0.7", features = ["io-util"] }
-educe = "0.7"
+educe = "0.8"
 tempfile = { version = "3.27", optional = true}
 
 [target.'cfg(target_os = "linux")'.dependencies]
