@@ -107,16 +107,16 @@ rustls-webpki = { version = "0.103", default-features = false, features = ["allo
 tracing-log = "0.2"
 backoff = "0.4"
 pin-project-lite = "0.2"
-pingora-pool = "0.8"
+pingora-pool = "0.9"
 flurry = "0.5"
-h2 = "0.4"
+h2 = "=0.4.15" # https://github.com/istio/ztunnel/issues/2100
 http = "1.4"
 split-iter = "0.1"
 arcstr = { version = "1.2", features = ["serde"] }
 tracing-core = "0.1"
 tracing-appender = "0.2"
 tokio-util = { version = "0.7", features = ["io-util"] }
-educe = "0.7"
+educe = "0.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.2"
