@@ -137,11 +137,6 @@ impl DefaultSocketFactory {
         );
         Ok(())
     }
-
-    #[cfg(target_os = "windows")]
-    fn set_tcp_user_timeout(&self, _s: &TcpSocket) -> io::Result<()> {
-        unreachable!("user_timeout not supported on windows")
-    }
 }
 
 

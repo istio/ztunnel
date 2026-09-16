@@ -82,6 +82,10 @@ mod tests {
 
     use super::*;
 
+    // Only consumed by `test_run_works`, whose body is currently commented out
+    // (compartment creation isn't available until Windows Server 2025). Kept until
+    // those tests are restored.
+    #[allow(dead_code)]
     fn new_namespace() -> InpodNamespace {
         let api_namespace = hcn::schema::HostComputeNamespace::default();
 

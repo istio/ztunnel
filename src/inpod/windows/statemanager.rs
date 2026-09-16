@@ -94,6 +94,9 @@ impl WorkloadProxyManagerState {
     }
 
     #[cfg(test)] // only used in tests, so added this to avoid warning
+    // The tests that consume this accessor are currently commented out; keep it
+    // until they're restored.
+    #[allow(dead_code)]
     pub(super) fn workload_states(&self) -> &hashbrown::HashMap<WorkloadUid, WorkloadState> {
         &self.workload_states
     }
