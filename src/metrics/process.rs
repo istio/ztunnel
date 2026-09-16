@@ -14,9 +14,12 @@
 
 #[cfg(unix)]
 use nix::sys::resource::{Resource, getrlimit};
-use prometheus_client::collector::Collector;
-use prometheus_client::encoding::{DescriptorEncoder, EncodeMetric};
+#[cfg(unix)]
+use prometheus_client::encoding::EncodeMetric;
+#[cfg(unix)]
 use prometheus_client::metrics;
+use prometheus_client::collector::Collector;
+use prometheus_client::encoding::DescriptorEncoder;
 #[cfg(unix)]
 use tracing::error;
 

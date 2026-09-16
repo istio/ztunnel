@@ -251,6 +251,9 @@ pub async fn build_with_cert(
     })
 }
 
+// `registry` is only consumed on Unix; on other platforms the process metrics
+// collector is not registered, so silence the unused-variable lint there.
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn register_process_metrics(registry: &mut Registry) {
     #[cfg(unix)]
     registry.register_collector(Box::new(metrics::process::ProcessMetrics::new()));
