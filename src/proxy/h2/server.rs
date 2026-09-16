@@ -108,7 +108,7 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     let mut builder = h2::server::Builder::new();
-    let mut conn = builder
+    builder
         .initial_window_size(cfg.window_size)
         .initial_connection_window_size(cfg.connection_window_size)
         .max_frame_size(cfg.frame_size)
@@ -118,9 +118,11 @@ where
         // 400kb, default from hyper
         .max_send_buffer_size(1024 * 400)
         // default from hyper
-        .max_concurrent_streams(200)
-        .handshake(s)
-        .await?;
+        .max_concurrent_streams(200);
+    if let Some(budget) = cfg.h2_data_frame_budget {
+        builder.data_frame_budget(budget);
+    }
+    let mut conn = builder.handshake(s).await?;
 
     let ping_pong = conn
         .ping_pong()
