@@ -1221,7 +1221,7 @@ mod tests {
         let svc = store.get_best_by_vip(&target, None).unwrap();
         assert!(
             !svc.endpoints.contains(&"uid-a".into()),
-            "removed endpoint must be in CIDR lookup results"
+            "removed endpoint must not be in CIDR lookup results"
         );
         assert!(
             svc.endpoints.contains(&"uid-b".into()),
