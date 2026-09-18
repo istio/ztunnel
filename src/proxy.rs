@@ -664,10 +664,18 @@ pub async fn freebind_connect(
         socket_factory: &(dyn SocketFactory + Send + Sync),
     ) -> io::Result<TcpStream> {
         let create_socket = |is_ipv4: bool| {
+            // Name the address family in the error so a dual-stack misconfig
+            // (e.g. a pod compartment without IPv6) is diagnosable, instead of
+            // surfacing the bare "socket creation failed" io::Error.
             if is_ipv4 {
                 socket_factory.new_tcp_v4()
             } else {
-                socket_factory.new_tcp_v6()
+                socket_factory.new_tcp_v6().map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!("failed to create IPv6 socket (is IPv6 enabled on this host/pod compartment?): {e}"),
+                    )
+                })
             }
         };
 
@@ -687,14 +695,17 @@ pub async fn freebind_connect(
             Some(src) => {
                 let socket = create_socket(src.is_ipv4())?;
                 let local_addr = SocketAddr::new(src, 0);
+                // Source preservation is not a best-effort feature: if the
+                // freebind/transparent setup or the source bind fails, fail the
+                // connect rather than silently downgrading to a normal connect
+                // (which would misattribute the connection's source identity).
                 match socket::set_freebind_and_transparent(&socket) {
-                    Err(err) => warn!("failed to set freebind: {:?}", err),
-                    _ => {
-                        if let Err(err) = socket.bind(local_addr) {
-                            warn!("failed to bind local addr: {:?}", err)
-                        }
-                    }
-                };
+                    Err(err) => return Err(err),
+                    Ok(()) => {}
+                }
+                if let Err(err) = socket.bind(local_addr) {
+                    return Err(err);
+                }
                 trace!(%src, dest=%addr, "connect with source IP");
                 Ok(socket.connect(addr).await?)
             }
