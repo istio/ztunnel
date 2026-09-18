@@ -17,7 +17,10 @@ extern crate core;
 #[cfg(unix)]
 use nix::sys::resource::{Resource, getrlimit, setrlimit};
 use std::sync::Arc;
+#[cfg(unix)]
 use tracing::{info, warn};
+#[cfg(not(unix))]
+use tracing::info;
 use ztunnel::*;
 
 #[cfg(feature = "jemalloc")]

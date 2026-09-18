@@ -265,10 +265,17 @@ impl Listener {
 
 #[cfg(test)]
 pub mod socket_tests {
+    #[cfg(unix)]
     use tokio::net::TcpStream;
 
+    #[cfg(unix)]
     use crate::{config::SocketConfig, socket::Listener};
 
+    // Reading keepalive/user-timeout options back via `SockRef` getters is only
+    // supported on Unix in the `socket2` crate; on Windows those getters do not
+    // exist, so this read-back verification is Unix-only. The keepalive *setters*
+    // are still exercised on every platform by `Listener::accept`/`set_socket_options`.
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_keep_alive_options() {
         let cfg = SocketConfig {

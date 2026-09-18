@@ -11,6 +11,14 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+// The benchmark harness only runs on Linux; on every other platform the
+// benchmark body is compiled out (it pulls in Linux-only `pprof`/`criterion`
+// plumbing), so the top-level imports and helpers become dead code. Keep Linux
+// strict (`-D warnings`) but allow those lints only on non-Linux targets so the
+// benches still `cargo check`/build cleanly when cross-compiling (e.g. Windows).
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
+
 use std::cmp::Ordering::{Equal, Greater, Less};
 use std::future::Future;
 use std::io::Error;

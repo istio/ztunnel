@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.90"
 
 [features]
+# Linux default, unchanged from the base branch. Windows cross-builds must opt
+# into the pure-Rust `ring` provider with `--no-default-features -F tls-ring`,
+# because aws-lc (via aws-lc-sys) shells out to cmake/nasm + a C toolchain and
+# does not cross-build to Windows cleanly. See WINDOWS.md.
 default = ["tls-aws-lc"]
 jemalloc = ["dep:tikv-jemallocator", "dep:jemalloc_pprof"]
 tls-boring = ["dep:boring", "dep:boring-sys", "boring-rustls-provider/fips-only"]

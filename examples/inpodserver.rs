@@ -19,6 +19,8 @@ use ztunnel::test_helpers::inpod_linux::StartZtunnelMessage;
 use ztunnel::test_helpers::inpod_linux::{start_ztunnel_server, Message};
 use ztunnel::inpod::istio::zds::WorkloadInfo;
 
+// Only the Linux `main` uses these; on other targets the example is a no-op.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const PROXY_WORKLOAD_INFO: &str = "PROXY_WORKLOAD_INFO";
 
 #[cfg(target_os = "linux")]
@@ -51,6 +53,7 @@ async fn main() {
     sender.wait_forever().await.unwrap();
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_proxy_workload_info() -> Result<WorkloadInfo, Error> {
     let pwi = match std::env::var(PROXY_WORKLOAD_INFO) {
         Ok(val) => val,

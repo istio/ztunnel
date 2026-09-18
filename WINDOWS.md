@@ -15,8 +15,16 @@ rustup target add x86_64-pc-windows-gnu
 Test a build with:
 
 ```bash
-cargo build --target x86_64-pc-windows-gnu
+cargo build --target x86_64-pc-windows-gnu --no-default-features --features tls-ring
 ```
+
+> **Note:** the default crypto provider (`aws-lc`) does not cross-build to Windows
+> cleanly — `aws-lc-sys` shells out to cmake/nasm + a C compiler (see the
+> `cmake` crate panicking on newer Visual Studio and `-WX -W4` rejecting C11
+> atomics). Since we must not change the Linux default, Windows cross-builds opt
+> into the pure-Rust `ring` provider with `--no-default-features --features tls-ring`.
+> If you need `aws-lc` on Windows, install the native build toolchain first
+> (`cmake`, `nasm`, a C compiler) and build with `--features tls-aws-lc`.
 
 Docker does support cross-building for Windows, but it is a bit of a pain. You can use the `docker buildx` command to build images for Windows. First, you need to create a new builder instance:
 
