@@ -89,7 +89,10 @@ impl crate::proxy::SocketFactory for InPodSocketFactory {
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
-        let std_sock = self.configure(|| std::net::TcpListener::bind(addr))?;
+        // Dual-stack helper (see socket::tcp_bind): binds inside the workload's
+        // network compartment via `configure`, with IPV6_V6ONLY=0 so a `[::]`
+        // wildcard listener serves both families as on Linux.
+        let std_sock = self.configure(|| socket::tcp_bind(addr))?;
         std_sock.set_nonblocking(true)?;
         tokio::net::TcpListener::from_std(std_sock).map(socket::Listener::new)
     }

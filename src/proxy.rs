@@ -92,7 +92,7 @@ impl SocketFactory for DefaultSocketFactory {
     }
 
     fn tcp_bind(&self, addr: SocketAddr) -> std::io::Result<socket::Listener> {
-        let std_sock = std::net::TcpListener::bind(addr)?;
+        let std_sock = socket::tcp_bind(addr)?;
         std_sock.set_nonblocking(true)?;
         TcpListener::from_std(std_sock).map(socket::Listener::new)
     }
