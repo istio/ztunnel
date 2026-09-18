@@ -18,7 +18,6 @@ use tokio::io;
 
 use tokio::net::TcpSocket;
 use tokio::net::{TcpListener, TcpStream};
-use std::io::Error;
 use socket2::{SockRef, TcpKeepalive};
 use crate::config::SocketConfig;
 
@@ -37,7 +36,7 @@ pub fn set_freebind_and_transparent(socket: &TcpSocket) -> io::Result<()> {
             linux::set_ipv6_transparent(&socket)?;
             socket.set_freebind_v6(true)?
         }
-        _ => return Err(Error::new(ErrorKind::Unsupported, "unsupported domain")),
+        _ => return Err(io::Error::new(ErrorKind::Unsupported, "unsupported domain")),
     };
     Ok(())
 }
@@ -99,12 +98,27 @@ fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     ))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn set_freebind_and_transparent(_: &TcpSocket) -> io::Result<()> {
-    Err(Error::new(
+    Err(io::Error::new(
         io::ErrorKind::Other,
         "IP_TRANSPARENT and IP_FREEBIND are not supported on this operating system",
     ))
+}
+
+/// Mirror of the Linux `IP_TRANSPARENT`/`IP_FREEBIND` path, domain-aware like the
+/// Linux implementation.
+///
+/// Windows has no `IP_TRANSPARENT`/`IP_FREEBIND`, and none are needed: the
+/// Windows ambient prototype runs in-pod, so the workload's source address is
+/// local to the process's network compartment and source preservation is
+/// achieved by the plain `bind(local_addr)` performed by `proxy::freebind_connect`.
+/// A bind of a genuinely non-local address (e.g. running in the host compartment)
+/// still fails loudly at bind time, which is the same observable behavior as
+/// Linux when transparent mode is unavailable.
+#[cfg(target_os = "windows")]
+pub fn set_freebind_and_transparent(_socket: &TcpSocket) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -248,7 +262,7 @@ impl Listener {
                 linux::set_ipv6_transparent(&socket)?;
                 Ok(())
             }
-            _ => Err(Error::new(ErrorKind::Unsupported, "unsupported domain")),
+            _ => Err(io::Error::new(ErrorKind::Unsupported, "unsupported domain")),
         }
     }
 }
