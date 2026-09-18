@@ -18,7 +18,6 @@ use crate::{config, socket};
 
 pub struct InPodConfig {
     cur_namespace: u32,
-    reuse_port: bool, // TODO: Not supported in windows so always must be false
     socket_config: config::SocketConfig,
 }
 
@@ -26,7 +25,7 @@ impl InPodConfig {
     pub fn new(cfg: &config::Config) -> std::io::Result<Self> {
         if cfg.inpod_port_reuse {
             return Err(std::io::Error::other(
-                "SO_REUSEPORT is not supported in windows",
+                "inpod_port_reuse (SO_REUSEPORT) is not supported on Windows; disable it in the ztunnel configuration",
             ));
         }
         let socket_config = config::SocketConfig {
@@ -35,7 +34,6 @@ impl InPodConfig {
         };
         Ok(InPodConfig {
             cur_namespace: InpodNamespace::current()?,
-            reuse_port: cfg.inpod_port_reuse,
             socket_config,
         })
     }
@@ -45,12 +43,9 @@ impl InPodConfig {
     ) -> Box<dyn crate::proxy::SocketFactory + Send + Sync> {
         let base = crate::proxy::DefaultSocketFactory(self.socket_config);
         let sf = InPodSocketFactory::from_cfg(base, self, netns);
-        if self.reuse_port {
-            // We should never get here
-            unreachable!("SO_REUSEPORT is not supported in windows");
-        } else {
-            Box::new(sf)
-        }
+        // Port reuse is rejected at config time (see `InPodConfig::new`), so we
+        // never build a reuse-capable socket factory on Windows.
+        Box::new(sf)
     }
 
     pub fn cur_netns(&self) -> u32 {

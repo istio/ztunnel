@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use std::fmt::Debug;
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -788,8 +790,11 @@ where
     false
 }
 
+/// Linux sysctl that reports whether IPv6 is disabled on the loopback device.
+#[cfg(unix)]
 const IPV6_DISABLED_LO: &str = "/proc/sys/net/ipv6/conf/lo/disable_ipv6";
 
+#[cfg(unix)]
 fn read_sysctl(key: &str) -> io::Result<String> {
     let mut file = File::open(key)?;
     let mut data = String::new();
@@ -797,8 +802,26 @@ fn read_sysctl(key: &str) -> io::Result<String> {
     Ok(data.trim().to_string())
 }
 
+/// Whether IPv6 is usable on localhost.
+///
+/// On Unix, reads the `disable_ipv6` sysctl for the loopback device.
+#[cfg(unix)]
 pub fn ipv6_enabled_on_localhost() -> io::Result<bool> {
     read_sysctl(IPV6_DISABLED_LO).map(|s| s != "1")
+}
+
+/// Whether IPv6 is usable on localhost.
+///
+/// On Windows there is no procfs sysctl, so probe the stack directly by
+/// attempting to create an IPv6 socket. This returns a real result (matching
+/// the caller's expectation of `bool`) instead of failing benignly on the
+/// Linux-only `/proc/sys/...` path.
+#[cfg(not(unix))]
+pub fn ipv6_enabled_on_localhost() -> io::Result<bool> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    // If an IPv6 socket can be created, the IPv6 protocol stack is enabled.
+    // Deliberately not bound — a cheap, side-effect free probe.
+    Ok(Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP)).is_ok())
 }
 
 pub fn parse_forwarded_host(input: &str) -> Option<String> {
