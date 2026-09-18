@@ -607,6 +607,11 @@ impl ServiceStore {
                 }
             }
         }
+
+        // Update the CIDR VIP mapping, first by removing the old service snapshot
+        self.by_cidr_vip
+            .retain(|(_, svc)| svc.namespaced_hostname() != namespaced_hostname);
+        // Then adding the new service snapshot
         for cidr in &service.cidr_vips {
             self.by_cidr_vip.push((cidr.clone(), service.clone()));
         }
@@ -936,6 +941,42 @@ mod tests {
                 .is_some()
         );
         assert!(store.get_best_by_vip(&nw(ip(10, 0, 1, 5)), None).is_none());
+    }
+
+    #[test]
+    fn cidr_vip_lookup_reflects_endpoint_updates() {
+        let mut store = ServiceStore::default();
+        store.insert(make_service("svc", "ns", vec![], vec![cidr("0.0.0.0/0")]));
+        let name = nshost("svc", "ns");
+        let target = nw(ip(140, 82, 112, 21));
+
+        store.apply_endpoints(
+            &name,
+            HashMap::from([("uid-a".into(), endpoint("uid-a", HealthStatus::Healthy))]),
+            HashSet::new(),
+        );
+        let svc = store.get_best_by_vip(&target, None).unwrap();
+        assert!(
+            svc.endpoints.contains(&"uid-a".into()),
+            "endpoint added after service insert must be visible via CIDR lookup"
+        );
+
+        // Replace uid-a's with uid-b
+        store.apply_endpoints(
+            &name,
+            HashMap::from([("uid-b".into(), endpoint("uid-b", HealthStatus::Healthy))]),
+            HashSet::from(["uid-a".into()]),
+        );
+        let svc = store.get_best_by_vip(&target, None).unwrap();
+        assert!(
+            !svc.endpoints.contains(&"uid-a".into()),
+            "removed endpoint must not be in CIDR lookup results"
+        );
+        assert!(
+            svc.endpoints.contains(&"uid-b".into()),
+            "replacement endpoint must be visible via CIDR lookup"
+        );
+        assert_eq!(store.by_cidr_vip.len(), 1);
     }
 
     #[test]
