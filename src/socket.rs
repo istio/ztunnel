@@ -18,7 +18,6 @@ use tokio::io;
 
 use tokio::net::TcpSocket;
 use tokio::net::{TcpListener, TcpStream};
-use std::io::Error;
 use socket2::{SockRef, TcpKeepalive};
 use crate::config::SocketConfig;
 
@@ -37,7 +36,7 @@ pub fn set_freebind_and_transparent(socket: &TcpSocket) -> io::Result<()> {
             linux::set_ipv6_transparent(&socket)?;
             socket.set_freebind_v6(true)?
         }
-        _ => return Err(Error::new(ErrorKind::Unsupported, "unsupported domain")),
+        _ => return Err(io::Error::new(ErrorKind::Unsupported, "unsupported domain")),
     };
     Ok(())
 }
@@ -46,6 +45,44 @@ pub fn to_canonical(addr: SocketAddr) -> SocketAddr {
     // another match has to be used for IPv4 and IPv6 support
     let ip = addr.ip().to_canonical();
     SocketAddr::from((ip, addr.port()))
+}
+
+/// Bind a TCP listener at `addr`, matching Linux's dual-stack default.
+///
+/// On Linux, `IPV6_V6ONLY` defaults to 0, so a `[::]` wildcard listener serves
+/// both families (IPv4 clients are observed as `::ffff:` mapped peers, which
+/// `to_canonical` normalizes). Windows defaults `IPV6_V6ONLY` to 1, where a
+/// plain `[::]` bind **refuses IPv4 clients**; the option must therefore be set
+/// to 0 before `bind` for the wildcard listeners (inbound 15006/15008, outbound
+/// 15001) to serve both families there. The option only takes effect pre-bind,
+/// so the socket is created via socket2 and reconstructed after listen.
+#[cfg(unix)]
+pub fn tcp_bind(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+    std::net::TcpListener::bind(addr)
+}
+
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+pub fn tcp_bind(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    use std::os::windows::io::{FromRawSocket, IntoRawSocket};
+
+    let socket = Socket::new(
+        if addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        },
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )?;
+    if addr.is_ipv6() {
+        socket.set_only_v6(false)?;
+    }
+    socket.bind(&socket2::SockAddr::from(addr))?;
+    // Same backlog std::net::TcpListener::bind uses.
+    socket.listen(128)?;
+    Ok(unsafe { std::net::TcpListener::from_raw_socket(socket.into_raw_socket()) })
 }
 
 pub fn orig_dst_addr_or_default(stream: &tokio::net::TcpStream) -> SocketAddr {
@@ -99,12 +136,27 @@ fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     ))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn set_freebind_and_transparent(_: &TcpSocket) -> io::Result<()> {
-    Err(Error::new(
+    Err(io::Error::new(
         io::ErrorKind::Other,
         "IP_TRANSPARENT and IP_FREEBIND are not supported on this operating system",
     ))
+}
+
+/// Mirror of the Linux `IP_TRANSPARENT`/`IP_FREEBIND` path, domain-aware like the
+/// Linux implementation.
+///
+/// Windows has no `IP_TRANSPARENT`/`IP_FREEBIND`, and none are needed: the
+/// Windows ambient prototype runs in-pod, so the workload's source address is
+/// local to the process's network compartment and source preservation is
+/// achieved by the plain `bind(local_addr)` performed by `proxy::freebind_connect`.
+/// A bind of a genuinely non-local address (e.g. running in the host compartment)
+/// still fails loudly at bind time, which is the same observable behavior as
+/// Linux when transparent mode is unavailable.
+#[cfg(target_os = "windows")]
+pub fn set_freebind_and_transparent(_socket: &TcpSocket) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -248,7 +300,7 @@ impl Listener {
                 linux::set_ipv6_transparent(&socket)?;
                 Ok(())
             }
-            _ => Err(Error::new(ErrorKind::Unsupported, "unsupported domain")),
+            _ => Err(io::Error::new(ErrorKind::Unsupported, "unsupported domain")),
         }
     }
 }

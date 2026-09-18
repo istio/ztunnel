@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use std::fmt::Debug;
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -90,7 +92,7 @@ impl SocketFactory for DefaultSocketFactory {
     }
 
     fn tcp_bind(&self, addr: SocketAddr) -> std::io::Result<socket::Listener> {
-        let std_sock = std::net::TcpListener::bind(addr)?;
+        let std_sock = socket::tcp_bind(addr)?;
         std_sock.set_nonblocking(true)?;
         TcpListener::from_std(std_sock).map(socket::Listener::new)
     }
@@ -662,10 +664,18 @@ pub async fn freebind_connect(
         socket_factory: &(dyn SocketFactory + Send + Sync),
     ) -> io::Result<TcpStream> {
         let create_socket = |is_ipv4: bool| {
+            // Name the address family in the error so a dual-stack misconfig
+            // (e.g. a pod compartment without IPv6) is diagnosable, instead of
+            // surfacing the bare "socket creation failed" io::Error.
             if is_ipv4 {
                 socket_factory.new_tcp_v4()
             } else {
-                socket_factory.new_tcp_v6()
+                socket_factory.new_tcp_v6().map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!("failed to create IPv6 socket (is IPv6 enabled on this host/pod compartment?): {e}"),
+                    )
+                })
             }
         };
 
@@ -685,14 +695,17 @@ pub async fn freebind_connect(
             Some(src) => {
                 let socket = create_socket(src.is_ipv4())?;
                 let local_addr = SocketAddr::new(src, 0);
+                // Source preservation is not a best-effort feature: if the
+                // freebind/transparent setup or the source bind fails, fail the
+                // connect rather than silently downgrading to a normal connect
+                // (which would misattribute the connection's source identity).
                 match socket::set_freebind_and_transparent(&socket) {
-                    Err(err) => warn!("failed to set freebind: {:?}", err),
-                    _ => {
-                        if let Err(err) = socket.bind(local_addr) {
-                            warn!("failed to bind local addr: {:?}", err)
-                        }
-                    }
-                };
+                    Err(err) => return Err(err),
+                    Ok(()) => {}
+                }
+                if let Err(err) = socket.bind(local_addr) {
+                    return Err(err);
+                }
                 trace!(%src, dest=%addr, "connect with source IP");
                 Ok(socket.connect(addr).await?)
             }
@@ -788,8 +801,11 @@ where
     false
 }
 
+/// Linux sysctl that reports whether IPv6 is disabled on the loopback device.
+#[cfg(unix)]
 const IPV6_DISABLED_LO: &str = "/proc/sys/net/ipv6/conf/lo/disable_ipv6";
 
+#[cfg(unix)]
 fn read_sysctl(key: &str) -> io::Result<String> {
     let mut file = File::open(key)?;
     let mut data = String::new();
@@ -797,8 +813,26 @@ fn read_sysctl(key: &str) -> io::Result<String> {
     Ok(data.trim().to_string())
 }
 
+/// Whether IPv6 is usable on localhost.
+///
+/// On Unix, reads the `disable_ipv6` sysctl for the loopback device.
+#[cfg(unix)]
 pub fn ipv6_enabled_on_localhost() -> io::Result<bool> {
     read_sysctl(IPV6_DISABLED_LO).map(|s| s != "1")
+}
+
+/// Whether IPv6 is usable on localhost.
+///
+/// On Windows there is no procfs sysctl, so probe the stack directly by
+/// attempting to create an IPv6 socket. This returns a real result (matching
+/// the caller's expectation of `bool`) instead of failing benignly on the
+/// Linux-only `/proc/sys/...` path.
+#[cfg(not(unix))]
+pub fn ipv6_enabled_on_localhost() -> io::Result<bool> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    // If an IPv6 socket can be created, the IPv6 protocol stack is enabled.
+    // Deliberately not bound — a cheap, side-effect free probe.
+    Ok(Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP)).is_ok())
 }
 
 pub fn parse_forwarded_host(input: &str) -> Option<String> {
@@ -898,6 +932,87 @@ impl TryFrom<&http::Uri> for HboneAddress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Whether IPv6 is usable on this host, determined independently of the
+    /// implementation under test (a direct `[::1]` bind).
+    fn host_has_ipv6() -> bool {
+        std::net::TcpListener::bind("[::1]:0").is_ok()
+    }
+
+    #[test]
+    fn test_ipv6_enabled_on_localhost_matches_host_capability() {
+        // The probe must agree with the host's actual IPv6 capability rather
+        // than reporting an error (which callers would treat optimistically).
+        let reported = ipv6_enabled_on_localhost().expect("probe must not error");
+        assert_eq!(reported, host_has_ipv6());
+    }
+
+    #[tokio::test]
+    async fn test_freebind_connect_ipv6_plain() {
+        if !host_has_ipv6() {
+            eprintln!("IPv6 not available on this host; skipping");
+            return;
+        }
+        let factory = DefaultSocketFactory(config::SocketConfig::default());
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut conn = freebind_connect(None, addr, &factory).await.unwrap();
+        let (mut stream, peer) = listener.accept().await.unwrap();
+        assert_eq!(peer.ip().to_canonical(), addr.ip().to_canonical());
+        // Exchange data to prove the connection is live over IPv6.
+        conn.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
+    }
+
+    #[tokio::test]
+    async fn test_freebind_connect_ipv6_same_source_and_dest() {
+        if !host_has_ipv6() {
+            eprintln!("IPv6 not available on this host; skipping");
+            return;
+        }
+        let factory = DefaultSocketFactory(config::SocketConfig::default());
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // A source equal to the destination address takes the direct-connect
+        // arm (see freebind_connect): no freebind/bind is required. The bind
+        // path itself is exercised by the non-local-source failure test below.
+        let src: IpAddr = "::1".parse().unwrap();
+        let mut conn = freebind_connect(Some(src), addr, &factory).await.unwrap();
+        let (mut stream, peer) = listener.accept().await.unwrap();
+        // The listener must observe the address the caller intended as source.
+        assert_eq!(peer.ip(), src);
+        conn.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
+    }
+
+    // On Windows a non-local source bind fails loudly (there is no
+    // IP_TRANSPARENT/IP_FREEBIND), which is the same observable behavior as
+    // Linux when transparent mode is unavailable. Linux itself intentionally
+    // allows non-local binds via freebind, so this strict check is
+    // Windows-specific by design.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn test_freebind_connect_ipv6_non_local_source_fails_loudly() {
+        if !host_has_ipv6() {
+            eprintln!("IPv6 not available on this host; skipping");
+            return;
+        }
+        let factory = DefaultSocketFactory(config::SocketConfig::default());
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // RFC 3849 documentation prefix, never assigned to this host.
+        let src: IpAddr = "2001:db8::1".parse().unwrap();
+        let err = freebind_connect(Some(src), addr, &factory)
+            .await
+            .expect_err("non-local source must fail loudly, not silently downgrade");
+        assert_eq!(err.kind(), io::ErrorKind::AddrNotAvailable);
+    }
 
     #[test]
     fn test_parse_forwarded_host() {
