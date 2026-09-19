@@ -1051,7 +1051,7 @@ mod tests {
         let (mut crl_file, crl_mgr) = crl_manager_empty();
 
         let server_tls = TlsAcceptor::from(Arc::new(
-            server_wl.server_config(Some(crl_mgr.clone())).unwrap(),
+            server_wl.server_config(&[], Some(crl_mgr.clone())).unwrap(),
         ));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1215,7 +1215,7 @@ mod tests {
         let (mut crl_file, crl_mgr) = crl_manager_empty();
 
         let server_tls = TlsAcceptor::from(Arc::new(
-            server_wl.server_config(Some(crl_mgr.clone())).unwrap(),
+            server_wl.server_config(&[], Some(crl_mgr.clone())).unwrap(),
         ));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

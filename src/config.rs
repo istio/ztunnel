@@ -50,6 +50,7 @@ const INPOD_UDS: &str = "INPOD_UDS";
 const INPOD_PORT_REUSE: &str = "INPOD_PORT_REUSE";
 const CLUSTER_ID: &str = "CLUSTER_ID";
 const CLUSTER_DOMAIN: &str = "CLUSTER_DOMAIN";
+const TRUST_DOMAINS: &str = "TRUST_DOMAINS";
 const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
 const LOCAL_XDS: &str = "LOCAL_XDS";
 const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
@@ -241,6 +242,8 @@ pub struct Config {
     pub illegal_ports: HashSet<u16>,
     /// The network of the node this ztunnel is running on.
     pub network: Strng,
+    /// Trust domains accepted on inbound connections in addition to our own.
+    pub trust_domains: Arc<Vec<Strng>>,
     /// The name of the node this ztunnel is running as.
     pub local_node: Option<String>,
     /// The proxy mode of ztunnel, Shared or Dedicated, default to Shared.
@@ -851,6 +854,14 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         illegal_ports,
 
         network: parse(NETWORK)?.unwrap_or_default(),
+        trust_domains: Arc::new(
+            parse::<String>(TRUST_DOMAINS)?
+                .iter()
+                .flat_map(|domains| domains.split(','))
+                .map(|domain| domain.trim().into())
+                .filter(|domain: &Strng| !domain.is_empty())
+                .collect(),
+        ),
         local_node: parse(NODE_NAME)?,
         proxy_mode,
         proxy_workload_information,

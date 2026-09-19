@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::identity::Identity;
+use crate::strng::Strng;
 use crate::tls::{Error, IdentityVerifier, OutboundConnector};
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
@@ -315,11 +316,23 @@ impl WorkloadCertificate {
 
     pub fn server_config(
         &self,
+        trust_domains: &[Strng],
         crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
     ) -> Result<ServerConfig, Error> {
-        let td = self.cert.identity().map(|i| match i {
-            Identity::Spiffe { trust_domain, .. } => trust_domain,
-        });
+        // Accept the trust domain our own certificate is in, plus any the mesh tells us about.
+        let trust_domains = match self.cert.identity() {
+            Some(Identity::Spiffe { trust_domain, .. }) => {
+                let mut accepted = vec![trust_domain];
+                for td in trust_domains {
+                    if !accepted.contains(td) {
+                        accepted.push(td.clone());
+                    }
+                }
+                accepted
+            }
+            // Without an identity of our own there is nothing to compare a peer against.
+            None => Vec::new(),
+        };
 
         // build the base client cert verifier with optional CRL support
         let mut builder = WebPkiClientVerifier::builder_with_provider(
@@ -341,7 +354,7 @@ impl WorkloadCertificate {
         let raw_client_cert_verifier = builder.build()?;
 
         let client_cert_verifier =
-            crate::tls::workload::TrustDomainVerifier::new(raw_client_cert_verifier, td);
+            crate::tls::workload::TrustDomainVerifier::new(raw_client_cert_verifier, trust_domains);
         let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
             .with_protocol_versions(tls::tls_versions())
             .expect("server config must be valid")
@@ -447,6 +460,7 @@ fn der_to_pem(der: &[u8], label: &str) -> String {
 #[cfg(test)]
 mod test {
     use crate::identity::Identity;
+    use crate::strng::Strng;
     use crate::test_helpers::helpers;
     use crate::tls::mock::{
         TEST_ROOT, TEST_ROOT_KEY, TEST_ROOT2, TEST_ROOT2_KEY, TestIdentity, crl_pem_revoking_cert,
@@ -498,7 +512,7 @@ mod test {
             WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![&joined]).unwrap();
 
         // Do a simple handshake between them; we should be able to accept the trusted root
-        let server = cert1.server_config(None).unwrap();
+        let server = cert1.server_config(&[], None).unwrap();
         let tls = TlsAcceptor::from(Arc::new(server));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -572,7 +586,7 @@ mod test {
         );
 
         // Create TLS server to listen for incoming connections
-        let server_tls = TlsAcceptor::from(Arc::new(server_wl.server_config(None).unwrap()));
+        let server_tls = TlsAcceptor::from(Arc::new(server_wl.server_config(&[], None).unwrap()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::task::spawn(async move {
@@ -648,7 +662,7 @@ mod test {
             .unwrap(),
         );
 
-        let server_tls = TlsAcceptor::from(Arc::new(server_wl.server_config(None).unwrap()));
+        let server_tls = TlsAcceptor::from(Arc::new(server_wl.server_config(&[], None).unwrap()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::task::spawn(async move {
@@ -665,5 +679,56 @@ mod test {
             .await
             .expect_err("connection should fail: intermediate cert is revoked");
         assert!(io_error_is_cert_revoked(&err));
+    }
+
+    #[tokio::test]
+    async fn configured_trust_domains() {
+        helpers::initialize_telemetry();
+        let server_id = Identity::from_str("spiffe://td/ns/n/sa/a").unwrap();
+        let client_id = Identity::from_str("spiffe://other-td/ns/n/sa/b").unwrap();
+
+        let certs = |id: &Identity| {
+            let (key, cert) = crate::tls::mock::generate_test_certs_with_root(
+                &TestIdentity::Identity(id.clone()),
+                SystemTime::now(),
+                SystemTime::now() + Duration::from_secs(60),
+                None,
+                TEST_ROOT_KEY,
+            );
+            WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![TEST_ROOT]).unwrap()
+        };
+        let server_cert = certs(&server_id);
+        let client_cert = certs(&client_id);
+
+        // A client from another trust domain is rejected unless we are told to accept it.
+        for (trust_domains, want_ok) in [
+            (vec![], false),
+            (vec![Strng::from("unrelated-td")], false),
+            (vec![Strng::from("other-td")], true),
+        ] {
+            let server = server_cert.server_config(&trust_domains, None).unwrap();
+            let tls = TlsAcceptor::from(Arc::new(server));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::task::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                if let Ok(mut tls) = tls.accept(stream).await {
+                    let _ = tls.write(b"serv").await;
+                }
+            });
+
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let client = client_cert
+                .outbound_connector(vec![server_id.clone()], None)
+                .unwrap();
+            let got_ok = match client.connect(stream).await {
+                Ok(mut tls) => {
+                    let mut buf = [0u8; 4];
+                    tls.write(b"hi").await.is_ok() && tls.read_exact(&mut buf).await.is_ok()
+                }
+                Err(_) => false,
+            };
+            assert_eq!(got_ok, want_ok, "trust domains {trust_domains:?}");
+        }
     }
 }
