@@ -20,7 +20,7 @@
 # ssh credentials (test user):
 #   ssh user@localhost -p2222 (enter `password` on the command-line)
 
-FROM gcr.io/istio-testing/build-tools:master-65b95c3425a26e633081b2d0834cc0df6e81fd8a
+FROM registry.istio.io/testing/build-tools:master-65b95c3425a26e633081b2d0834cc0df6e81fd8a
 
 # - git (and git-lfs), for git operations (to e.g. push your work).
 #   Also required for setting up your configured dotfiles in the workspace.
