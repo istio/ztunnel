@@ -319,6 +319,25 @@ pub fn throughput(c: &mut Criterion) {
     }
 }
 
+pub fn hbone_single_flow_throughput(c: &mut Criterion) {
+    const SEND_SIZE: usize = GB;
+    let (_manager, tx, ack) =
+        initialize_environment(WorkloadMode::HBONE, TestTrafficMode::Request, Mode::Read, 1)
+            .unwrap();
+    let mut group = c.benchmark_group("hbone_pool_single_flow_throughput");
+    group.throughput(Throughput::Elements((SEND_SIZE * 8) as u64));
+    group.sample_size(10);
+    group.sampling_mode(SamplingMode::Flat);
+    group.measurement_time(Duration::from_secs(5));
+    group.bench_function("pooled_hbone", |bencher| {
+        bencher.iter(|| {
+            tx.send(SEND_SIZE).unwrap();
+            ack.recv().unwrap().unwrap();
+        });
+    });
+    group.finish();
+}
+
 pub fn latency(c: &mut Criterion) {
     const LATENCY_SEND_SIZE: usize = KB;
     fn run_latency<T: Measurement>(c: &mut BenchmarkGroup<T>, name: &str, mode: WorkloadMode) {
@@ -577,7 +596,7 @@ criterion_group! {
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(100, Output::Protobuf))
         .warm_up_time(Duration::from_millis(1));
-    targets = hbone_connections
+    targets = hbone_connections, hbone_single_flow_throughput
 }
 
 criterion_main!(benches);
