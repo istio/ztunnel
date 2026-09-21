@@ -20,12 +20,11 @@ use itertools::Itertools;
 use std::{cmp, iter};
 
 use rustls::client::Resumption;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, CommonState, RootCertStore, ServerConfig};
-use rustls_pemfile::Item;
-use std::io::Cursor;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -199,50 +198,29 @@ fn expiration(cert: X509Certificate) -> Expiration {
     }
 }
 
-pub fn parse_cert(mut cert: Vec<u8>) -> Result<Certificate, Error> {
-    let mut reader = std::io::BufReader::new(Cursor::new(&mut cert));
-    let parsed = rustls_pemfile::read_one(&mut reader)
-        .map_err(|e| Error::CertificateParseError(e.to_string()))?
-        .ok_or_else(|| Error::CertificateParseError("no certificate".to_string()))?;
-    let Item::X509Certificate(der) = parsed else {
-        return Err(Error::CertificateParseError("no certificate".to_string()));
-    };
-
-    let (_, cert) = x509_parser::parse_x509_certificate(&der)?;
-    Ok(Certificate {
-        der: der.clone(),
-        expiry: expiration(cert),
-    })
+pub fn parse_cert(cert: Vec<u8>) -> Result<Certificate, Error> {
+    let der = CertificateDer::from_pem_slice(&cert)
+        .map_err(|e| Error::CertificateParseError(e.to_string()))?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(&der)?;
+    let expiry = expiration(parsed);
+    Ok(Certificate { der, expiry })
 }
 
-fn parse_cert_multi(mut cert: &[u8]) -> Result<Vec<Certificate>, Error> {
-    let mut reader = std::io::BufReader::new(Cursor::new(&mut cert));
-    let parsed: Result<Vec<_>, _> = rustls_pemfile::read_all(&mut reader).collect();
-    parsed
-        .map_err(|e| Error::CertificateParseError(e.to_string()))?
-        .into_iter()
+fn parse_cert_multi(cert: &[u8]) -> Result<Vec<Certificate>, Error> {
+    CertificateDer::pem_slice_iter(cert)
         .map(|p| {
-            let Item::X509Certificate(der) = p else {
-                return Err(Error::CertificateParseError("no certificate".to_string()));
-            };
-            let (_, cert) = x509_parser::parse_x509_certificate(&der)?;
-            Ok(Certificate {
-                der: der.clone(),
-                expiry: expiration(cert),
-            })
+            let der = p.map_err(|e| Error::CertificateParseError(e.to_string()))?;
+            let (_, parsed) = x509_parser::parse_x509_certificate(&der)?;
+            let expiry = expiration(parsed);
+            Ok(Certificate { der, expiry })
         })
         .collect()
 }
 
-fn parse_key(mut key: &[u8]) -> Result<PrivateKeyDer<'static>, Error> {
-    let mut reader = std::io::BufReader::new(Cursor::new(&mut key));
-    let parsed = rustls_pemfile::read_one(&mut reader)
-        .map_err(|e| Error::CertificateParseError(e.to_string()))?
-        .ok_or_else(|| Error::CertificateParseError("no key".to_string()))?;
-    match parsed {
-        Item::Pkcs8Key(c) => Ok(PrivateKeyDer::Pkcs8(c)),
-        _ => Err(Error::CertificateParseError("no key".to_string())),
-    }
+fn parse_key(key: &[u8]) -> Result<PrivateKeyDer<'static>, Error> {
+    PrivatePkcs8KeyDer::from_pem_slice(key)
+        .map(PrivateKeyDer::Pkcs8)
+        .map_err(|e| Error::CertificateParseError(e.to_string()))
 }
 
 impl WorkloadCertificate {
