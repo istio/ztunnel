@@ -17,8 +17,7 @@ use notify_debouncer_full::{
     DebounceEventResult, Debouncer, FileIdMap, new_debouncer_opt, notify::RecursiveMode,
 };
 use rustls::pki_types::CertificateRevocationListDer;
-use rustls_pemfile::Item;
-use std::io::Cursor;
+use rustls::pki_types::pem::PemObject;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -213,16 +212,9 @@ impl CrlManager {
     fn parse_pem_crls(
         pem_data: &[u8],
     ) -> Result<Vec<CertificateRevocationListDer<'static>>, CrlError> {
-        let mut reader = std::io::BufReader::new(Cursor::new(pem_data));
-
-        rustls_pemfile::read_all(&mut reader)
-            .filter_map(|result| match result {
-                Ok(Item::Crl(crl)) => Some(Ok(crl)),
-                Ok(_) => None, // skip non-CRL items
-                Err(e) => Some(Err(CrlError::ParseError(format!(
-                    "failed to parse PEM: {}",
-                    e
-                )))),
+        CertificateRevocationListDer::pem_slice_iter(pem_data)
+            .map(|result| {
+                result.map_err(|e| CrlError::ParseError(format!("failed to parse PEM: {}", e)))
             })
             .collect()
     }
