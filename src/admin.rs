@@ -14,7 +14,7 @@
 
 use crate::config::Config;
 use crate::hyper_util::{Server, empty_response, plaintext_response};
-use crate::identity::SecretManager;
+use crate::identity::{CacheKey, SecretManager};
 use crate::state::DemandProxyState;
 use crate::tls::Certificate;
 use crate::version::BuildInfo;
@@ -84,6 +84,10 @@ pub struct CertDump {
 #[serde(rename_all = "camelCase")]
 pub struct CertsDump {
     identity: String,
+    // Pod UID, set only for workload-keyed cache entries. It separates rows
+    // that share an identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uid: Option<String>,
     state: String,
     cert_chain: Vec<CertDump>,
     root_certs: Vec<CertDump>,
@@ -217,9 +221,13 @@ fn dump_cert(cert: &Certificate) -> CertDump {
 
 async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
     let mut dump = cert_manager
-        .collect_certs(|id, certs| {
+        .collect_certs(|key, certs| {
             let mut dump = CertsDump {
-                identity: id.to_string(),
+                identity: key.identity().to_string(),
+                uid: match key {
+                    CacheKey::Identity(_) => None,
+                    CacheKey::Workload { uid, .. } => Some(uid.to_string()),
+                },
                 ..Default::default()
             };
             use crate::identity::CertState::*;
@@ -239,8 +247,8 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
             dump
         })
         .await;
-    // Sort for determinism.
-    dump.sort_by(|a, b| a.identity.cmp(&b.identity));
+    // Sort for determinism. The uid breaks ties between same-identity entries.
+    dump.sort_by(|a, b| a.identity.cmp(&b.identity).then_with(|| a.uid.cmp(&b.uid)));
     dump
 }
 
