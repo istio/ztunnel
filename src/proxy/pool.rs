@@ -17,22 +17,24 @@ use super::{Error, SocketFactory};
 use super::{LocalWorkloadInformation, h2};
 use std::time::Duration;
 
-use std::collections::hash_map::DefaultHasher;
-
 use std::hash::{Hash, Hasher};
+use std::ops::{Deref, DerefMut};
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Mutex;
+#[cfg(any(test, feature = "testing"))]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
-use tokio::sync::watch;
+use rand::Rng;
+use tokio::sync::Notify;
+use tokio::sync::{oneshot, watch};
+use tokio::time::Instant;
 
-use tokio::sync::Mutex;
 use tracing::{Instrument, debug, trace};
 
 use crate::baggage::Baggage;
 use crate::config;
-
-use flurry;
 
 use crate::proxy::h2::H2Stream;
 use crate::proxy::h2::client::{H2ConnectClient, WorkloadKey};
@@ -50,23 +52,150 @@ use tokio::io;
 #[derive(Clone)]
 pub struct WorkloadHBONEPool {
     state: Arc<PoolState>,
-    pool_watcher: watch::Receiver<bool>,
 }
 
-// PoolState is effectively the gnarly inner state stuff that needs thread/task sync, and should be wrapped in a Mutex.
+// PoolState is effectively the gnarly inner state stuff that needs thread/task sync.
 struct PoolState {
-    pool_notifier: watch::Sender<bool>, // This is already impl clone? rustc complains that it isn't, tho
-    timeout_tx: watch::Sender<bool>, // This is already impl clone? rustc complains that it isn't, tho
+    timeout_tx: watch::Sender<bool>,
+    timeout_rx: watch::Receiver<bool>,
+    connect_drain_tx: watch::Sender<bool>,
+    connect_drain_rx: watch::Receiver<bool>,
     // this is effectively just a convenience data type - a rwlocked hashmap with keying and LRU drops
     // and has no actual hyper/http/connection logic.
-    connected_pool: Arc<pingora_pool::ConnectionPool<H2ConnectClient>>,
-    // this must be an atomic/concurrent-safe list-of-locks, so we can lock per-key, not globally, and avoid holding up all conn attempts
-    established_conn_writelock: flurry::HashMap<u64, Option<Arc<Mutex<()>>>>,
+    connected_pool: Arc<pingora_pool::ConnectionPool<PooledConnection>>,
+    entries: flurry::HashMap<u64, Arc<PoolEntry>>,
     pool_unused_release_timeout: Duration,
     // This is merely a counter to track the overall number of conns this pool spawns
     // to ensure we get unique poolkeys-per-new-conn, it is not a limit
     pool_global_conn_count: AtomicI32,
-    spawner: ConnSpawner,
+    factory: Arc<dyn ConnectionFactory>,
+    draining: AtomicBool,
+    #[cfg(any(test, feature = "testing"))]
+    synchronization_wakeups: AtomicU64,
+    #[cfg(any(test, feature = "testing"))]
+    unrelated_wakeups: AtomicU64,
+}
+
+struct PoolEntry {
+    key: WorkloadKey,
+    hash_key: u64,
+    inner: Mutex<EntryInner>,
+    notify: Notify,
+    pooled: AtomicUsize,
+}
+
+struct EntryInner {
+    state: EntryState,
+    transition: u64,
+    mapped: bool,
+    users: usize,
+    waiters: usize,
+    connections: usize,
+}
+
+#[derive(Clone, Copy)]
+enum EntryState {
+    Empty,
+    Connecting {
+        failures: u8,
+    },
+    Backoff {
+        until: Instant,
+        attempts: u8,
+        transition: u64,
+    },
+}
+
+enum EntryAction {
+    Create,
+    Wait(WaiterGuard),
+    Backoff(Instant, WaiterGuard),
+}
+
+struct EntryHandle {
+    pool: std::sync::Weak<PoolState>,
+    entry: Arc<PoolEntry>,
+}
+
+impl Drop for EntryHandle {
+    fn drop(&mut self) {
+        if self.entry.remove_user()
+            && let Some(pool) = self.pool.upgrade()
+        {
+            pool.cleanup_entry(&self.entry);
+        }
+    }
+}
+
+struct WaiterGuard {
+    entry: Arc<PoolEntry>,
+}
+
+impl Drop for WaiterGuard {
+    fn drop(&mut self) {
+        self.entry.remove_waiter();
+    }
+}
+
+struct CreationGuard {
+    entry: Arc<PoolEntry>,
+    active: bool,
+}
+
+struct ConnectionCheckoutGuard {
+    pool: std::sync::Weak<PoolState>,
+    connection: Option<PooledConnection>,
+}
+
+impl Drop for CreationGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.entry.mark_cancelled();
+        }
+    }
+}
+
+impl CreationGuard {
+    fn complete(&mut self) {
+        self.active = false;
+    }
+}
+
+impl ConnectionCheckoutGuard {
+    fn new(pool: &Arc<PoolState>, connection: PooledConnection) -> Self {
+        Self {
+            pool: Arc::downgrade(pool),
+            connection: Some(connection),
+        }
+    }
+
+    fn connection(&self) -> &PooledConnection {
+        self.connection
+            .as_ref()
+            .expect("checked-out connection must be present")
+    }
+
+    fn connection_mut(&mut self) -> &mut PooledConnection {
+        self.connection
+            .as_mut()
+            .expect("checked-out connection must be present")
+    }
+
+    fn into_connection(mut self) -> PooledConnection {
+        self.connection
+            .take()
+            .expect("checked-out connection must be present")
+    }
+}
+
+impl Drop for ConnectionCheckoutGuard {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take()
+            && let Some(pool) = self.pool.upgrade()
+        {
+            pool.recover_capacity(connection);
+        }
+    }
 }
 
 struct ConnSpawner {
@@ -78,9 +207,305 @@ struct ConnSpawner {
     metrics: Arc<crate::proxy::Metrics>,
 }
 
-// Does nothing but spawn new conns when asked
-impl ConnSpawner {
+#[async_trait::async_trait]
+trait ConnectionFactory: Send + Sync {
+    async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error>;
+}
+
+#[cfg(test)]
+struct BlockingConnectionFactory {
+    started: Arc<Notify>,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl ConnectionFactory for BlockingConnectionFactory {
+    async fn new_pool_conn(&self, _key: WorkloadKey) -> Result<H2ConnectClient, Error> {
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[derive(Clone)]
+struct PooledConnection {
+    client: H2ConnectClient,
+    meta: pingora_pool::ConnectionMeta,
+    entry: Arc<PoolEntry>,
+    idle_reset: Arc<IdleReset>,
+}
+
+struct IdlePeriod {
+    generation: u64,
+    deadline: Instant,
+    evict: Arc<Notify>,
+    pickup: oneshot::Receiver<bool>,
+}
+
+struct IdleReset {
+    inner: Mutex<IdleResetInner>,
+    notify: Notify,
+    #[cfg(test)]
+    waiting_without_period: Notify,
+    #[cfg(test)]
+    pause_checkout_after_pickup: AtomicBool,
+    #[cfg(test)]
+    checkout_picked_up: Notify,
+}
+
+struct IdleResetInner {
+    active: bool,
+    in_pool: bool,
+    generation: u64,
+    latest: Option<IdlePeriod>,
+}
+
+impl Deref for PooledConnection {
+    type Target = H2ConnectClient;
+
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
+
+impl DerefMut for PooledConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.client
+    }
+}
+
+impl IdleReset {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(IdleResetInner {
+                active: true,
+                in_pool: false,
+                generation: 0,
+                latest: None,
+            }),
+            notify: Notify::new(),
+            #[cfg(test)]
+            waiting_without_period: Notify::new(),
+            #[cfg(test)]
+            pause_checkout_after_pickup: AtomicBool::new(false),
+            #[cfg(test)]
+            checkout_picked_up: Notify::new(),
+        }
+    }
+
+    fn take_latest(&self) -> Option<IdlePeriod> {
+        self.inner.lock().unwrap().latest.take()
+    }
+
+    fn is_active(&self) -> bool {
+        self.inner.lock().unwrap().active
+    }
+
+    #[cfg(test)]
+    fn pause_checkout_after_pickup(&self) {
+        if self.pause_checkout_after_pickup.load(Ordering::Acquire) {
+            self.checkout_picked_up.notify_waiters();
+            while self.pause_checkout_after_pickup.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
+impl PoolEntry {
+    fn new(key: WorkloadKey, hash_key: u64) -> Self {
+        Self {
+            key,
+            hash_key,
+            inner: Mutex::new(EntryInner {
+                state: EntryState::Empty,
+                transition: 0,
+                mapped: true,
+                users: 0,
+                waiters: 0,
+                connections: 0,
+            }),
+            notify: Notify::new(),
+            pooled: AtomicUsize::new(0),
+        }
+    }
+
+    fn add_user(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        debug_assert!(inner.mapped);
+        inner.users += 1;
+    }
+
+    fn try_add_user(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.mapped {
+            return false;
+        }
+        inner.users += 1;
+        true
+    }
+
+    fn remove_user(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        debug_assert!(inner.users > 0);
+        inner.users -= 1;
+        Self::is_idle_inner(&inner)
+    }
+
+    fn add_connection(&self) {
+        self.inner.lock().unwrap().connections += 1;
+    }
+
+    fn remove_connection(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        debug_assert!(inner.connections > 0);
+        inner.connections -= 1;
+    }
+
+    fn add_pooled(&self) {
+        self.pooled.fetch_add(1, Ordering::Release);
+    }
+
+    fn remove_pooled(&self) {
+        let previous = self
+            .pooled
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pooled| {
+                pooled.checked_sub(1)
+            });
+        debug_assert!(previous.is_ok(), "pooled connection count underflow");
+    }
+
+    fn remove_waiter(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        debug_assert!(inner.waiters > 0);
+        inner.waiters -= 1;
+    }
+
+    fn wait_action(self: &Arc<Self>) -> EntryAction {
+        let mut inner = self.inner.lock().unwrap();
+        self.wait_action_locked(&mut inner)
+    }
+
+    fn wait_action_locked(self: &Arc<Self>, inner: &mut EntryInner) -> EntryAction {
+        inner.waiters += 1;
+        EntryAction::Wait(WaiterGuard {
+            entry: self.clone(),
+        })
+    }
+
+    fn next_action(self: &Arc<Self>) -> EntryAction {
+        if self.pooled.load(Ordering::Acquire) > 0 {
+            return self.wait_action();
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if self.pooled.load(Ordering::Acquire) > 0 {
+            return self.wait_action_locked(&mut inner);
+        }
+        match inner.state {
+            EntryState::Empty => {
+                inner.transition = inner.transition.wrapping_add(1);
+                inner.state = EntryState::Connecting { failures: 0 };
+                EntryAction::Create
+            }
+            EntryState::Connecting { .. } => self.wait_action_locked(&mut inner),
+            EntryState::Backoff { until, .. } if until <= Instant::now() => {
+                let EntryState::Backoff { attempts, .. } = inner.state else {
+                    unreachable!()
+                };
+                inner.transition = inner.transition.wrapping_add(1);
+                inner.state = EntryState::Connecting { failures: attempts };
+                EntryAction::Create
+            }
+            EntryState::Backoff { until, .. } => {
+                inner.waiters += 1;
+                EntryAction::Backoff(
+                    until,
+                    WaiterGuard {
+                        entry: self.clone(),
+                    },
+                )
+            }
+        }
+    }
+
+    fn mark_success(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.transition = inner.transition.wrapping_add(1);
+        inner.state = EntryState::Empty;
+        drop(inner);
+        self.notify.notify_one();
+    }
+
+    fn mark_failure(&self) -> (Instant, u64) {
+        let mut inner = self.inner.lock().unwrap();
+        let failures = match inner.state {
+            EntryState::Connecting { failures } => failures,
+            _ => 0,
+        };
+        let attempts = failures.saturating_add(1);
+        let exponent = u32::from(attempts.saturating_sub(1).min(6));
+        let base_ms = 25u64.saturating_mul(1u64 << exponent).min(1_000);
+        let jitter_ms = rand::rng().random_range(0..=base_ms / 2);
+        let until = Instant::now() + Duration::from_millis(base_ms + jitter_ms);
+        inner.transition = inner.transition.wrapping_add(1);
+        let transition = inner.transition;
+        inner.state = EntryState::Backoff {
+            until,
+            attempts,
+            transition,
+        };
+        drop(inner);
+        self.notify.notify_waiters();
+        (until, transition)
+    }
+
+    fn expire_backoff(&self, expected_transition: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        if matches!(
+            inner.state,
+            EntryState::Backoff { transition, .. } if transition == expected_transition
+        ) {
+            inner.transition = inner.transition.wrapping_add(1);
+            inner.state = EntryState::Empty;
+            drop(inner);
+            self.notify.notify_waiters();
+        }
+    }
+
+    fn mark_cancelled(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.transition = inner.transition.wrapping_add(1);
+        inner.state = EntryState::Empty;
+        drop(inner);
+        self.notify.notify_waiters();
+    }
+
+    fn try_tombstone_if_idle(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.mapped || !Self::is_idle_inner(&inner) {
+            return false;
+        }
+        inner.mapped = false;
+        true
+    }
+
+    fn is_idle_inner(inner: &EntryInner) -> bool {
+        inner.users == 0
+            && inner.waiters == 0
+            && inner.connections == 0
+            && matches!(inner.state, EntryState::Empty)
+    }
+}
+
+#[async_trait::async_trait]
+impl ConnectionFactory for ConnSpawner {
+    // Does nothing but spawn new conns when asked.
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error> {
+        self.connect(key).await
+    }
+}
+
+impl ConnSpawner {
+    async fn connect(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error> {
         debug!("spawning new pool conn for {}", key);
 
         let cert = self.local_workload.fetch_certificate().await?;
@@ -127,63 +552,225 @@ impl ConnSpawner {
 }
 
 impl PoolState {
-    // This simply puts the connection back into the inner pool,
-    // and sets up a timed popper, which will resolve
-    // - when this reference is popped back out of the inner pool (doing nothing)
-    // - when this reference is evicted from the inner pool (doing nothing)
-    // - when the timeout_idler is drained (will pop)
-    // - when the timeout is hit (will pop)
-    //
-    // Idle poppers are safe to invoke if the conn they are popping is already gone
-    // from the inner queue, so we will start one for every insert, let them run or terminate on their own,
-    // and poll them to completion on shutdown - any duplicates from repeated checkouts/checkins of the same conn
-    // will simply resolve as a no-op in order.
-    //
+    fn hash_key(workload_key: &WorkloadKey) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        workload_key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    fn record_synchronization_wakeup(&self, entry: &PoolEntry, workload_key: &WorkloadKey) {
+        self.synchronization_wakeups.fetch_add(1, Ordering::Relaxed);
+        if &entry.key != workload_key {
+            self.unrelated_wakeups.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     // Note that "idle" in the context of this pool means "no one has asked for it or dropped it in X time, so prune it".
     //
-    // Pruning the idle connection from the pool does not close it - it simply ensures the pool stops holding a ref.
-    // hyper self-closes client conns when all refs are dropped and streamcount is 0, so pool consumers must
-    // drop their checked out conns and/or terminate their streams as well.
-    //
-    // Note that this simply removes the client ref from this pool - if other things hold client/streamrefs refs,
-    // they must also drop those before the underlying connection is fully closed.
-    fn maybe_checkin_conn(&self, conn: H2ConnectClient, pool_key: pingora_pool::ConnectionMeta) {
-        if conn.will_be_at_max_streamcount() {
+    // Each actual H2 connection owns one idle monitor task. Repeated checkout/check-in cycles reset
+    // that task with a new generation instead of spawning another task. The generation prevents an
+    // expiration selected concurrently with a newer check-in from removing the newer idle period.
+    fn maybe_checkin_conn(
+        self: &Arc<Self>,
+        conn: &PooledConnection,
+        capacity_recovered: bool,
+    ) -> bool {
+        if self.draining.load(Ordering::Acquire) {
+            return false;
+        }
+        if capacity_recovered {
+            if !conn.has_stream_capacity() {
+                return false;
+            }
+        } else if conn.will_be_at_max_streamcount() {
             debug!(
                 "checked out connection for {:?} is now at max streamcount; removing from pool",
-                pool_key
+                conn.meta
             );
+            return false;
+        }
+
+        let mut idle = conn.idle_reset.inner.lock().unwrap();
+        if !idle.active || idle.in_pool {
+            return false;
+        }
+        idle.generation = idle.generation.wrapping_add(1);
+        let generation = idle.generation;
+        let meta = conn.meta.clone();
+        conn.entry.add_pooled();
+        let (evict, pickup) = self.connected_pool.put(&meta, conn.clone());
+        idle.in_pool = true;
+        idle.latest = Some(IdlePeriod {
+            generation,
+            deadline: Instant::now() + self.pool_unused_release_timeout,
+            evict,
+            pickup,
+        });
+        drop(idle);
+        conn.entry.notify.notify_one();
+        conn.idle_reset.notify.notify_one();
+        true
+    }
+
+    fn recover_capacity(self: &Arc<Self>, mut conn: PooledConnection) {
+        if conn.ready_to_use() {
+            self.maybe_checkin_conn(&conn, true);
+        } else {
+            let mut idle = conn.idle_reset.inner.lock().unwrap();
+            idle.active = false;
+            idle.latest = None;
+            if idle.in_pool {
+                self.connected_pool.pop_closed(&conn.meta);
+                conn.entry.remove_pooled();
+            }
+            idle.in_pool = false;
+            drop(idle);
+            conn.idle_reset.notify.notify_one();
+            conn.entry.notify.notify_waiters();
+        }
+    }
+
+    fn entry_for_key(self: &Arc<Self>, workload_key: &WorkloadKey) -> Result<EntryHandle, Error> {
+        let hash_key = Self::hash_key(workload_key);
+        loop {
+            let guard = self.entries.guard();
+            if let Some(entry) = self.entries.get(&hash_key, &guard).cloned() {
+                if entry.key != *workload_key {
+                    return Err(Error::Generic(
+                        "connection pool hash collision for workload key".into(),
+                    ));
+                }
+                if entry.try_add_user() {
+                    return Ok(EntryHandle {
+                        pool: Arc::downgrade(self),
+                        entry,
+                    });
+                }
+                self.cleanup_entry(&entry);
+                std::hint::spin_loop();
+                continue;
+            }
+
+            let entry = Arc::new(PoolEntry::new(workload_key.clone(), hash_key));
+            entry.add_user();
+            match self.entries.try_insert(hash_key, entry.clone(), &guard) {
+                Ok(_) => {
+                    return Ok(EntryHandle {
+                        pool: Arc::downgrade(self),
+                        entry,
+                    });
+                }
+                Err(error) => {
+                    let current = error.current.clone();
+                    if current.key != *workload_key {
+                        return Err(Error::Generic(
+                            "connection pool hash collision for workload key".into(),
+                        ));
+                    }
+                    if current.try_add_user() {
+                        return Ok(EntryHandle {
+                            pool: Arc::downgrade(self),
+                            entry: current,
+                        });
+                    }
+                    self.cleanup_entry(&current);
+                    std::hint::spin_loop();
+                }
+            }
+        }
+    }
+
+    fn cleanup_entry(&self, expected: &Arc<PoolEntry>) {
+        if !expected.try_tombstone_if_idle() {
             return;
         }
-        let (evict, pickup) = self.connected_pool.put(&pool_key, conn);
-        let rx = self.spawner.timeout_rx.clone();
-        let pool_ref = self.connected_pool.clone();
-        let pool_key_ref = pool_key.clone();
-        let release_timeout = self.pool_unused_release_timeout;
+
+        let guard = self.entries.guard();
+        let Some(entry) = self.entries.get(&expected.hash_key, &guard) else {
+            return;
+        };
+        if Arc::ptr_eq(entry, expected) {
+            trace!("removing unused pool entry for {}", expected.key);
+            self.entries.remove(&expected.hash_key, &guard);
+        }
+    }
+
+    fn begin_creation(&self, entry: &Arc<PoolEntry>) -> CreationGuard {
+        CreationGuard {
+            entry: entry.clone(),
+            active: true,
+        }
+    }
+
+    fn publish_success(
+        self: &Arc<Self>,
+        workload_key: &WorkloadKey,
+        entry: &Arc<PoolEntry>,
+        conn: H2ConnectClient,
+    ) -> PooledConnection {
+        let meta = pingora_pool::ConnectionMeta::new(
+            entry.hash_key,
+            self.pool_global_conn_count.fetch_add(1, Ordering::Relaxed),
+        );
+        let idle_reset = Arc::new(IdleReset::new());
+        let pooled = PooledConnection {
+            client: conn,
+            meta,
+            entry: entry.clone(),
+            idle_reset: idle_reset.clone(),
+        };
+        entry.add_connection();
+        self.maybe_checkin_conn(&pooled, false);
         tokio::spawn(
-            async move {
-                debug!("starting an idle timeout for connection {:?}", pool_key_ref);
-                pool_ref
-                    .idle_timeout(&pool_key_ref, Some(release_timeout), evict, rx, pickup)
-                    .await;
-                debug!(
-                    "connection {:?} was removed/checked out/timed out of the pool",
-                    pool_key_ref
-                )
+            IdleMonitor {
+                pool: Arc::downgrade(self),
+                entry: entry.clone(),
+                meta: pooled.meta.clone(),
+                idle_reset,
+                connected_pool: self.connected_pool.clone(),
+                timeout_rx: self.timeout_rx.clone(),
             }
+            .run()
             .in_current_span(),
         );
-        let _ = self.pool_notifier.send(true);
+        debug!(
+            "published connection {:?} for {}",
+            pooled.meta, workload_key
+        );
+        entry.mark_success();
+        pooled
+    }
+
+    fn publish_failure(self: &Arc<Self>, workload_key: &WorkloadKey, entry: &Arc<PoolEntry>) {
+        debug!("connection creation failed for {}", workload_key);
+        let (until, transition) = entry.mark_failure();
+        let pool = Arc::downgrade(self);
+        let entry = entry.clone();
+        let mut connect_drain_rx = self.connect_drain_rx.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep_until(until) => {
+                    entry.expire_backoff(transition);
+                }
+                _ = connect_drain_rx.changed() => {
+                    entry.mark_cancelled();
+                }
+            }
+            if let Some(pool) = pool.upgrade() {
+                pool.cleanup_entry(&entry);
+            }
+        });
     }
 
     // Since we are using a hash key to do lookup on the inner pingora pool, do a get guard
     // to make sure what we pull out actually deep-equals the workload_key, to avoid *sigh* crossing the streams.
     fn guarded_get(
         &self,
-        hash_key: &u64,
+        hash_key: u64,
         workload_key: &WorkloadKey,
-    ) -> Result<Option<H2ConnectClient>, Error> {
-        match self.connected_pool.get(hash_key) {
+    ) -> Result<Option<PooledConnection>, Error> {
+        match self.connected_pool.get(&hash_key) {
             None => Ok(None),
             Some(conn) => match Self::enforce_key_integrity(conn, workload_key) {
                 Err(e) => Err(e),
@@ -198,147 +785,206 @@ impl PoolState {
     //
     // this is a final safety check for collisions, we will throw up our hands and refuse to return the conn
     fn enforce_key_integrity(
-        conn: H2ConnectClient,
+        conn: PooledConnection,
         expected_key: &WorkloadKey,
-    ) -> Result<H2ConnectClient, Error> {
+    ) -> Result<PooledConnection, Error> {
         match conn.is_for_workload(expected_key) {
             Ok(()) => Ok(conn),
             Err(e) => Err(e),
         }
     }
 
-    // 1. Tries to get a writelock.
-    // 2. If successful, hold it, spawn a new connection, check it in, return a clone of it.
-    // 3. If not successful, return nothing.
-    //
-    // This is useful if we want to race someone else to the writelock to spawn a connection,
-    // and expect the losers to queue up and wait for the (singular) winner of the writelock
-    //
-    // This function should ALWAYS return a connection if it wins the writelock for the provided key.
-    // This function should NEVER return a connection if it does not win the writelock for the provided key.
-    // This function should ALWAYS propagate Error results to the caller
-    //
-    // It is important that the *initial* check here is authoritative, hence the locks, as
-    // we must know if this is a connection for a key *nobody* has tried to start yet
-    // (i.e. no writelock for our key in the outer map)
-    // or if other things have already established conns for this key (writelock for our key in the outer map).
-    //
-    // This is so we can backpressure correctly if 1000 tasks all demand a new connection
-    // to the same key at once, and not eagerly open 1000 tunnel connections.
-    async fn start_conn_if_win_writelock(
-        &self,
+    fn checkout_existing_conn(
+        self: &Arc<Self>,
+        entry: &PoolEntry,
         workload_key: &WorkloadKey,
-        pool_key: &pingora_pool::ConnectionMeta,
-    ) -> Result<Option<H2ConnectClient>, Error> {
-        let inner_conn_lock = {
-            trace!("getting keyed lock out of lockmap");
-            let guard = self.established_conn_writelock.guard();
-
-            let exist_conn_lock = self
-                .established_conn_writelock
-                .get(&pool_key.key, &guard)
-                .unwrap();
-            trace!("got keyed lock out of lockmap");
-            exist_conn_lock.as_ref().unwrap().clone()
-        };
-
-        trace!("attempting to win connlock for {}", workload_key);
-
-        let inner_lock = inner_conn_lock.try_lock();
-        match inner_lock {
-            Ok(_guard) => {
-                // BEGIN take inner writelock
-                debug!("nothing else is creating a conn and we won the lock, make one");
-                let client = self.spawner.new_pool_conn(workload_key.clone()).await?;
-
-                debug!(
-                    "checking in new conn for {} with pk {:?}",
-                    workload_key, pool_key
-                );
-                self.maybe_checkin_conn(client.clone(), pool_key.clone());
-                Ok(Some(client))
-                // END take inner writelock
-            }
-            Err(_) => {
-                debug!(
-                    "did not win connlock for {}, something else has it",
-                    workload_key
-                );
-                Ok(None)
-            }
-        }
-    }
-
-    // Does an initial, naive check to see if we have a writelock inserted into the map for this key
-    //
-    // If we do, take the writelock for that key, clone (or create) a connection, check it back in,
-    // and return a cloned ref, then drop the writelock.
-    //
-    // Otherwise, return None.
-    //
-    // This function should ALWAYS return a connection if a writelock exists for the provided key.
-    // This function should NEVER return a connection if no writelock exists for the provided key.
-    // This function should ALWAYS propagate Error results to the caller
-    //
-    // It is important that the *initial* check here is authoritative, hence the locks, as
-    // we must know if this is a connection for a key *nobody* has tried to start yet
-    // (i.e. no writelock for our key in the outer map)
-    // or if other things have already established conns for this key (writelock for our key in the outer map).
-    //
-    // This is so we can backpressure correctly if 1000 tasks all demand a new connection
-    // to the same key at once, and not eagerly open 1000 tunnel connections.
-    async fn checkout_conn_under_writelock(
-        &self,
-        workload_key: &WorkloadKey,
-        pool_key: &pingora_pool::ConnectionMeta,
-    ) -> Result<Option<H2ConnectClient>, Error> {
-        let found_conn = {
-            trace!("pool connect outer map - take guard");
-            let guard = self.established_conn_writelock.guard();
-
-            trace!("pool connect outer map - check for keyed mutex");
-            let exist_conn_lock = self.established_conn_writelock.get(&pool_key.key, &guard);
-            exist_conn_lock.and_then(|e_conn_lock| e_conn_lock.clone())
-        };
-        let Some(exist_conn_lock) = found_conn else {
-            return Ok(None);
-        };
-        debug!(
-            "checkout - found mutex for pool key {:?}, waiting for writelock",
-            pool_key
-        );
-        let _conn_lock = exist_conn_lock.as_ref().lock().await;
-
-        trace!(
-            "checkout - got writelock for conn with key {} and hash {:?}",
-            workload_key, pool_key.key
-        );
-        let returned_connection = loop {
-            match self.guarded_get(&pool_key.key, workload_key)? {
+    ) -> Result<Option<PooledConnection>, Error> {
+        loop {
+            match self.guarded_get(entry.hash_key, workload_key)? {
                 Some(mut existing) => {
-                    if !existing.ready_to_use() {
-                        // We checked this out, and will not check it back in
-                        // Loop again to find another/make a new one
+                    let idle_reset = existing.idle_reset.clone();
+                    #[cfg(test)]
+                    idle_reset.pause_checkout_after_pickup();
+                    let mut idle = idle_reset.inner.lock().unwrap();
+                    if !idle.in_pool {
+                        continue;
+                    }
+                    idle.in_pool = false;
+                    idle.generation = idle.generation.wrapping_add(1);
+                    idle.latest = None;
+                    if !idle.active || !existing.ready_to_use() {
                         debug!(
                             "checked out broken connection for {}, dropping it",
                             workload_key
                         );
+                        idle.active = false;
+                        existing.entry.remove_pooled();
+                        drop(idle);
+                        idle_reset.notify.notify_one();
+                        existing.entry.notify.notify_waiters();
                         continue;
                     }
+                    let reinserted = if !existing.will_be_at_max_streamcount() && idle.active {
+                        idle.generation = idle.generation.wrapping_add(1);
+                        let generation = idle.generation;
+                        let meta = existing.meta.clone();
+                        let (evict, pickup) = self.connected_pool.put(&meta, existing.clone());
+                        idle.in_pool = true;
+                        idle.latest = Some(IdlePeriod {
+                            generation,
+                            deadline: Instant::now() + self.pool_unused_release_timeout,
+                            evict,
+                            pickup,
+                        });
+                        true
+                    } else {
+                        existing.entry.remove_pooled();
+                        false
+                    };
+                    drop(idle);
+                    idle_reset.notify.notify_one();
+                    if reinserted {
+                        existing.entry.notify.notify_one();
+                    } else {
+                        existing.entry.notify.notify_waiters();
+                    }
                     debug!("re-using connection for {}", workload_key);
-                    break existing;
+                    return Ok(Some(existing));
                 }
-                None => {
-                    debug!("new connection needed for {}", workload_key);
-                    break self.spawner.new_pool_conn(workload_key.clone()).await?;
-                }
-            };
-        };
+                None => return Ok(None),
+            }
+        }
+    }
 
-        // For any connection, we will check in a copy and return the other unless its already maxed out
-        // TODO: in the future, we can keep track of these and start to use them once they finish some streams.
-        self.maybe_checkin_conn(returned_connection.clone(), pool_key.clone());
-        Ok(Some(returned_connection))
+    fn stop_connecting(&self) {
+        if self.draining.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        debug!("draining HBONE connection pool");
+        let _ = self.connect_drain_tx.send(true);
+        let entries = self
+            .entries
+            .iter(&self.entries.guard())
+            .map(|entry| entry.1)
+            .cloned()
+            .collect::<Vec<_>>();
+        for entry in entries {
+            entry.mark_cancelled();
+        }
+    }
+
+    fn shutdown(&self) {
+        self.stop_connecting();
+        let _ = self.timeout_tx.send(true);
+    }
+}
+
+struct IdleMonitor {
+    pool: std::sync::Weak<PoolState>,
+    entry: Arc<PoolEntry>,
+    meta: pingora_pool::ConnectionMeta,
+    idle_reset: Arc<IdleReset>,
+    connected_pool: Arc<pingora_pool::ConnectionPool<PooledConnection>>,
+    timeout_rx: watch::Receiver<bool>,
+}
+
+impl IdleMonitor {
+    async fn run(mut self) {
+        let mut current: Option<IdlePeriod> = None;
+        loop {
+            let Some(mut idle) = current.take() else {
+                let reset = self.idle_reset.notify.notified();
+                tokio::pin!(reset);
+                reset.as_mut().enable();
+                if let Some(period) = self.idle_reset.take_latest() {
+                    current = Some(period);
+                    continue;
+                }
+                if !self.idle_reset.is_active() {
+                    break;
+                }
+                #[cfg(test)]
+                self.idle_reset.waiting_without_period.notify_waiters();
+                tokio::select! {
+                    _ = &mut reset => {
+                        if !self.idle_reset.is_active() {
+                            break;
+                        }
+                        current = self.idle_reset.take_latest();
+                    }
+                    drain = self.timeout_rx.changed() => {
+                        if drain.is_err() || *self.timeout_rx.borrow() {
+                            self.close(true);
+                            break;
+                        }
+                    }
+                }
+                continue;
+            };
+
+            let expiration = tokio::time::sleep_until(idle.deadline);
+            tokio::pin!(expiration);
+            tokio::select! {
+                biased;
+                _ = self.idle_reset.notify.notified() => {
+                    if !self.idle_reset.is_active() {
+                        break;
+                    }
+                    current = self.idle_reset.take_latest();
+                }
+                drain = self.timeout_rx.changed() => {
+                    if drain.is_err() || *self.timeout_rx.borrow() {
+                        self.close(true);
+                        break;
+                    }
+                    current = Some(idle);
+                }
+                _ = &mut idle.pickup => {
+                    trace!("connection {:?} checked out before idle expiration", self.meta);
+                }
+                _ = idle.evict.notified() => {
+                    trace!("connection {:?} evicted before idle expiration", self.meta);
+                    self.close(false);
+                    break;
+                }
+                _ = &mut expiration => {
+                    let mut reset = self.idle_reset.inner.lock().unwrap();
+                    if reset.active
+                        && reset.in_pool
+                        && reset.generation == idle.generation
+                    {
+                        debug!("connection {:?} reached its idle expiration", self.meta);
+                        reset.active = false;
+                        reset.in_pool = false;
+                        reset.latest = None;
+                        self.connected_pool.pop_closed(&self.meta);
+                        self.entry.remove_pooled();
+                        drop(reset);
+                        self.entry.notify.notify_waiters();
+                        break;
+                    }
+                }
+            }
+        }
+
+        self.entry.remove_connection();
+        if let Some(pool) = self.pool.upgrade() {
+            pool.cleanup_entry(&self.entry);
+        }
+    }
+
+    fn close(&self, remove_from_pool: bool) {
+        let mut reset = self.idle_reset.inner.lock().unwrap();
+        reset.active = false;
+        reset.latest = None;
+        if reset.in_pool {
+            if remove_from_pool {
+                self.connected_pool.pop_closed(&self.meta);
+            }
+            self.entry.remove_pooled();
+            self.entry.notify.notify_waiters();
+        }
+        reset.in_pool = false;
     }
 }
 
@@ -349,7 +995,7 @@ impl Drop for PoolState {
         debug!(
             "poolstate dropping, stopping all connection drivers and cancelling all outstanding eviction timeout spawns"
         );
-        let _ = self.timeout_tx.send(true);
+        self.shutdown();
     }
 }
 
@@ -365,33 +1011,83 @@ impl WorkloadHBONEPool {
         metrics: Arc<crate::proxy::Metrics>,
     ) -> WorkloadHBONEPool {
         let (timeout_tx, timeout_rx) = watch::channel(false);
-        let (timeout_send, timeout_recv) = watch::channel(false);
+        let (connect_drain_tx, connect_drain_rx) = watch::channel(false);
         let pool_duration = cfg.pool_unused_release_timeout;
 
         let spawner = ConnSpawner {
             cfg,
             socket_factory,
             local_workload,
-            timeout_rx: timeout_recv.clone(),
+            timeout_rx: timeout_rx.clone(),
             crl_manager,
             metrics,
         };
 
         Self {
             state: Arc::new(PoolState {
-                pool_notifier: timeout_tx,
-                timeout_tx: timeout_send,
-                // timeout_rx: timeout_recv,
-                // the number here is simply the number of unique src/dest keys
-                // the pool is expected to track before the inner hashmap resizes.
+                timeout_tx,
+                timeout_rx,
+                connect_drain_tx,
+                connect_drain_rx,
                 connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
-                established_conn_writelock: flurry::HashMap::new(),
+                entries: flurry::HashMap::new(),
                 pool_unused_release_timeout: pool_duration,
                 pool_global_conn_count: AtomicI32::new(0),
-                spawner,
+                factory: Arc::new(spawner),
+                draining: AtomicBool::new(false),
+                #[cfg(any(test, feature = "testing"))]
+                synchronization_wakeups: AtomicU64::new(0),
+                #[cfg(any(test, feature = "testing"))]
+                unrelated_wakeups: AtomicU64::new(0),
             }),
-            pool_watcher: timeout_rx,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn blocking_for_test(idle: Duration) -> (Self, Arc<Notify>) {
+        let started = Arc::new(Notify::new());
+        let factory = Arc::new(BlockingConnectionFactory {
+            started: started.clone(),
+        });
+        let (timeout_tx, timeout_rx) = watch::channel(false);
+        let (connect_drain_tx, connect_drain_rx) = watch::channel(false);
+        let pool = Self {
+            state: Arc::new(PoolState {
+                timeout_tx,
+                timeout_rx,
+                connect_drain_tx,
+                connect_drain_rx,
+                connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
+                entries: flurry::HashMap::new(),
+                pool_unused_release_timeout: idle,
+                pool_global_conn_count: AtomicI32::new(0),
+                factory,
+                draining: AtomicBool::new(false),
+                synchronization_wakeups: AtomicU64::new(0),
+                unrelated_wakeups: AtomicU64::new(0),
+            }),
+        };
+        (pool, started)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shutdown(&self) {
+        self.state.shutdown();
+    }
+
+    pub(crate) fn watch_drain(&self, drain: crate::drain::DrainWatcher) {
+        let pool = self.clone();
+        tokio::spawn(
+            async move {
+                let release = drain.wait_for_drain().await;
+                match release.mode() {
+                    crate::drain::DrainMode::Graceful => pool.state.stop_connecting(),
+                    crate::drain::DrainMode::Immediate => pool.state.shutdown(),
+                }
+                drop(release);
+            }
+            .in_current_span(),
+        );
     }
 
     pub async fn send_request_pooled(
@@ -399,11 +1095,19 @@ impl WorkloadHBONEPool {
         workload_key: &WorkloadKey,
         request: http::Request<()>,
     ) -> Result<(H2Stream, Option<Baggage>, Option<watch::Receiver<bool>>), Error> {
-        let mut connection = self.connect(workload_key).await?;
+        let connection = self.connect(workload_key).await?;
+        let mut checkout = ConnectionCheckoutGuard::new(&self.state, connection);
 
         // Surface the tunnel's revocation signal so the caller can attribute a revoked teardown.
-        let revoked = connection.revoked_receiver();
-        let (stream, baggage) = connection.send_request(request).await?;
+        let revoked = checkout.connection().revoked_receiver();
+        let (mut stream, baggage) = checkout.connection_mut().send_request(request).await?;
+        let connection = checkout.into_connection();
+        let pool = Arc::downgrade(&self.state);
+        stream.set_on_close(move || {
+            if let Some(pool) = pool.upgrade() {
+                pool.recover_capacity(connection);
+            }
+        });
         Ok((stream, baggage, revoked))
     }
 
@@ -413,132 +1117,257 @@ impl WorkloadHBONEPool {
     //
     // If many `connects` request a connection to the same dest at once, all will wait until exactly
     // one connection is created, before deciding if they should create more or just use that one.
-    async fn connect(&mut self, workload_key: &WorkloadKey) -> Result<H2ConnectClient, Error> {
+    async fn connect(&mut self, workload_key: &WorkloadKey) -> Result<PooledConnection, Error> {
         trace!("pool connect START");
-        // TODO BML this may not be collision resistant, or a fast hash. It should be resistant enough for workloads tho.
-        // We are doing a deep-equals check at the end to mitigate any collisions, will see about bumping Pingora
-        let mut s = DefaultHasher::new();
-        workload_key.hash(&mut s);
-        let hash_key = s.finish();
-        let pool_key = pingora_pool::ConnectionMeta::new(
-            hash_key,
-            self.state
-                .pool_global_conn_count
-                .fetch_add(1, Ordering::SeqCst),
-        );
-        // First, see if we can naively take an inner lock for our specific key, and get a connection.
-        // This should be the common case, except for the first establishment of a new connection/key.
-        // This will be done under outer readlock (nonexclusive)/inner keyed writelock (exclusive).
+        if self.state.draining.load(Ordering::Acquire) {
+            return Err(Error::WorkloadHBONEPoolDraining);
+        }
+        let entry = self.state.entry_for_key(workload_key)?;
         let existing_conn = self
             .state
-            .checkout_conn_under_writelock(workload_key, &pool_key)
-            .await?;
-
-        // Early return, no need to do anything else
-        if let Some(e) = existing_conn {
+            .checkout_existing_conn(&entry.entry, workload_key)?;
+        if let Some(existing) = existing_conn {
             debug!("initial attempt - found existing conn, done");
-            return Ok(e);
+            return Ok(existing);
         }
 
-        // We couldn't get a writelock for this key. This means nobody has tried to establish any conns for this key yet,
-        // So, we will take a nonexclusive readlock on the outer lockmap, and attempt to insert one.
-        //
-        // (if multiple threads try to insert one, only one will succeed.)
-        {
-            debug!(
-                "didn't find a connection for key {:?}, making sure lockmap has entry",
-                hash_key
-            );
-            let guard = self.state.established_conn_writelock.guard();
-            match self.state.established_conn_writelock.try_insert(
-                hash_key,
-                Some(Arc::new(Mutex::new(()))),
-                &guard,
-            ) {
-                Ok(_) => {
-                    debug!("inserting conn mutex for key {:?} into lockmap", hash_key);
-                }
-                Err(_) => {
-                    debug!("already have conn for key {:?} in lockmap", hash_key);
-                }
+        let mut connect_drain_rx = self.state.connect_drain_rx.clone();
+        loop {
+            if self.state.draining.load(Ordering::Acquire) || *connect_drain_rx.borrow() {
+                return Err(Error::WorkloadHBONEPoolDraining);
             }
-        }
 
-        // If we get here, it means the following are true:
-        // 1. We have a guaranteed sharded mutex in the outer map for our current key
-        // 2. We can now, under readlock(nonexclusive) in the outer map, attempt to
-        // take the inner writelock for our specific key (exclusive).
-        //
-        // This doesn't block other tasks spawning connections against other keys, but DOES block other
-        // tasks spawning connections against THIS key - which is what we want.
+            let notified = entry.entry.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
 
-        // NOTE: The inner, key-specific mutex is a tokio::async::Mutex, and not a stdlib sync mutex.
-        // these differ from the stdlib sync mutex in that they are (slightly) slower
-        // (they effectively sleep the current task) and they can be held over an await.
-        // The tokio docs (rightly) advise you to not use these,
-        // because holding a lock over an await is a great way to create deadlocks if the await you
-        // hold it over does not resolve.
-        //
-        // HOWEVER. Here we know this connection will either establish or timeout (or fail with error)
-        // and we WANT other tasks to go back to sleep if a task is already trying to create a new connection for this key.
-        //
-        // So the downsides are actually useful (we WANT task contention -
-        // to block other parallel tasks from trying to spawn a connection for this key if we are already doing so)
-        trace!("fallback attempt - trying win win connlock");
-        let res = match self
-            .state
-            .start_conn_if_win_writelock(workload_key, &pool_key)
-            .await?
-        {
-            Some(client) => client,
-            None => {
-                debug!("we didn't win the lock, something else is creating a conn, wait for it");
-                // If we get here, it means the following are true:
-                // 1. We have a writelock in the outer map for this key (either we inserted, or someone beat us to it - but it's there)
-                // 2. We could not get the exclusive inner writelock to add a new conn for this key.
-                // 3. Someone else got the exclusive inner writelock, and is adding a new conn for this key.
-                //
-                // So, loop and wait for the pool_watcher to tell us a new conn was enpooled,
-                // so we can pull it out and check it.
-                loop {
-                    match self.pool_watcher.changed().await {
-                        Ok(_) => {
-                            trace!(
-                                "notified a new conn was enpooled, checking for hash {:?}",
-                                hash_key
-                            );
-                            // Notifier fired, try and get a conn out for our key.
-                            let existing_conn = self
-                                .state
-                                .checkout_conn_under_writelock(workload_key, &pool_key)
-                                .await?;
-                            match existing_conn {
-                                None => {
-                                    trace!(
-                                        "woke up on pool notification, but didn't find a conn for {:?} yet",
-                                        hash_key
-                                    );
-                                    continue;
-                                }
-                                Some(e_conn) => {
-                                    debug!("found existing conn after waiting");
-                                    break e_conn;
-                                }
-                            }
-                        }
-                        Err(_) => {
+            if let Some(existing) = self
+                .state
+                .checkout_existing_conn(&entry.entry, workload_key)?
+            {
+                debug!("found existing connection after registering waiter");
+                return Ok(existing);
+            }
+            let action = entry.entry.next_action();
+
+            match action {
+                EntryAction::Create => {
+                    let mut guard = self.state.begin_creation(&entry.entry);
+                    debug!("becoming connection creator for {}", workload_key);
+                    let creation = self.state.factory.new_pool_conn(workload_key.clone());
+                    tokio::pin!(creation);
+                    let result = tokio::select! {
+                        biased;
+                        changed = connect_drain_rx.changed() => {
+                            let _ = changed;
                             return Err(Error::WorkloadHBONEPoolDraining);
+                        }
+                        result = &mut creation => result,
+                    };
+                    match result {
+                        Ok(conn) => {
+                            let client =
+                                self.state.publish_success(workload_key, &entry.entry, conn);
+                            guard.complete();
+                            return Ok(client);
+                        }
+                        Err(err) => {
+                            self.state.publish_failure(workload_key, &entry.entry);
+                            guard.complete();
+                            return Err(err);
+                        }
+                    }
+                }
+                EntryAction::Wait(_waiter) => {
+                    debug!("waiting for a pool entry update for {}", workload_key);
+                    tokio::select! {
+                        biased;
+                        changed = connect_drain_rx.changed() => {
+                            let _ = changed;
+                            return Err(Error::WorkloadHBONEPoolDraining);
+                        }
+                        _ = &mut notified => {}
+                    }
+                    #[cfg(any(test, feature = "testing"))]
+                    self.state
+                        .record_synchronization_wakeup(&entry.entry, workload_key);
+                    if let Some(existing) = self
+                        .state
+                        .checkout_existing_conn(&entry.entry, workload_key)?
+                    {
+                        return Ok(existing);
+                    }
+                }
+                EntryAction::Backoff(until, _waiter) => {
+                    debug!("waiting for connection backoff for {}", workload_key);
+                    let _notified = tokio::select! {
+                        biased;
+                        changed = connect_drain_rx.changed() => {
+                            let _ = changed;
+                            return Err(Error::WorkloadHBONEPoolDraining);
+                        }
+                        _ = &mut notified => true,
+                        _ = tokio::time::sleep_until(until) => false,
+                    };
+                    #[cfg(any(test, feature = "testing"))]
+                    if _notified {
+                        self.state
+                            .record_synchronization_wakeup(&entry.entry, workload_key);
+                        if let Some(existing) = self
+                            .state
+                            .checkout_existing_conn(&entry.entry, workload_key)?
+                        {
+                            return Ok(existing);
                         }
                     }
                 }
             }
-        };
-        Ok(res)
+        }
+    }
+}
+
+#[cfg(feature = "testing")]
+pub mod benchmarks {
+    use super::{
+        ConnectionFactory, PoolState, WorkloadHBONEPool,
+        h2::client::{H2ConnectClient, WorkloadKey},
+    };
+    use std::collections::HashMap;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::watch;
+
+    const BENCHMARK_IDLE_TIMEOUT: Duration = Duration::from_millis(10);
+
+    struct BenchmarkFactory {
+        clients: Arc<HashMap<WorkloadKey, H2ConnectClient>>,
+        factory_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ConnectionFactory for BenchmarkFactory {
+        async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, super::Error> {
+            self.factory_calls.fetch_add(1, Ordering::Relaxed);
+            tokio::task::yield_now().await;
+            self.clients
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("missing benchmark connection").into())
+        }
+    }
+
+    pub struct ProductionPoolFixture {
+        clients: Arc<HashMap<WorkloadKey, H2ConnectClient>>,
+        keys: Arc<Vec<WorkloadKey>>,
+    }
+
+    impl ProductionPoolFixture {
+        pub async fn new(destinations: usize) -> Self {
+            Self::with_max_streams(destinations, u16::MAX).await
+        }
+
+        pub async fn with_max_streams(destinations: usize, max_streams: u16) -> Self {
+            let keys = (0..destinations)
+                .map(|index| WorkloadKey {
+                    src_id: crate::identity::Identity::default(),
+                    dst_id: vec![crate::identity::Identity::default()],
+                    dst: SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        10_000 + u16::try_from(index).unwrap(),
+                    ),
+                    src: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                })
+                .collect::<Vec<_>>();
+            let mut clients = HashMap::with_capacity(keys.len());
+            for key in &keys {
+                clients.insert(
+                    key.clone(),
+                    H2ConnectClient::benchmark_client(key.clone(), max_streams).await,
+                );
+            }
+            Self {
+                clients: Arc::new(clients),
+                keys: Arc::new(keys),
+            }
+        }
+
+        pub fn pool(&self) -> ProductionPool {
+            let factory = Arc::new(BenchmarkFactory {
+                clients: self.clients.clone(),
+                factory_calls: AtomicUsize::new(0),
+            });
+            let (timeout_tx, timeout_rx) = watch::channel(false);
+            let (connect_drain_tx, connect_drain_rx) = watch::channel(false);
+            ProductionPool {
+                pool: WorkloadHBONEPool {
+                    state: Arc::new(PoolState {
+                        timeout_tx,
+                        timeout_rx,
+                        connect_drain_tx,
+                        connect_drain_rx,
+                        connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
+                        entries: flurry::HashMap::new(),
+                        pool_unused_release_timeout: BENCHMARK_IDLE_TIMEOUT,
+                        pool_global_conn_count: super::AtomicI32::new(0),
+                        factory: factory.clone(),
+                        draining: super::AtomicBool::new(false),
+                        synchronization_wakeups: AtomicU64::new(0),
+                        unrelated_wakeups: AtomicU64::new(0),
+                    }),
+                },
+                keys: self.keys.clone(),
+                factory,
+            }
+        }
+    }
+
+    pub struct ProductionPool {
+        pool: WorkloadHBONEPool,
+        keys: Arc<Vec<WorkloadKey>>,
+        factory: Arc<BenchmarkFactory>,
+    }
+
+    impl ProductionPool {
+        pub async fn checkout(&self, key: usize) {
+            let mut pool = self.pool.clone();
+            pool.connect(&self.keys[key]).await.unwrap();
+        }
+
+        pub async fn open_stream(&self, key: usize) -> crate::proxy::h2::H2Stream {
+            let mut pool = self.pool.clone();
+            let request = http::Request::builder()
+                .method(http::Method::CONNECT)
+                .uri("https://benchmark.invalid")
+                .body(())
+                .unwrap();
+            pool.send_request_pooled(&self.keys[key], request)
+                .await
+                .unwrap()
+                .0
+        }
+
+        pub fn factory_calls(&self) -> usize {
+            self.factory.factory_calls.load(Ordering::Relaxed)
+        }
+
+        pub fn wakeups(&self) -> u64 {
+            self.pool
+                .state
+                .synchronization_wakeups
+                .load(Ordering::Relaxed)
+        }
+
+        pub fn unrelated_wakeups(&self) -> u64 {
+            self.pool.state.unrelated_wakeups.load(Ordering::Relaxed)
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
     use std::convert::Infallible;
     use std::net::IpAddr;
     use std::net::SocketAddr;
@@ -553,15 +1382,17 @@ mod test {
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use prometheus_client::registry::Registry;
-    use std::sync::RwLock;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
     use std::sync::atomic::AtomicU32;
+    use std::sync::{Barrier, RwLock};
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-    use tokio::sync::oneshot;
+    use tokio::sync::{Semaphore, oneshot};
 
     use tracing::{Instrument, error};
 
@@ -603,6 +1434,792 @@ mod test {
                 $srv.drop_rx.len()
             )
         };
+    }
+
+    struct MockConnectionFactory {
+        clients: HashMap<WorkloadKey, H2ConnectClient>,
+        calls: Mutex<HashMap<WorkloadKey, usize>>,
+        failures: Mutex<HashMap<WorkloadKey, usize>>,
+        blocked_key: Option<WorkloadKey>,
+        release_first: Arc<Semaphore>,
+    }
+
+    impl MockConnectionFactory {
+        fn new(clients: HashMap<WorkloadKey, H2ConnectClient>) -> Self {
+            Self {
+                clients,
+                calls: Mutex::new(HashMap::new()),
+                failures: Mutex::new(HashMap::new()),
+                blocked_key: None,
+                release_first: Arc::new(Semaphore::new(0)),
+            }
+        }
+
+        fn blocking_first(mut self, key: WorkloadKey) -> Self {
+            self.blocked_key = Some(key);
+            self
+        }
+
+        fn fail_first(self, key: WorkloadKey, failures: usize) -> Self {
+            self.failures.lock().unwrap().insert(key, failures);
+            self
+        }
+
+        fn calls_for(&self, key: &WorkloadKey) -> usize {
+            self.calls.lock().unwrap().get(key).copied().unwrap_or(0)
+        }
+
+        fn release_first(&self) {
+            self.release_first.add_permits(1);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ConnectionFactory for MockConnectionFactory {
+        async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error> {
+            let call = {
+                let mut calls = self.calls.lock().unwrap();
+                let calls = calls.entry(key.clone()).or_default();
+                *calls += 1;
+                *calls
+            };
+
+            if self.blocked_key.as_ref() == Some(&key) && call == 1 {
+                self.release_first
+                    .acquire()
+                    .await
+                    .expect("test semaphore should remain open")
+                    .forget();
+            }
+
+            let should_fail = {
+                let mut failures = self.failures.lock().unwrap();
+                match failures.get_mut(&key) {
+                    Some(remaining) if *remaining > 0 => {
+                        *remaining -= 1;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if should_fail {
+                return Err(io::Error::other("mock connection failure").into());
+            }
+
+            self.clients
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| io::Error::other("missing mock connection").into())
+        }
+    }
+
+    fn pool_with_factory(idle: Duration, factory: Arc<dyn ConnectionFactory>) -> WorkloadHBONEPool {
+        let (timeout_tx, timeout_rx) = watch::channel(false);
+        let (connect_drain_tx, connect_drain_rx) = watch::channel(false);
+        WorkloadHBONEPool {
+            state: Arc::new(PoolState {
+                timeout_tx,
+                timeout_rx,
+                connect_drain_tx,
+                connect_drain_rx,
+                connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
+                entries: flurry::HashMap::new(),
+                pool_unused_release_timeout: idle,
+                pool_global_conn_count: AtomicI32::new(0),
+                factory,
+                draining: AtomicBool::new(false),
+                synchronization_wakeups: AtomicU64::new(0),
+                unrelated_wakeups: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    async fn wait_for_factory_calls(
+        factory: &MockConnectionFactory,
+        key: &WorkloadKey,
+        expected: usize,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while factory.calls_for(key) < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("factory call count should advance");
+    }
+
+    async fn prebuilt_clients(
+        source_pool: &WorkloadHBONEPool,
+        keys: &[WorkloadKey],
+    ) -> HashMap<WorkloadKey, H2ConnectClient> {
+        let mut clients = HashMap::new();
+        for key in keys {
+            let client = source_pool
+                .state
+                .factory
+                .new_pool_conn(key.clone())
+                .await
+                .expect("prebuilt connection should succeed");
+            clients.insert(key.clone(), client);
+        }
+        clients
+    }
+
+    #[test]
+    fn pool_entry_registration_is_atomic_with_cleanup() {
+        let workload_key = WorkloadKey {
+            src_id: Identity::default(),
+            dst_id: vec![Identity::default()],
+            dst: "127.0.0.1:15008".parse().unwrap(),
+            src: "127.0.0.1".parse().unwrap(),
+        };
+        for _ in 0..1_000 {
+            let entry = Arc::new(PoolEntry::new(workload_key.clone(), 1));
+            let barrier = Arc::new(Barrier::new(3));
+            let register = {
+                let entry = entry.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    entry.try_add_user()
+                })
+            };
+            let cleanup = {
+                let entry = entry.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    entry.try_tombstone_if_idle()
+                })
+            };
+            barrier.wait();
+            let registered = register.join().unwrap();
+            let tombstoned = cleanup.join().unwrap();
+            assert_ne!(
+                registered, tombstoned,
+                "registration and cleanup must be mutually exclusive"
+            );
+            if registered {
+                entry.remove_user();
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_same_destination_single_flight() {
+        let (source_pool, srv) = setup_test(200).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory =
+            Arc::new(MockConnectionFactory::new(clients).blocking_first(workload_key.clone()));
+        let pool = pool_with_factory(Duration::from_secs(100), factory.clone());
+
+        let tasks = (0..100)
+            .map(|_| {
+                let mut pool = pool.clone();
+                let workload_key = workload_key.clone();
+                tokio::spawn(async move { pool.connect(&workload_key).await })
+            })
+            .collect::<Vec<_>>();
+
+        wait_for_factory_calls(&factory, &workload_key, 1).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(factory.calls_for(&workload_key), 1);
+        factory.release_first();
+
+        let connections = tokio::time::timeout(Duration::from_secs(2), future::join_all(tasks))
+            .await
+            .expect("same-key waiters should not hang");
+        assert!(
+            connections
+                .into_iter()
+                .all(|result| result.unwrap().is_ok())
+        );
+        assert_eq!(factory.calls_for(&workload_key), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_different_destinations_progress_independently() {
+        let (source_pool, srv) = setup_test(10).await;
+        let key_a = key(&srv, 1);
+        let key_b = key(&srv, 2);
+        let clients = prebuilt_clients(&source_pool, &[key_a.clone(), key_b.clone()]).await;
+        let factory = Arc::new(MockConnectionFactory::new(clients).blocking_first(key_a.clone()));
+        let pool = pool_with_factory(Duration::from_secs(100), factory.clone());
+
+        let mut pool_a = pool.clone();
+        let task_a = {
+            let key_a = key_a.clone();
+            tokio::spawn(async move { pool_a.connect(&key_a).await })
+        };
+        wait_for_factory_calls(&factory, &key_a, 1).await;
+        let mut waiter_pool_a = pool.clone();
+        let waiter_key_a = key_a.clone();
+        let waiter_a = tokio::spawn(async move { waiter_pool_a.connect(&waiter_key_a).await });
+        tokio::task::yield_now().await;
+
+        let mut pool_b = pool.clone();
+        let connection_b = tokio::time::timeout(Duration::from_secs(1), pool_b.connect(&key_b))
+            .await
+            .expect("key B must not wait for key A")
+            .expect("key B connection should succeed");
+        assert_eq!(factory.calls_for(&key_b), 1);
+        assert!(!task_a.is_finished());
+        assert!(!waiter_a.is_finished());
+        assert_eq!(
+            factory.calls_for(&key_a),
+            1,
+            "publishing key B must not wake or advance key A"
+        );
+
+        factory.release_first();
+        task_a.await.unwrap().unwrap();
+        waiter_a.await.unwrap().unwrap();
+        drop(connection_b);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_creator_cancellation_releases_waiters() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory =
+            Arc::new(MockConnectionFactory::new(clients).blocking_first(workload_key.clone()));
+        let pool = pool_with_factory(Duration::from_secs(100), factory.clone());
+
+        let mut creator_pool = pool.clone();
+        let creator_key = workload_key.clone();
+        let creator = tokio::spawn(async move { creator_pool.connect(&creator_key).await });
+        wait_for_factory_calls(&factory, &workload_key, 1).await;
+
+        let mut waiter_pool = pool.clone();
+        let waiter_key = workload_key.clone();
+        let waiter = tokio::spawn(async move { waiter_pool.connect(&waiter_key).await });
+        creator.abort();
+        assert!(matches!(creator.await, Err(error) if error.is_cancelled()));
+
+        wait_for_factory_calls(&factory, &workload_key, 2).await;
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("cancelled creator should release waiter")
+            .unwrap()
+            .unwrap();
+        assert_eq!(factory.calls_for(&workload_key), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_connection_failure_releases_waiters() {
+        let (source_pool, srv) = setup_test(20).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory =
+            Arc::new(MockConnectionFactory::new(clients).fail_first(workload_key.clone(), 1));
+        let pool = pool_with_factory(Duration::from_secs(100), factory.clone());
+
+        let tasks = (0..20)
+            .map(|_| {
+                let mut pool = pool.clone();
+                let workload_key = workload_key.clone();
+                tokio::spawn(async move { pool.connect(&workload_key).await })
+            })
+            .collect::<Vec<_>>();
+
+        let results = tokio::time::timeout(Duration::from_secs(2), future::join_all(tasks))
+            .await
+            .expect("failure waiters should not hang");
+        let (successes, failures): (Vec<_>, Vec<_>) = results
+            .into_iter()
+            .map(Result::unwrap)
+            .partition(Result::is_ok);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(successes.len(), 19);
+        assert_eq!(factory.calls_for(&workload_key), 2);
+
+        let mut retry_pool = pool.clone();
+        retry_pool.connect(&workload_key).await.unwrap();
+        assert_eq!(factory.calls_for(&workload_key), 2);
+    }
+
+    #[tokio::test]
+    async fn pool_lone_failure_backoff_expires_and_cleans_entry() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory =
+            Arc::new(MockConnectionFactory::new(clients).fail_first(workload_key.clone(), 1));
+        let mut pool = pool_with_factory(Duration::from_secs(100), factory);
+        tokio::time::pause();
+
+        assert!(pool.connect(&workload_key).await.is_err());
+        let guard = pool.state.entries.guard();
+        assert!(
+            pool.state
+                .entries
+                .contains_key(&PoolState::hash_key(&workload_key), &guard)
+        );
+        drop(guard);
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            pool.state.entries.is_empty(),
+            "expired backoff without users must release its entry"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_shutdown_releases_creator_and_waiters() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory =
+            Arc::new(MockConnectionFactory::new(clients).blocking_first(workload_key.clone()));
+        let pool = pool_with_factory(Duration::from_secs(100), factory.clone());
+
+        let mut creator_pool = pool.clone();
+        let creator_key = workload_key.clone();
+        let creator = tokio::spawn(async move { creator_pool.connect(&creator_key).await });
+        wait_for_factory_calls(&factory, &workload_key, 1).await;
+
+        let mut waiter_pool = pool.clone();
+        let waiter_key = workload_key.clone();
+        let waiter = tokio::spawn(async move { waiter_pool.connect(&waiter_key).await });
+        tokio::task::yield_now().await;
+        pool.shutdown();
+
+        for task in [creator, waiter] {
+            let result = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .expect("pool shutdown must release connection tasks")
+                .unwrap();
+            assert!(matches!(result, Err(Error::WorkloadHBONEPoolDraining)));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_graceful_drain_releases_creator_and_waiters() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory =
+            Arc::new(MockConnectionFactory::new(clients).blocking_first(workload_key.clone()));
+        let pool = pool_with_factory(Duration::from_secs(100), factory.clone());
+        let (drain_tx, drain_rx) = drain::new();
+        pool.watch_drain(drain_rx);
+
+        let mut creator_pool = pool.clone();
+        let creator_key = workload_key.clone();
+        let creator = tokio::spawn(async move { creator_pool.connect(&creator_key).await });
+        wait_for_factory_calls(&factory, &workload_key, 1).await;
+
+        let mut waiter_pool = pool.clone();
+        let waiter_key = workload_key.clone();
+        let waiter = tokio::spawn(async move { waiter_pool.connect(&waiter_key).await });
+        tokio::task::yield_now().await;
+
+        drain_tx
+            .start_drain_and_wait(crate::drain::DrainMode::Graceful)
+            .await;
+        for task in [creator, waiter] {
+            let result = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .expect("graceful drain must release connection tasks")
+                .unwrap();
+            assert!(matches!(result, Err(Error::WorkloadHBONEPoolDraining)));
+        }
+        assert!(
+            !*pool.state.timeout_rx.borrow(),
+            "graceful drain must not stop active H2 connection drivers"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graceful_drain_keeps_active_hbone_stream_usable() {
+        let (mut pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let request = http::Request::builder()
+            .uri(srv.addr.to_string())
+            .method(http::Method::CONNECT)
+            .version(http::Version::HTTP_2)
+            .body(())
+            .unwrap();
+        let (stream, _, _) = pool
+            .send_request_pooled(&workload_key, request)
+            .await
+            .unwrap();
+        let mut stream = TokioH2Stream::new(stream);
+        let mut greeting = [0; 8];
+        stream.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(&greeting, b"poolsrv\n");
+
+        let (drain_tx, drain_rx) = drain::new();
+        pool.watch_drain(drain_rx.clone());
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (stream_result_tx, stream_result_rx) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            crate::drain::run_with_drain(
+                "pool-graceful-drain-test".to_string(),
+                drain_rx,
+                Duration::from_secs(1),
+                async move |drain, _force_shutdown| {
+                    tokio::spawn(async move {
+                        let _ = ready_tx.send(());
+                        let release = drain.clone().wait_for_drain().await;
+                        stream.write_all(b"still-open").await.unwrap();
+                        let mut echoed = [0; 10];
+                        stream.read_exact(&mut echoed).await.unwrap();
+                        let _ = stream_result_tx.send(echoed);
+                        drop(release);
+                        drop(drain);
+                    });
+                    futures_util::future::pending::<()>().await;
+                },
+            )
+            .await;
+        });
+        ready_rx.await.unwrap();
+        let draining =
+            tokio::spawn(drain_tx.start_drain_and_wait(crate::drain::DrainMode::Graceful));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !pool.state.draining.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pool should observe graceful drain");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), stream_result_rx)
+                .await
+                .expect("active stream should remain usable during graceful drain")
+                .unwrap(),
+            *b"still-open"
+        );
+        worker.await.unwrap();
+        draining.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pool_idle_expiration_is_generation_safe() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory = Arc::new(MockConnectionFactory::new(clients));
+        let mut pool = pool_with_factory(Duration::from_millis(100), factory.clone());
+        tokio::time::pause();
+
+        drop(pool.connect(&workload_key).await.unwrap());
+        assert_eq!(factory.calls_for(&workload_key), 1);
+        tokio::time::advance(Duration::from_millis(75)).await;
+
+        drop(pool.connect(&workload_key).await.unwrap());
+        tokio::time::advance(Duration::from_millis(50)).await;
+        drop(pool.connect(&workload_key).await.unwrap());
+        assert_eq!(
+            factory.calls_for(&workload_key),
+            1,
+            "stale expiration must not remove a newer idle generation"
+        );
+
+        let guard = pool.state.entries.guard();
+        let entry = pool
+            .state
+            .entries
+            .get(&PoolState::hash_key(&workload_key), &guard)
+            .cloned()
+            .unwrap();
+        drop(guard);
+        assert_eq!(entry.inner.lock().unwrap().connections, 1);
+
+        tokio::time::advance(Duration::from_millis(101)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            pool.state.entries.is_empty(),
+            "expired connection should release its unused destination entry"
+        );
+
+        drop(pool.connect(&workload_key).await.unwrap());
+        assert_eq!(factory.calls_for(&workload_key), 2);
+    }
+
+    #[tokio::test]
+    async fn pool_idle_monitor_observes_reinsert_after_pickup() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory = Arc::new(MockConnectionFactory::new(clients));
+        let mut pool = pool_with_factory(Duration::from_millis(100), factory);
+        tokio::time::pause();
+
+        let connection = pool.connect(&workload_key).await.unwrap();
+        let idle_reset = connection.idle_reset.clone();
+        drop(connection);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while idle_reset.inner.lock().unwrap().latest.is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("idle monitor should consume the initial idle period");
+
+        let waiting = idle_reset.waiting_without_period.notified();
+        tokio::pin!(waiting);
+        waiting.as_mut().enable();
+        let picked_up = idle_reset.checkout_picked_up.notified();
+        tokio::pin!(picked_up);
+        picked_up.as_mut().enable();
+        idle_reset
+            .pause_checkout_after_pickup
+            .store(true, Ordering::Release);
+        let state = pool.state.clone();
+        let entry = {
+            let guard = state.entries.guard();
+            state
+                .entries
+                .get(&PoolState::hash_key(&workload_key), &guard)
+                .cloned()
+                .unwrap()
+        };
+        let checkout_key = workload_key.clone();
+        let checkout_entry = entry.clone();
+        let checkout = tokio::task::spawn_blocking(move || {
+            state.checkout_existing_conn(&checkout_entry, &checkout_key)
+        });
+        picked_up.await;
+        waiting.await;
+
+        idle_reset
+            .pause_checkout_after_pickup
+            .store(false, Ordering::Release);
+        drop(checkout.await.unwrap().unwrap().unwrap());
+        tokio::time::advance(Duration::from_millis(101)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            pool.state.entries.is_empty(),
+            "reinserted connection should retain an active idle expiration"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pool_checkout_does_not_double_release_expired_residency() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory = Arc::new(MockConnectionFactory::new(clients));
+        let mut pool = pool_with_factory(Duration::from_secs(100), factory);
+
+        let connection = pool.connect(&workload_key).await.unwrap();
+        let idle_reset = connection.idle_reset.clone();
+        let entry = connection.entry.clone();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while idle_reset.inner.lock().unwrap().latest.is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("idle monitor should consume the initial idle period");
+
+        let picked_up = idle_reset.checkout_picked_up.notified();
+        tokio::pin!(picked_up);
+        picked_up.as_mut().enable();
+        idle_reset
+            .pause_checkout_after_pickup
+            .store(true, Ordering::Release);
+        let state = pool.state.clone();
+        let checkout_key = workload_key.clone();
+        let checkout_entry = entry.clone();
+        let checkout = tokio::task::spawn_blocking(move || {
+            state.checkout_existing_conn(&checkout_entry, &checkout_key)
+        });
+        picked_up.await;
+
+        {
+            let mut idle = idle_reset.inner.lock().unwrap();
+            assert!(idle.in_pool);
+            idle.active = false;
+            idle.in_pool = false;
+            idle.latest = None;
+        }
+        entry.remove_pooled();
+        idle_reset
+            .pause_checkout_after_pickup
+            .store(false, Ordering::Release);
+        assert!(checkout.await.unwrap().unwrap().is_none());
+        assert_eq!(entry.pooled.load(Ordering::Acquire), 0);
+
+        idle_reset.notify.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while entry.inner.lock().unwrap().connections > 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("expired checkout race should release its idle monitor");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_request_creation_releases_connection_capacity() {
+        let (source_pool, srv) = setup_test(10).await;
+        let workload_key = key(&srv, 1);
+        let (client, request_seen, release_response) =
+            H2ConnectClient::test_client_with_blocked_response(workload_key.clone(), 1).await;
+        let factory = Arc::new(MockConnectionFactory::new(HashMap::from([(
+            workload_key.clone(),
+            client,
+        )])));
+        let pool = pool_with_factory(Duration::from_millis(20), factory.clone());
+        let request = http::Request::builder()
+            .uri("https://cancelled-request.test")
+            .method(http::Method::CONNECT)
+            .version(http::Version::HTTP_2)
+            .body(())
+            .unwrap();
+
+        let request_task = {
+            let mut pool = pool.clone();
+            let workload_key = workload_key.clone();
+            tokio::spawn(async move { pool.send_request_pooled(&workload_key, request).await })
+        };
+        request_seen.await.unwrap();
+        request_task.abort();
+        assert!(matches!(
+            request_task.await,
+            Err(error) if error.is_cancelled()
+        ));
+        drop(release_response);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let retry_request = http::Request::builder()
+            .uri("https://reused-request.test")
+            .method(http::Method::CONNECT)
+            .version(http::Version::HTTP_2)
+            .body(())
+            .unwrap();
+        let mut retry_pool = pool.clone();
+        let stream = tokio::time::timeout(
+            Duration::from_secs(1),
+            retry_pool.send_request_pooled(&workload_key, retry_request),
+        )
+        .await
+        .expect("cancelled request must not strand connection capacity")
+        .unwrap();
+        assert_eq!(
+            factory.calls_for(&workload_key),
+            1,
+            "the existing H2 connection should be reused after cancellation"
+        );
+        drop(stream);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !pool.state.entries.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reused connection and entry should expire cleanly");
+        drop(source_pool);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_idle_reset_keeps_one_pending_record() {
+        let (source_pool, srv) = setup_test(100).await;
+        let workload_key = key(&srv, 1);
+        let clients = prebuilt_clients(&source_pool, std::slice::from_ref(&workload_key)).await;
+        let factory = Arc::new(MockConnectionFactory::new(clients));
+        let mut pool = pool_with_factory(Duration::from_secs(100), factory);
+
+        let first = pool.connect(&workload_key).await.unwrap();
+        let idle_reset = first.idle_reset.clone();
+        drop(first);
+        for _ in 0..1_000 {
+            drop(pool.connect(&workload_key).await.unwrap());
+        }
+
+        let idle = idle_reset.inner.lock().unwrap();
+        assert!(idle.active);
+        assert!(idle.in_pool);
+        assert!(
+            idle.generation >= 1_000,
+            "all resets should update the single replacement slot"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_randomized_lifecycle_stress_preserves_entry_invariants() {
+        let (source_pool, srv) = setup_test(100).await;
+        let keys = (1..=8).map(|source| key(&srv, source)).collect::<Vec<_>>();
+        let clients = prebuilt_clients(&source_pool, &keys).await;
+        let mut mock_factory = MockConnectionFactory::new(clients);
+        for workload_key in &keys {
+            mock_factory = mock_factory.fail_first(workload_key.clone(), 5);
+        }
+        let factory = Arc::new(mock_factory);
+        let pool = pool_with_factory(Duration::from_millis(20), factory.clone());
+        let mut rng = StdRng::seed_from_u64(0x5eed);
+        for _ in 0..20 {
+            let mut tasks = Vec::with_capacity(1_000);
+            for _ in 0..1_000 {
+                let workload_key = keys[rng.random_range(0..keys.len())].clone();
+                let cancel = rng.random_ratio(1, 17);
+                let delay_before = rng.random_range(0..=3);
+                let delay_after = rng.random_range(0..=3);
+                let task = {
+                    let mut pool = pool.clone();
+                    tokio::spawn(async move {
+                        if delay_before > 0 {
+                            tokio::time::sleep(Duration::from_millis(delay_before)).await;
+                        }
+                        let result = pool.connect(&workload_key).await;
+                        if delay_after > 0 {
+                            tokio::time::sleep(Duration::from_millis(delay_after)).await;
+                        }
+                        result
+                    })
+                };
+                if cancel {
+                    task.abort();
+                }
+                tasks.push(task);
+            }
+            let results = tokio::time::timeout(Duration::from_secs(5), future::join_all(tasks))
+                .await
+                .expect("stress batch should not hang");
+            assert!(results.into_iter().all(|result| match result {
+                Ok(Ok(_)) | Ok(Err(_)) => true,
+                Err(error) => error.is_cancelled(),
+            }));
+            if rng.random_bool(0.5) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            } else {
+                tokio::task::yield_now().await;
+            }
+        }
+        let guard = pool.state.entries.guard();
+        for (_, entry) in pool.state.entries.iter(&guard) {
+            let inner = entry.inner.lock().unwrap();
+            assert!(!matches!(inner.state, EntryState::Connecting { .. }));
+            assert_eq!(inner.waiters, 0);
+        }
+        drop(guard);
+
+        pool.shutdown();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if pool.state.entries.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("idle stress entries should be cleaned up");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -684,25 +2301,23 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn connection_limits() {
+    async fn saturated_connections_are_reused_after_capacity_returns() {
         let (pool, mut srv) = setup_test(2).await;
 
         let key = key(&srv, 1);
 
-        // Pool allows 2. When we spawn 4 concurrently, so we need 2 connections
+        // Pool allows 2. When we spawn 4 concurrently, we need 2 connections.
         spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 4).await;
-        assert_opens_drops!(srv, 2, 2);
+        assert_opens_drops!(srv, 2, 0);
 
-        // This should require 3 connections (2 already opened, 1 new). However, due to an inefficiency
-        // in our pool, we don't properly reuse streams that hit the max.
-        // The first batch of 4 will start a connection for the first 2 connections, and each max out so they
-        // are not returned to the pool.
+        // Both saturated connections become reusable after stream capacity returns, so only one
+        // additional connection is needed for five concurrent requests.
         spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 5).await;
-        assert_opens_drops!(srv, 5, 2);
+        assert_opens_drops!(srv, 3, 0);
 
-        // Once we drop the pool, we should drop the rest of the connections as well (3 new ones, and the one already checked above)
+        // Once we drop the pool, all three reusable connections should close.
         drop(pool);
-        assert_opens_drops!(srv, 5, 1);
+        assert_opens_drops!(srv, 3, 3);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -733,6 +2348,8 @@ mod test {
         let key = key(&srv, 1);
 
         spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 2).await;
+        assert_opens_drops!(srv, 2, 0);
+        drop(pool);
         assert_opens_drops!(srv, 2, 2);
     }
 
