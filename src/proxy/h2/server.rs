@@ -24,7 +24,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{oneshot, watch};
 use tracing::{Instrument, debug};
 
@@ -97,7 +97,7 @@ impl RequestParts for Parts {
 
 pub async fn serve_connection<F, Fut>(
     cfg: Arc<config::Config>,
-    s: tokio_rustls::server::TlsStream<TcpStream>,
+    s: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
     drain: DrainWatcher,
     mut force_shutdown: watch::Receiver<()>,
     mut revocation: Option<RevocationHandle>,
@@ -198,4 +198,108 @@ where
     // Mark we are done with the connection
     drop(drain);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drain;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const DATA: u8 = 0x0;
+    const HEADERS: u8 = 0x1;
+    const SETTINGS: u8 = 0x4;
+    const PING: u8 = 0x6;
+    const GOAWAY: u8 = 0x7;
+    const END_HEADERS: u8 = 0x4;
+    const ACK: u8 = 0x1;
+
+    fn frame(buf: &mut Vec<u8>, typ: u8, flags: u8, stream: u32, payload: &[u8]) {
+        buf.extend_from_slice(&(payload.len() as u32).to_be_bytes()[1..]);
+        buf.push(typ);
+        buf.push(flags);
+        buf.extend_from_slice(&stream.to_be_bytes());
+        buf.extend_from_slice(payload);
+    }
+
+    /// Reads frames from the server until a PING ACK (Ok) or GOAWAY (Err with the error code).
+    async fn read_until_ping_ack(r: &mut (impl AsyncRead + Unpin)) -> Result<(), u32> {
+        loop {
+            let mut hdr = [0u8; 9];
+            r.read_exact(&mut hdr).await.expect("connection closed");
+            let len = u32::from_be_bytes([0, hdr[0], hdr[1], hdr[2]]) as usize;
+            let mut payload = vec![0u8; len];
+            r.read_exact(&mut payload).await.unwrap();
+            match (hdr[3], hdr[4]) {
+                (PING, ACK) => return Ok(()),
+                (GOAWAY, _) => {
+                    return Err(u32::from_be_bytes(payload[4..8].try_into().unwrap()));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A stream sending many small DATA frames that the application has not yet read should
+    /// not exceed the h2 data frame budget. h2 0.4.18 used a fixed 25,600 byte budget,
+    /// exhausted by ~100 unread 1-byte frames, which closed the connection with ENHANCE_YOUR_CALM.
+    /// Newer versions scale the default budget with the connection window.
+    #[tokio::test]
+    async fn many_small_data_frames_within_budget() {
+        // 32000 1-byte frames => ~7.8MB of accounted framing overhead
+        const FRAMES: usize = 32000;
+
+        let cfg = Arc::new(crate::test_helpers::test_config());
+        let (client, server) = tokio::io::duplex(1024 * 1024);
+        let (_drain_trigger, drain) = drain::new();
+        let (_force_tx, force_rx) = watch::channel(());
+        // Hold on to requests without reading their bodies, so all DATA frames stay buffered.
+        let (req_tx, _req_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve_connection(
+            cfg,
+            server,
+            drain,
+            force_rx,
+            None,
+            move |req: H2Request| {
+                let _ = req_tx.send(req);
+                async {}
+            },
+        ));
+
+        let mut buf = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+        frame(&mut buf, SETTINGS, 0, 0, &[]);
+        // HPACK literals without indexing: `:method: CONNECT`, `:authority: 127.0.0.1:8080`
+        let mut block = vec![0x02, 7];
+        block.extend_from_slice(b"CONNECT");
+        block.extend_from_slice(&[0x01, 14]);
+        block.extend_from_slice(b"127.0.0.1:8080");
+        frame(&mut buf, HEADERS, END_HEADERS, 1, &block);
+        for _ in 0..FRAMES {
+            frame(&mut buf, DATA, 0, 1, b"x");
+        }
+        // Frames are processed in order, so a PING ACK means every DATA frame was accepted.
+        frame(&mut buf, PING, 0, 0, &[0u8; 8]);
+
+        let (mut r, mut w) = tokio::io::split(client);
+        tokio::spawn(async move {
+            // The server may close the connection before we finish writing.
+            let _ = w.write_all(&buf).await;
+            let _ = w.flush().await;
+            // Keep the write half open so the connection stays up.
+            std::future::pending::<()>().await;
+        });
+
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_until_ping_ack(&mut r),
+        )
+        .await
+        .expect("timed out waiting for server");
+        assert_eq!(
+            res,
+            Ok(()),
+            "server sent GOAWAY (0xb = ENHANCE_YOUR_CALM) for small DATA frames"
+        );
+    }
 }
