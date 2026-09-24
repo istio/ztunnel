@@ -648,6 +648,7 @@ pub async fn freebind_connect(
     local: Option<IpAddr>,
     addr: SocketAddr,
     socket_factory: &(dyn SocketFactory + Send + Sync),
+    connect_timeout: Option<Duration>,
 ) -> io::Result<TcpStream> {
     async fn connect(
         local: Option<IpAddr>,
@@ -692,7 +693,8 @@ pub async fn freebind_connect(
         }
     }
     // Wrap the entire connect function in a timeout
-    timeout(CONNECTION_TIMEOUT, connect(local, addr, socket_factory))
+    let timeout_duration = connect_timeout.unwrap_or(CONNECTION_TIMEOUT);
+    timeout(timeout_duration, connect(local, addr, socket_factory))
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e))?
 }

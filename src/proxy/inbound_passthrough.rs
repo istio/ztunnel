@@ -228,9 +228,10 @@ impl InboundPassthrough {
         let send = async {
             trace!(%source_addr, %dest_addr, component="inbound plaintext", "connecting...");
 
-            let outbound = super::freebind_connect(orig_src, dest_addr, pi.socket_factory.as_ref())
-                .await
-                .map_err(Error::ConnectionFailed)?;
+            let outbound =
+                super::freebind_connect(orig_src, dest_addr, pi.socket_factory.as_ref(), None)
+                    .await
+                    .map_err(Error::ConnectionFailed)?;
 
             trace!(%source_addr, destination=%dest_addr, component="inbound plaintext", "connected");
             copy::copy_bidirectional(

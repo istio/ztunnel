@@ -80,17 +80,22 @@ struct ConnSpawner {
 
 // Does nothing but spawn new conns when asked
 impl ConnSpawner {
-    async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error> {
+    async fn new_pool_conn(
+        &self,
+        key: WorkloadKey,
+        connect_timeout: Option<Duration>,
+    ) -> Result<H2ConnectClient, Error> {
         debug!("spawning new pool conn for {}", key);
 
         let cert = self.local_workload.fetch_certificate().await?;
         let connector = cert.outbound_connector(key.dst_id.clone(), self.crl_manager.clone())?;
-        let tcp_stream = super::freebind_connect(None, key.dst, self.socket_factory.as_ref())
-            .await
-            .map_err(|e: io::Error| match e.kind() {
-                io::ErrorKind::TimedOut => Error::MaybeHBONENetworkPolicyError(e),
-                _ => e.into(),
-            })?;
+        let tcp_stream =
+            super::freebind_connect(None, key.dst, self.socket_factory.as_ref(), connect_timeout)
+                .await
+                .map_err(|e: io::Error| match e.kind() {
+                    io::ErrorKind::TimedOut => Error::MaybeHBONENetworkPolicyError(e),
+                    _ => e.into(),
+                })?;
 
         let tls_stream = connector.connect(tcp_stream).await.inspect_err(|e| {
             if crate::tls::io_error_is_cert_revoked(e) {
@@ -229,6 +234,7 @@ impl PoolState {
         &self,
         workload_key: &WorkloadKey,
         pool_key: &pingora_pool::ConnectionMeta,
+        connect_timeout: Option<Duration>,
     ) -> Result<Option<H2ConnectClient>, Error> {
         let inner_conn_lock = {
             trace!("getting keyed lock out of lockmap");
@@ -249,7 +255,10 @@ impl PoolState {
             Ok(_guard) => {
                 // BEGIN take inner writelock
                 debug!("nothing else is creating a conn and we won the lock, make one");
-                let client = self.spawner.new_pool_conn(workload_key.clone()).await?;
+                let client = self
+                    .spawner
+                    .new_pool_conn(workload_key.clone(), connect_timeout)
+                    .await?;
 
                 debug!(
                     "checking in new conn for {} with pk {:?}",
@@ -291,6 +300,7 @@ impl PoolState {
         &self,
         workload_key: &WorkloadKey,
         pool_key: &pingora_pool::ConnectionMeta,
+        connect_timeout: Option<Duration>,
     ) -> Result<Option<H2ConnectClient>, Error> {
         let found_conn = {
             trace!("pool connect outer map - take guard");
@@ -330,7 +340,10 @@ impl PoolState {
                 }
                 None => {
                     debug!("new connection needed for {}", workload_key);
-                    break self.spawner.new_pool_conn(workload_key.clone()).await?;
+                    break self
+                        .spawner
+                        .new_pool_conn(workload_key.clone(), connect_timeout)
+                        .await?;
                 }
             };
         };
@@ -398,8 +411,9 @@ impl WorkloadHBONEPool {
         &mut self,
         workload_key: &WorkloadKey,
         request: http::Request<()>,
+        connect_timeout: Option<Duration>,
     ) -> Result<(H2Stream, Option<Baggage>, Option<watch::Receiver<bool>>), Error> {
-        let mut connection = self.connect(workload_key).await?;
+        let mut connection = self.connect(workload_key, connect_timeout).await?;
 
         // Surface the tunnel's revocation signal so the caller can attribute a revoked teardown.
         let revoked = connection.revoked_receiver();
@@ -413,7 +427,11 @@ impl WorkloadHBONEPool {
     //
     // If many `connects` request a connection to the same dest at once, all will wait until exactly
     // one connection is created, before deciding if they should create more or just use that one.
-    async fn connect(&mut self, workload_key: &WorkloadKey) -> Result<H2ConnectClient, Error> {
+    async fn connect(
+        &mut self,
+        workload_key: &WorkloadKey,
+        connect_timeout: Option<Duration>,
+    ) -> Result<H2ConnectClient, Error> {
         trace!("pool connect START");
         // TODO BML this may not be collision resistant, or a fast hash. It should be resistant enough for workloads tho.
         // We are doing a deep-equals check at the end to mitigate any collisions, will see about bumping Pingora
@@ -431,7 +449,7 @@ impl WorkloadHBONEPool {
         // This will be done under outer readlock (nonexclusive)/inner keyed writelock (exclusive).
         let existing_conn = self
             .state
-            .checkout_conn_under_writelock(workload_key, &pool_key)
+            .checkout_conn_under_writelock(workload_key, &pool_key, connect_timeout)
             .await?;
 
         // Early return, no need to do anything else
@@ -487,7 +505,7 @@ impl WorkloadHBONEPool {
         trace!("fallback attempt - trying win win connlock");
         let res = match self
             .state
-            .start_conn_if_win_writelock(workload_key, &pool_key)
+            .start_conn_if_win_writelock(workload_key, &pool_key, connect_timeout)
             .await?
         {
             Some(client) => client,
@@ -510,7 +528,11 @@ impl WorkloadHBONEPool {
                             // Notifier fired, try and get a conn out for our key.
                             let existing_conn = self
                                 .state
-                                .checkout_conn_under_writelock(workload_key, &pool_key)
+                                .checkout_conn_under_writelock(
+                                    workload_key,
+                                    &pool_key,
+                                    connect_timeout,
+                                )
                                 .await?;
                             match existing_conn {
                                 None => {
@@ -641,7 +663,10 @@ mod test {
                 .unwrap()
         };
 
-        let (c, _baggage, _) = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
+        let (c, _baggage, _) = pool
+            .send_request_pooled(&key.clone(), req(), None)
+            .await
+            .unwrap();
         let mut c = TokioH2Stream::new(c);
         c.write_all(b"abcde").await.unwrap();
         let mut b = [0u8; 100];
@@ -838,7 +863,7 @@ mod test {
             let start = Instant::now();
 
             let c1 = pool
-                .send_request_pooled(&key.clone(), req())
+                .send_request_pooled(&key.clone(), req(), None)
                 .instrument(tracing::debug_span!("client", request = req_num))
                 .await
                 .expect("connect should succeed");
@@ -870,7 +895,7 @@ mod test {
         let start = Instant::now();
 
         let _c1 = pool
-            .send_request_pooled(&key.clone(), req())
+            .send_request_pooled(&key.clone(), req(), None)
             .await
             .expect("connect should succeed");
         debug!(
@@ -896,7 +921,10 @@ mod test {
 
         let start = Instant::now();
 
-        let c1 = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
+        let c1 = pool
+            .send_request_pooled(&key.clone(), req(), None)
+            .await
+            .unwrap();
         debug!(
             "client spent {}ms waiting for conn",
             start.elapsed().as_millis()
