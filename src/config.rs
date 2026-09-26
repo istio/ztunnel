@@ -86,7 +86,6 @@ const IPV6_ENABLED: &str = "IPV6_ENABLED";
 const HTTP2_STREAM_WINDOW_SIZE: &str = "HTTP2_STREAM_WINDOW_SIZE";
 const HTTP2_CONNECTION_WINDOW_SIZE: &str = "HTTP2_CONNECTION_WINDOW_SIZE";
 const HTTP2_FRAME_SIZE: &str = "HTTP2_FRAME_SIZE";
-const HTTP2_DATA_FRAME_BUDGET: &str = "HTTP2_DATA_FRAME_BUDGET";
 
 const UNSTABLE_ENABLE_SOCKS5: &str = "UNSTABLE_ENABLE_SOCKS5";
 
@@ -212,8 +211,6 @@ pub struct Config {
     pub window_size: u32,
     pub connection_window_size: u32,
     pub frame_size: u32,
-    /// If set, configures the h2 data frame budget for client and server connections.
-    pub h2_data_frame_budget: Option<usize>,
 
     // The limit of how many streams a single HBONE pool connection will be limited to, before
     // spawning a new conn rather than reusing an existing one, even to a dest that already has an open connection.
@@ -809,7 +806,6 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         // A 4x limit should be appropriate without introducing too much potential buffering.
         connection_window_size: parse_default(HTTP2_CONNECTION_WINDOW_SIZE, 16 * 1024 * 1024)?,
         frame_size: parse_default(HTTP2_FRAME_SIZE, 1024 * 1024)?,
-        h2_data_frame_budget: parse(HTTP2_DATA_FRAME_BUDGET)?,
 
         self_termination_deadline: match parse_duration(CONNECTION_TERMINATION_DEADLINE)? {
             Some(period) => period,

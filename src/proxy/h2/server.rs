@@ -108,7 +108,7 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     let mut builder = h2::server::Builder::new();
-    builder
+    let mut conn = builder
         .initial_window_size(cfg.window_size)
         .initial_connection_window_size(cfg.connection_window_size)
         .max_frame_size(cfg.frame_size)
@@ -118,11 +118,10 @@ where
         // 400kb, default from hyper
         .max_send_buffer_size(1024 * 400)
         // default from hyper
-        .max_concurrent_streams(200);
-    if let Some(budget) = cfg.h2_data_frame_budget {
-        builder.data_frame_budget(budget);
-    }
-    let mut conn = builder.handshake(s).await?;
+        .max_concurrent_streams(200)
+        .data_frame_budget(usize::MAX)
+        .handshake(s)
+        .await?;
 
     let ping_pong = conn
         .ping_pong()
@@ -241,15 +240,15 @@ mod tests {
     }
 
     /// A stream sending many small DATA frames that the application has not yet read should
-    /// not exceed the h2 data frame budget. h2 0.4.18 used a fixed 25,600 byte budget,
-    /// exhausted by ~100 unread 1-byte frames, which closed the connection with ENHANCE_YOUR_CALM.
-    /// Newer versions scale the default budget with the connection window.
+    /// never the h2 data frame budget. A control flow error will occur first by depleting the
+    /// connection window.
     #[tokio::test]
-    async fn many_small_data_frames_within_budget() {
-        // 32000 1-byte frames => ~7.8MB of accounted framing overhead
-        const FRAMES: usize = 32000;
+    async fn data_budget_disabled() {
+        const FRAMES: usize = 67000;
 
-        let cfg = Arc::new(crate::test_helpers::test_config());
+        let mut config = crate::test_helpers::test_config();
+        config.connection_window_size = (1 << 31) - 1; // max connection window size
+        let cfg = Arc::new(config);
         let (client, server) = tokio::io::duplex(1024 * 1024);
         let (_drain_trigger, drain) = drain::new();
         let (_force_tx, force_rx) = watch::channel(());
@@ -298,8 +297,8 @@ mod tests {
         .expect("timed out waiting for server");
         assert_eq!(
             res,
-            Ok(()),
-            "server sent GOAWAY (0xb = ENHANCE_YOUR_CALM) for small DATA frames"
+            Err(h2::Reason::FLOW_CONTROL_ERROR.into()),
+            "server did not send GOAWAY (FLOW CONTROL ERROR)",
         );
     }
 }
