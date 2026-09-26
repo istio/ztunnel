@@ -15,7 +15,9 @@
 #![warn(clippy::cast_lossless)]
 use super::{Error, SocketFactory};
 use super::{LocalWorkloadInformation, h2};
+use futures_util::TryFutureExt;
 use std::time::Duration;
+use tokio::time::Instant;
 
 use std::collections::hash_map::DefaultHasher;
 
@@ -80,15 +82,22 @@ struct ConnSpawner {
 
 // Does nothing but spawn new conns when asked
 impl ConnSpawner {
+    /// Opens a new tunnel to `key.dst`.
+    ///
+    /// `deadline` bounds every network step of setting it up: the TCP connect, and the TLS and
+    /// HTTP/2 handshakes after it. A peer that accepts the TCP connection and then stalls would
+    /// otherwise hold the caller forever. `None` bounds only the TCP connect, at the default
+    /// connection timeout.
     async fn new_pool_conn(
         &self,
         key: WorkloadKey,
-        connect_timeout: Option<Duration>,
+        deadline: Option<Instant>,
     ) -> Result<H2ConnectClient, Error> {
         debug!("spawning new pool conn for {}", key);
 
         let cert = self.local_workload.fetch_certificate().await?;
         let connector = cert.outbound_connector(key.dst_id.clone(), self.crl_manager.clone())?;
+        let connect_timeout = deadline.map(|d| d.saturating_duration_since(Instant::now()));
         let tcp_stream =
             super::freebind_connect(None, key.dst, self.socket_factory.as_ref(), connect_timeout)
                 .await
@@ -97,12 +106,17 @@ impl ConnSpawner {
                     _ => e.into(),
                 })?;
 
-        let tls_stream = connector.connect(tcp_stream).await.inspect_err(|e| {
-            if crate::tls::io_error_is_cert_revoked(e) {
-                self.metrics
-                    .record_crl_rejection(crate::proxy::metrics::Reporter::source);
-            }
-        })?;
+        let tls_stream = super::with_deadline(
+            deadline,
+            super::HandshakeStage::Tls,
+            connector.connect(tcp_stream).inspect_err(|e| {
+                if crate::tls::io_error_is_cert_revoked(e) {
+                    self.metrics
+                        .record_crl_rejection(crate::proxy::metrics::Reporter::source);
+                }
+            }),
+        )
+        .await?;
         trace!("connector connected, handshaking");
         // Enforce CRL revocation on this tunnel for its whole lifetime
         let revocation = self.crl_manager.as_ref().map(|crl_manager| {
@@ -119,12 +133,16 @@ impl ConnSpawner {
                 crate::proxy::metrics::Reporter::source,
             ))
         });
-        let sender = h2::client::spawn_connection(
-            self.cfg.clone(),
-            tls_stream,
-            self.timeout_rx.clone(),
-            key,
-            revocation,
+        let sender = super::with_deadline(
+            deadline,
+            super::HandshakeStage::Http2,
+            h2::client::spawn_connection(
+                self.cfg.clone(),
+                tls_stream,
+                self.timeout_rx.clone(),
+                key,
+                revocation,
+            ),
         )
         .await?;
         Ok(sender)
@@ -234,7 +252,7 @@ impl PoolState {
         &self,
         workload_key: &WorkloadKey,
         pool_key: &pingora_pool::ConnectionMeta,
-        connect_timeout: Option<Duration>,
+        deadline: Option<Instant>,
     ) -> Result<Option<H2ConnectClient>, Error> {
         let inner_conn_lock = {
             trace!("getting keyed lock out of lockmap");
@@ -257,7 +275,7 @@ impl PoolState {
                 debug!("nothing else is creating a conn and we won the lock, make one");
                 let client = self
                     .spawner
-                    .new_pool_conn(workload_key.clone(), connect_timeout)
+                    .new_pool_conn(workload_key.clone(), deadline)
                     .await?;
 
                 debug!(
@@ -300,7 +318,7 @@ impl PoolState {
         &self,
         workload_key: &WorkloadKey,
         pool_key: &pingora_pool::ConnectionMeta,
-        connect_timeout: Option<Duration>,
+        deadline: Option<Instant>,
     ) -> Result<Option<H2ConnectClient>, Error> {
         let found_conn = {
             trace!("pool connect outer map - take guard");
@@ -342,7 +360,7 @@ impl PoolState {
                     debug!("new connection needed for {}", workload_key);
                     break self
                         .spawner
-                        .new_pool_conn(workload_key.clone(), connect_timeout)
+                        .new_pool_conn(workload_key.clone(), deadline)
                         .await?;
                 }
             };
@@ -411,13 +429,20 @@ impl WorkloadHBONEPool {
         &mut self,
         workload_key: &WorkloadKey,
         request: http::Request<()>,
-        connect_timeout: Option<Duration>,
+        deadline: Option<Instant>,
     ) -> Result<(H2Stream, Option<Baggage>, Option<watch::Receiver<bool>>), Error> {
-        let mut connection = self.connect(workload_key, connect_timeout).await?;
+        let mut connection = self.connect(workload_key, deadline).await?;
 
         // Surface the tunnel's revocation signal so the caller can attribute a revoked teardown.
         let revoked = connection.revoked_receiver();
-        let (stream, baggage) = connection.send_request(request).await?;
+        // The deadline covers the CONNECT too, even on a reused tunnel: a peer that never answers
+        // it stalls the caller just as surely as one that stalls the handshake.
+        let (stream, baggage) = super::with_deadline(
+            deadline,
+            super::HandshakeStage::Connect,
+            connection.send_request(request),
+        )
+        .await?;
         Ok((stream, baggage, revoked))
     }
 
@@ -430,7 +455,7 @@ impl WorkloadHBONEPool {
     async fn connect(
         &mut self,
         workload_key: &WorkloadKey,
-        connect_timeout: Option<Duration>,
+        deadline: Option<Instant>,
     ) -> Result<H2ConnectClient, Error> {
         trace!("pool connect START");
         // TODO BML this may not be collision resistant, or a fast hash. It should be resistant enough for workloads tho.
@@ -449,7 +474,7 @@ impl WorkloadHBONEPool {
         // This will be done under outer readlock (nonexclusive)/inner keyed writelock (exclusive).
         let existing_conn = self
             .state
-            .checkout_conn_under_writelock(workload_key, &pool_key, connect_timeout)
+            .checkout_conn_under_writelock(workload_key, &pool_key, deadline)
             .await?;
 
         // Early return, no need to do anything else
@@ -505,7 +530,7 @@ impl WorkloadHBONEPool {
         trace!("fallback attempt - trying win win connlock");
         let res = match self
             .state
-            .start_conn_if_win_writelock(workload_key, &pool_key, connect_timeout)
+            .start_conn_if_win_writelock(workload_key, &pool_key, deadline)
             .await?
         {
             Some(client) => client,
@@ -528,11 +553,7 @@ impl WorkloadHBONEPool {
                             // Notifier fired, try and get a conn out for our key.
                             let existing_conn = self
                                 .state
-                                .checkout_conn_under_writelock(
-                                    workload_key,
-                                    &pool_key,
-                                    connect_timeout,
-                                )
+                                .checkout_conn_under_writelock(workload_key, &pool_key, deadline)
                                 .await?;
                             match existing_conn {
                                 None => {
@@ -595,6 +616,7 @@ mod test {
 
     use super::*;
     use crate::drain::DrainWatcher;
+    use crate::proxy::HandshakeStage;
     use crate::state::workload;
     use crate::state::{DemandProxyState, ProxyState, WorkloadInfo};
     use crate::test_helpers::test_default_workload;
@@ -1107,6 +1129,95 @@ mod test {
         drop_rx: UnboundedReceiver<()>,
         goaway_tx: oneshot::Sender<()>,
         addr: SocketAddr,
+    }
+
+    fn connect_req(addr: SocketAddr) -> http::Request<()> {
+        http::Request::builder()
+            .uri(addr.to_string())
+            .method(http::Method::CONNECT)
+            .version(http::Version::HTTP_2)
+            .body(())
+            .unwrap()
+    }
+
+    /// Sends a CONNECT to `dst` with a short deadline, returning the error and how long it took.
+    async fn send_with_deadline(
+        pool: &mut WorkloadHBONEPool,
+        dst: SocketAddr,
+    ) -> (Error, Duration) {
+        let key = WorkloadKey {
+            src_id: Identity::default(),
+            dst_id: vec![Identity::default()],
+            src: IpAddr::from([127, 0, 0, 2]),
+            dst,
+        };
+        let start = tokio::time::Instant::now();
+        let deadline = start + Duration::from_millis(200);
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            pool.send_request_pooled(&key, connect_req(dst), Some(deadline)),
+        )
+        .await
+        .expect("the deadline must end the request, not the test timeout");
+        let Err(err) = res else {
+            panic!("a stalled peer must not yield a stream");
+        };
+        (err, start.elapsed())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deadline_bounds_a_stalled_tls_handshake() {
+        let (mut pool, _srv) = setup_test(3).await;
+        // Accepts TCP connections and then never says anything, so the TLS handshake stalls.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let (err, took) = send_with_deadline(&mut pool, addr).await;
+        assert!(
+            matches!(err, Error::HandshakeTimeout(HandshakeStage::Tls)),
+            "got {err:?}"
+        );
+        assert!(took < Duration::from_secs(1), "took {took:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deadline_bounds_an_unanswered_connect() {
+        let (mut pool, _srv) = setup_test(3).await;
+        // Completes TLS and HTTP/2, then never answers the CONNECT.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let certs = crate::tls::mock::generate_test_certs(
+            &Identity::default().into(),
+            Duration::from_secs(0),
+            Duration::from_secs(100),
+        );
+        let acceptor = crate::tls::mock::MockServerCertProvider::new(certs);
+        let mut tls_stream = crate::hyper_util::tls_server(acceptor, listener);
+        tokio::spawn(async move {
+            while let Some(stream) = tls_stream.next().await {
+                tokio::spawn(crate::hyper_util::http2_server().serve_connection(
+                    hyper_util::rt::TokioIo::new(stream),
+                    service_fn(|_req: Request<Incoming>| {
+                        future::pending::<
+                            Result<Response<http_body_util::Empty<bytes::Bytes>>, Infallible>,
+                        >()
+                    }),
+                ));
+            }
+        });
+
+        let (err, took) = send_with_deadline(&mut pool, addr).await;
+        assert!(
+            matches!(err, Error::HandshakeTimeout(HandshakeStage::Connect)),
+            "got {err:?}"
+        );
+        assert!(took < Duration::from_secs(1), "took {took:?}");
     }
 
     fn key(srv: &TestServer, ip: u8) -> WorkloadKey {
