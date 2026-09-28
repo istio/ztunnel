@@ -18,6 +18,7 @@ use super::Error;
 use crate::PQC_ENABLED;
 use crate::TLS12_ENABLED;
 use crate::identity::{self, Identity};
+use crate::strng::Strng;
 
 use std::fmt::Debug;
 
@@ -202,10 +203,10 @@ pub enum TlsError {
     SanError(Vec<Identity>, Vec<Identity>),
     #[error(
         "identity verification error: peer did not present the expected trustdomain ({}), got {}",
-        .0,
+        display_list(.0),
         display_list(.1)
     )]
-    SanTrustDomainError(String, Vec<Identity>),
+    SanTrustDomainError(Vec<Strng>, Vec<Identity>),
     #[error("ssl error: {0}")]
     SslError(#[from] Error),
 }

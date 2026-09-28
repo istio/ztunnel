@@ -54,20 +54,23 @@ impl<F: ServerCertProvider> InboundAcceptor<F> {
 #[derive(Debug)]
 pub(super) struct TrustDomainVerifier {
     base: Arc<dyn ClientCertVerifier>,
-    trust_domain: Option<Strng>,
+    trust_domains: Vec<Strng>,
 }
 
 impl TrustDomainVerifier {
-    pub fn new(base: Arc<dyn ClientCertVerifier>, trust_domain: Option<Strng>) -> Arc<Self> {
-        Arc::new(Self { base, trust_domain })
+    pub fn new(base: Arc<dyn ClientCertVerifier>, trust_domains: Vec<Strng>) -> Arc<Self> {
+        Arc::new(Self {
+            base,
+            trust_domains,
+        })
     }
 
     fn verify_trust_domain(&self, client_cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
         use x509_parser::prelude::*;
-        let Some(want_trust_domain) = &self.trust_domain else {
+        if self.trust_domains.is_empty() {
             // No need to verify
             return Ok(());
-        };
+        }
         let (_, c) = X509Certificate::from_der(client_cert).map_err(|_e| {
             rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
         })?;
@@ -77,17 +80,17 @@ impl TrustDomainVerifier {
             )
         })?;
         trace!(
-            "verifying client identities {ids:?} against trust domain {:?}",
-            want_trust_domain
+            "verifying client identities {ids:?} against trust domains {:?}",
+            self.trust_domains
         );
         ids.iter()
             .find(|id| match id {
-                Identity::Spiffe { trust_domain, .. } => trust_domain == want_trust_domain,
+                Identity::Spiffe { trust_domain, .. } => self.trust_domains.contains(trust_domain),
             })
             .ok_or_else(|| {
                 rustls::Error::InvalidCertificate(rustls::CertificateError::Other(
                     rustls::OtherError(Arc::new(TlsError::SanTrustDomainError(
-                        want_trust_domain.to_string(),
+                        self.trust_domains.clone(),
                         ids.clone(),
                     ))),
                 ))

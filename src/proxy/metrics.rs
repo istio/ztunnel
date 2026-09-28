@@ -88,6 +88,8 @@ pub enum ResponseFlags {
     IdentityError,
     // Connection terminated because a peer certificate was revoked by a CRL
     CertificateRevoked,
+    // Connection terminated because the peer's trust domain is no longer accepted
+    TrustDomainRemoved,
 }
 
 impl EncodeLabelValue for ResponseFlags {
@@ -101,6 +103,7 @@ impl EncodeLabelValue for ResponseFlags {
             ResponseFlags::NetworkPolicyError => writer.write_str("NETWORK_POLICY"),
             ResponseFlags::IdentityError => writer.write_str("IDENTITY_ERROR"),
             ResponseFlags::CertificateRevoked => writer.write_str("CERT_REVOKED"),
+            ResponseFlags::TrustDomainRemoved => writer.write_str("TRUST_DOMAIN_REMOVED"),
         }
     }
 }
@@ -726,6 +729,7 @@ impl ConnectionResult {
                     ResponseFlags::AuthorizationPolicyDenied
                 }
                 proxy::Error::CertificateRevoked => ResponseFlags::CertificateRevoked,
+                proxy::Error::TrustDomainRemoved => ResponseFlags::TrustDomainRemoved,
                 proxy::Error::ConnectionFailed(_) => ResponseFlags::ConnectionFailure,
                 _ => ResponseFlags::ConnectionFailure,
             };
@@ -756,6 +760,7 @@ impl ConnectionResult {
                 | ResponseFlags::NetworkPolicyError
                 | ResponseFlags::IdentityError
                 | ResponseFlags::CertificateRevoked
+                | ResponseFlags::TrustDomainRemoved
         ) {
             self.metrics.connection_failures.get_or_create(tl).inc();
         }
