@@ -14,7 +14,9 @@
 
 use std::os::fd::AsRawFd;
 
+#[cfg(target_os = "linux")]
 use ztunnel::test_helpers::inpod::StartZtunnelMessage;
+#[cfg(target_os = "linux")]
 use ztunnel::{
     inpod::istio::zds::WorkloadInfo,
     test_helpers::inpod::{Message, start_ztunnel_server},

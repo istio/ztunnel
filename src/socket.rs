@@ -141,6 +141,28 @@ mod linux {
     pub fn original_dst_ipv6(sock: &SockRef) -> io::Result<SockAddr> {
         sock.original_dst_v6()
     }
+
+    pub fn set_tcp_user_timeout(sock: &SockRef, dur: std::time::Duration) -> io::Result<()> {
+        use std::os::unix::io::AsRawFd;
+        let ms = match dur.as_millis().try_into() {
+            Ok(v) => v,
+            Err(_) => return Err(io::Error::new(io::ErrorKind::Other, "duration too large")),
+        };
+        let val: libc::c_int = ms;
+        let ret = unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_USER_TIMEOUT,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&val) as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 /// Listener is a wrapper For TCPListener with sane defaults. Notably, setting NODELAY
@@ -180,8 +202,15 @@ impl Listener {
             }
             if cfg.user_timeout_enabled {
                 let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
-                let res = SockRef::from(&stream).set_tcp_user_timeout(Some(ut));
-                tracing::trace!("set user timeout: {:?}", res);
+                #[cfg(target_os = "linux")]
+                {
+                    let res = linux::set_tcp_user_timeout(&SockRef::from(&stream), ut);
+                    tracing::trace!("set user timeout: {:?}", res);
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    tracing::trace!("tcp user timeout not supported on this OS");
+                }
             }
         }
         Ok((stream, remote))
@@ -239,6 +268,9 @@ pub mod socket_tests {
             cfg.keepalive_interval
         );
         let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
-        assert_eq!(sock.tcp_user_timeout().unwrap(), Some(ut));
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(sock.tcp_user_timeout().unwrap(), Some(ut));
+        }
     }
 }
