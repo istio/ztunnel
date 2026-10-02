@@ -15,6 +15,7 @@
 use crate::baggage::{Baggage, parse_baggage_header};
 use crate::config;
 use crate::identity::Identity;
+use crate::proxy::h2::{Teardown, TeardownCause};
 use crate::proxy::{BAGGAGE_HEADER, Error};
 use crate::tls::revocation::{self, RevocationHandle};
 use bytes::{Buf, Bytes};
@@ -30,7 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::oneshot;
-use tokio::sync::watch::{self, Receiver};
+use tokio::sync::watch::Receiver;
 use tracing::{Instrument, debug, error, trace, warn};
 
 #[derive(Debug, Clone)]
@@ -40,10 +41,8 @@ pub struct H2ConnectClient {
     pub max_allowed_streams: u16,
     stream_count: Arc<AtomicU16>,
     wl_key: WorkloadKey,
-    /// Tunnel revocation signal, surfaced to downstream connections via [`Self::revoked_receiver`]
-    /// so they can attribute a revoked teardown as `CERT_REVOKED`.
-    /// `None` when CRL enforcement is disabled.
-    revoked_rx: Option<watch::Receiver<bool>>,
+    /// Set by the connection driver before it tears the connection down, for its streams to report.
+    teardown: TeardownCause,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -123,10 +122,12 @@ impl H2ConnectClient {
         let read = crate::proxy::h2::H2StreamReadHalf {
             recv_stream: recv,
             _dropped: dropped1,
+            teardown: self.teardown.clone(),
         };
         let write = crate::proxy::h2::H2StreamWriteHalf {
             send_stream: send,
             _dropped: dropped2,
+            teardown: self.teardown.clone(),
         };
         let h2 = crate::proxy::h2::H2Stream { read, write };
         Ok((h2, baggage))
@@ -148,11 +149,6 @@ impl H2ConnectClient {
         let baggage = parse_baggage_header(response.headers().get_all(BAGGAGE_HEADER)).ok();
         Ok((stream, response.into_body(), baggage))
     }
-
-    /// A receiver for this tunnel's CRL revocation signal, or `None` when CRL enforcement is disabled
-    pub fn revoked_receiver(&self) -> Option<watch::Receiver<bool>> {
-        self.revoked_rx.clone()
-    }
 }
 
 pub async fn spawn_connection(
@@ -161,6 +157,7 @@ pub async fn spawn_connection(
     driver_drain: Receiver<bool>,
     wl_key: WorkloadKey,
     revocation: Option<RevocationHandle>,
+    teardown: TeardownCause,
 ) -> Result<H2ConnectClient, Error> {
     let mut builder = h2::client::Builder::new();
     builder
@@ -187,16 +184,13 @@ pub async fn spawn_connection(
             .try_into()
             .unwrap_or(u16::MAX),
     );
-    // Subscribe to the tunnel's revocation signal (if CRL enforcement is on) before the revocation
-    // state is moved into the driver task, so each stream this connection produces can attribute a
-    // revoked teardown.
-    let revoked_rx = revocation.as_ref().map(|r| r.subscribe_revoked());
     // spawn a task to poll the connection and drive the HTTP state
     // if we got a drain for that connection, respect it in a race
     // it is important to have a drain here, or this connection will never terminate
+    let driver_teardown = teardown.clone();
     tokio::spawn(
         async move {
-            drive_connection(connection, driver_drain, revocation).await;
+            drive_connection(connection, driver_drain, revocation, driver_teardown).await;
         }
         .in_current_span(),
     );
@@ -206,7 +200,7 @@ pub async fn spawn_connection(
         stream_count: Arc::new(AtomicU16::new(0)),
         max_allowed_streams,
         wl_key,
-        revoked_rx,
+        teardown,
     };
     Ok(c)
 }
@@ -215,6 +209,7 @@ async fn drive_connection<S, B>(
     mut conn: Connection<S, B>,
     mut driver_drain: Receiver<bool>,
     mut revocation: Option<RevocationHandle>,
+    teardown: TeardownCause,
 ) where
     S: AsyncRead + AsyncWrite + Send + Unpin,
     B: Buf,
@@ -223,25 +218,28 @@ async fn drive_connection<S, B>(
         .ping_pong()
         .expect("ping_pong should only be called once");
     // for ping to inform this fn to drop the connection
-    let (ping_drop_tx, ping_drop_rx) = oneshot::channel::<()>();
+    let (ping_drop_tx, ping_drop_rx) = oneshot::channel::<Teardown>();
     // for this fn to inform ping to give up when it is already dropped
     let dropped = Arc::new(AtomicBool::new(false));
     tokio::task::spawn(
         super::do_ping_pong(ping_pong, ping_drop_tx, dropped.clone()).in_current_span(),
     );
 
+    // `conn` is polled by reference so it outlives the select: the branch futures are dropped
+    // before a branch body runs, and each teardown arm must record its cause before `conn` is
+    // dropped below.
     tokio::select! {
         _ = driver_drain.changed() => {
             debug!("draining outer HBONE connection");
         }
-        _ = ping_drop_rx => {
-            warn!("HBONE ping timeout/error");
+        reason = ping_drop_rx => {
+            let reason = reason.unwrap_or_else(|_| Teardown::PingError("ping task ended".to_string()));
+            warn!("{reason}");
+            teardown.set(reason);
         }
         // CRL update revoked a cert in this connection's upstream chain. Revocation is a security
-        // event, so we tear the tunnel down abruptly (let `conn` drop below) so any in-flight
-        // streams multiplexed over it are reset. `revoked()` fires this tunnel's revocation signal
-        // before returning (and thus before the drop), so each downstream connection attributes
-        // `CERT_REVOKED` rather than a generic reset.
+        // event, so we tear the tunnel down abruptly (by dropping `conn` below) so any in-flight
+        // streams multiplexed over it are reset.
         _ = revocation::wait_for_revocation(revocation.as_mut()) => {
             if let Some(rev) = revocation.as_ref() {
                 debug!(
@@ -249,8 +247,9 @@ async fn drive_connection<S, B>(
                     "terminating outbound connection: upstream certificate revoked by CRL update"
                 );
             }
+            teardown.set(Teardown::CertificateRevoked);
         }
-        res = conn => {
+        res = &mut conn => {
             match res {
                 Err(e) => {
                     error!("Error in HBONE connection handshake: {:?}", e);
@@ -261,6 +260,67 @@ async fn drive_connection<S, B>(
             }
         }
     }
+    // With its cause recorded, the streams report it rather than the broken pipe they see once
+    // `conn` is dropped.
+    drop(conn);
     // Signal to the ping_pong it should also stop.
     dropped.store(true, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::copy::ResizeBufRead;
+    use futures_util::future::poll_fn;
+    use std::pin::Pin;
+
+    #[tokio::test(start_paused = true)]
+    async fn ping_timeout_is_reported_by_streams() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let mut conn = h2::server::handshake(server_io).await.unwrap();
+            let (_req, mut respond) = conn.accept().await.unwrap().unwrap();
+            let resp = http::Response::builder().status(200).body(()).unwrap();
+            let _stream = respond.send_response(resp, false).unwrap();
+            // Drive the connection until told to stop, then hold it without polling it, so the
+            // client's pings go unanswered.
+            tokio::select! {
+                _ = conn.accept() => {}
+                _ = stop_rx => {}
+            }
+            std::future::pending::<()>().await;
+        });
+
+        let (_drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+        let wl_key = WorkloadKey {
+            src_id: Identity::default(),
+            dst_id: vec![Identity::default()],
+            src: IpAddr::from([127, 0, 0, 1]),
+            dst: SocketAddr::from(([127, 0, 0, 2], 15008)),
+        };
+        let mut client = spawn_connection(
+            Arc::new(crate::test_helpers::test_config()),
+            client_io,
+            drain_rx,
+            wl_key,
+            None,
+            TeardownCause::default(),
+        )
+        .await
+        .unwrap();
+        let req = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("http://example.com")
+            .body(())
+            .unwrap();
+        let (mut stream, _) = client.send_request(req).await.unwrap();
+        stop_tx.send(()).unwrap();
+
+        let err = poll_fn(|cx| Pin::new(&mut stream.read).poll_bytes(cx))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(err.to_string(), "HBONE ping timeout");
+    }
 }

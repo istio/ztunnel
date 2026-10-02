@@ -151,7 +151,6 @@ impl Inbound {
                     let cfg = pi.cfg.clone();
                     // Enforce CRL revocation on this existing connection when a CRL is configured
                     let revocation = Box::pin(Self::build_revocation(&pi, ssl, src_identity)).await;
-                    let revoked_rx = revocation.as_ref().map(|r| r.subscribe_revoked());
                     let request_handler = move |req| {
                         let id = Self::extract_traceparent(&req);
                         let peer = conn.src;
@@ -159,7 +158,6 @@ impl Inbound {
                             pi.clone(),
                             conn.clone(),
                             self.enable_orig_src,
-                            revoked_rx.clone(),
                             req,
                         )
                         .instrument(info_span!("inbound", %id, %peer));
@@ -239,7 +237,6 @@ impl Inbound {
         pi: Arc<ProxyInputs>,
         conn: Connection,
         enable_original_source: bool,
-        revoked: Option<watch::Receiver<bool>>,
         req: H2Request,
     ) {
         let src = conn.src;
@@ -378,7 +375,7 @@ impl Inbound {
                 .instrument(trace_span!("hbone server"))
                 .await
             });
-        let res = handle_connection!(conn_guard, revoked, send);
+        let res = handle_connection!(conn_guard, send);
         ri.result_tracker.record(res);
     }
 
