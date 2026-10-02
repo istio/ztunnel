@@ -164,8 +164,16 @@ where
     A: BufferedSplitter,
     B: BufferedSplitter,
 {
-    let (mut rd, mut wd) = downstream.split_into_buffered_reader();
-    let (mut ru, mut wu) = upstream.split_into_buffered_reader();
+    // Dropping the copy before it completes (e.g. on a late policy rejection) aborts it too, so
+    // the sides are reset unless the copy closes them gracefully.
+    let mut sides = ResetOnDrop::<A, B>(Some((
+        downstream.split_into_buffered_reader(),
+        upstream.split_into_buffered_reader(),
+    )));
+    let ((rd, wd), (ru, wu)) = sides
+        .0
+        .as_mut()
+        .expect("sides are only taken once copying ends");
     // A connection aborted error means a transport failed out from under the copy (e.g. an HBONE
     // ping timeout). Rather than closing gracefully, which the peers would take as a clean end of
     // stream, the other direction is stopped and both sides are reset. An abort caused by an HBONE
@@ -181,7 +189,7 @@ where
                 _ => e.into(),
             }))
         };
-        let res = copy_buf(&mut rd, &mut wu, stats, false).await;
+        let res = copy_buf(rd, wu, stats, false).await;
         if is_aborted(&res) {
             aborted.store(true, Ordering::Relaxed);
             trace!(?res, "send aborted");
@@ -191,7 +199,7 @@ where
         }
         let res = ignore_io_errors(res).map_err(translate_error);
         trace!(?res, "send");
-        ignore_shutdown_errors(shutdown(&mut wu).await)
+        ignore_shutdown_errors(shutdown(wu).await)
             .map_err(translate_error)
             .map_err(|e| proxy::Error::ShutdownError(Box::new(e)))?;
         res
@@ -205,7 +213,7 @@ where
                 _ => e.into(),
             }))
         };
-        let res = copy_buf(&mut ru, &mut wd, stats, true).await;
+        let res = copy_buf(ru, wd, stats, true).await;
         if is_aborted(&res) {
             aborted.store(true, Ordering::Relaxed);
             trace!(?res, "receive aborted");
@@ -215,7 +223,7 @@ where
         }
         let res = ignore_io_errors(res).map_err(translate_error);
         trace!(?res, "receive");
-        ignore_shutdown_errors(shutdown(&mut wd).await)
+        ignore_shutdown_errors(shutdown(wd).await)
             .map_err(translate_error)
             .map_err(|e| proxy::Error::ShutdownError(Box::new(e)))?;
         res
@@ -242,9 +250,9 @@ where
             received.take_output().unwrap_or(Ok(0)),
         )
     };
-    if aborted.into_inner() {
-        A::reset(rd, wd);
-        B::reset(ru, wu);
+    if !aborted.into_inner() {
+        // Copying ended on its own, so the sides close gracefully rather than being reset.
+        drop(sides.0.take());
     }
 
     // Convert some error messages to easier to understand
@@ -252,6 +260,20 @@ where
     let received = received?;
     trace!(sent, received, "copy complete");
     Ok(())
+}
+
+type Halves<S> = (<S as BufferedSplitter>::R, <S as BufferedSplitter>::W);
+
+// ResetOnDrop holds the sides of a copy and resets them when dropped, unless they were taken.
+struct ResetOnDrop<A: BufferedSplitter, B: BufferedSplitter>(Option<(Halves<A>, Halves<B>)>);
+
+impl<A: BufferedSplitter, B: BufferedSplitter> Drop for ResetOnDrop<A, B> {
+    fn drop(&mut self) {
+        if let Some(((rd, wd), (ru, wu))) = self.0.take() {
+            A::reset(rd, wd);
+            B::reset(ru, wu);
+        }
+    }
 }
 
 // During copying, we may encounter errors from either side closing their connection. Typically, we
