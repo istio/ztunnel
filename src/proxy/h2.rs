@@ -18,8 +18,8 @@ use futures_core::ready;
 use h2::Reason;
 use std::io::Error;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -28,9 +28,65 @@ use tracing::trace;
 pub mod client;
 pub mod server;
 
+/// Why an HBONE connection was torn down on purpose. Its streams report this in place of the
+/// incidental error h2 hands them (a broken pipe, or a GOAWAY that reads as a clean close), so the
+/// access log shows the real cause and the copy propagates the abort to the other side.
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum Teardown {
+    #[error("HBONE ping timeout")]
+    PingTimeout,
+    #[error("HBONE ping error: {0}")]
+    PingError(String),
+    #[error("peer certificate revoked by CRL")]
+    CertificateRevoked,
+}
+
+impl Teardown {
+    fn into_io(self) -> Error {
+        Error::new(std::io::ErrorKind::ConnectionAborted, self)
+    }
+}
+
+/// The teardown cause of one HBONE connection, set once by its driver before it tears the
+/// connection down. A tunnel carried inside another tunnel's stream also reports the outer cause,
+/// since the outer teardown only reaches the inner streams as an opaque transport error.
+#[derive(Clone, Debug, Default)]
+pub struct TeardownCause {
+    cause: Arc<OnceLock<Teardown>>,
+    outer: Option<Arc<TeardownCause>>,
+}
+
+impl TeardownCause {
+    pub fn nested(outer: TeardownCause) -> Self {
+        Self {
+            cause: Default::default(),
+            outer: Some(Arc::new(outer)),
+        }
+    }
+
+    pub(crate) fn set(&self, teardown: Teardown) {
+        let _ = self.cause.set(teardown);
+    }
+
+    fn get(&self) -> Option<&Teardown> {
+        self.cause
+            .get()
+            .or_else(|| self.outer.as_ref().and_then(|o| o.get()))
+    }
+
+    /// Reports `e` as the teardown, if there was one.
+    pub(crate) fn attribute(&self, e: impl Into<crate::proxy::Error>) -> crate::proxy::Error {
+        match self.get() {
+            Some(teardown) => teardown.clone().into(),
+            None => e.into(),
+        }
+    }
+}
+
+/// do_ping_pong sends the teardown on `tx` if a ping times out or errors.
 async fn do_ping_pong(
     mut ping_pong: h2::PingPong,
-    tx: oneshot::Sender<()>,
+    tx: oneshot::Sender<Teardown>,
     dropped: Arc<AtomicBool>,
 ) {
     const PING_INTERVAL: Duration = Duration::from_secs(10);
@@ -47,7 +103,7 @@ async fn do_ping_pong(
             Err(_) => {
                 // We will log this again up in drive_connection, so don't worry about a high log level
                 log::trace!("ping timeout");
-                let _ = tx.send(());
+                let _ = tx.send(Teardown::PingTimeout);
                 return;
             }
             Ok(r) => match r {
@@ -67,7 +123,7 @@ async fn do_ping_pong(
                         log::error!("ping error: {e}");
                     }
 
-                    let _ = tx.send(());
+                    let _ = tx.send(Teardown::PingError(e.to_string()));
                     return;
                 }
             },
@@ -84,11 +140,13 @@ pub struct H2Stream {
 pub struct H2StreamReadHalf {
     recv_stream: h2::RecvStream,
     _dropped: Option<DropCounter>,
+    teardown: TeardownCause,
 }
 
 pub struct H2StreamWriteHalf {
     send_stream: h2::SendStream<Bytes>,
     _dropped: Option<DropCounter>,
+    teardown: TeardownCause,
 }
 
 pub struct TokioH2Stream {
@@ -115,6 +173,13 @@ impl DropCounter {
             active_count,
         };
         (Some(d1), Some(d2))
+    }
+}
+
+impl H2Stream {
+    /// The teardown cause of the connection carrying this stream.
+    pub fn teardown_cause(&self) -> TeardownCause {
+        self.read.teardown.clone()
     }
 }
 
@@ -214,7 +279,17 @@ impl tokio::io::AsyncWrite for TokioH2Stream {
 
 impl copy::ResizeBufRead for H2StreamReadHalf {
     fn poll_bytes(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<Bytes>> {
-        let this = self.get_mut();
+        self.get_mut().poll_bytes_inner(cx)
+    }
+
+    fn resize(self: Pin<&mut Self>, _new_size: usize) {
+        // NOP, we don't need to resize as we are abstracting the h2 buffer
+    }
+}
+
+impl H2StreamReadHalf {
+    fn poll_bytes_inner(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<Bytes>> {
+        let this = self;
         loop {
             match ready!(this.recv_stream.poll_data(cx)) {
                 None => return Poll::Ready(Ok(Bytes::new())),
@@ -228,6 +303,13 @@ impl copy::ResizeBufRead for H2StreamReadHalf {
                     return Poll::Ready(Ok(buf));
                 }
                 Some(Err(e)) => {
+                    // Once the connection is torn down on purpose, whatever h2 hands the stream is a
+                    // consequence of it; only a reset the peer sent is the stream's own cause.
+                    if let Some(teardown) = this.teardown.get()
+                        && !(e.is_reset() && e.is_remote())
+                    {
+                        return Poll::Ready(Err(teardown.clone().into_io()));
+                    }
                     return Poll::Ready(match e.reason() {
                         Some(Reason::NO_ERROR) | Some(Reason::CANCEL) => {
                             return Poll::Ready(Ok(Bytes::new()));
@@ -241,15 +323,43 @@ impl copy::ResizeBufRead for H2StreamReadHalf {
             }
         }
     }
-
-    fn resize(self: Pin<&mut Self>, _new_size: usize) {
-        // NOP, we don't need to resize as we are abstracting the h2 buffer
-    }
 }
 
 impl copy::AsyncWriteBuf for H2StreamWriteHalf {
     fn poll_write_buf(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: Bytes,
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let wanted = buf.len();
+        let res = ready!(this.poll_write_buf_inner(cx, buf));
+        Poll::Ready(match this.teardown.get() {
+            // h2 reports a torn down connection as no capacity or as one of several errors.
+            Some(teardown) if res.is_err() || (wanted > 0 && matches!(res, Ok(0))) => {
+                Err(teardown.clone().into_io())
+            }
+            _ => res,
+        })
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        let this = self.get_mut();
+        let res = ready!(this.poll_shutdown_inner(cx));
+        Poll::Ready(match this.teardown.get() {
+            Some(teardown) if res.is_err() => Err(teardown.clone().into_io()),
+            _ => res,
+        })
+    }
+}
+
+impl H2StreamWriteHalf {
+    fn poll_write_buf_inner(
+        &mut self,
         cx: &mut Context<'_>,
         buf: Bytes,
     ) -> Poll<std::io::Result<usize>> {
@@ -281,14 +391,7 @@ impl copy::AsyncWriteBuf for H2StreamWriteHalf {
         )))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
+    fn poll_shutdown_inner(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
         let r = self.write_slice(Bytes::new(), true);
         if r.is_ok() {
             return Poll::Ready(Ok(()));
@@ -312,5 +415,211 @@ fn h2_to_io_error(e: h2::Error) -> std::io::Error {
         e.into_io().unwrap()
     } else {
         std::io::Error::other(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::copy::{AsyncWriteBuf, ResizeBufRead};
+    use futures_util::future::poll_fn;
+
+    // Opens a single client stream against an in-memory h2 server, returning the stream halves
+    // wired to `teardown` and the client connection driver so the test can drop it. When
+    // `reset` is set, the server resets the stream with that reason right after responding.
+    async fn client_stream(
+        teardown: TeardownCause,
+        reset: Option<Reason>,
+    ) -> (
+        H2StreamReadHalf,
+        H2StreamWriteHalf,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let mut conn = h2::server::handshake(server_io).await.unwrap();
+            while let Some(Ok((req, mut respond))) = conn.accept().await {
+                let resp = http::Response::builder().status(200).body(()).unwrap();
+                let mut stream = respond.send_response(resp, false).unwrap();
+                match reset {
+                    // Reset once the client sends data, so the client holds the stream first.
+                    Some(reason) => {
+                        tokio::spawn(async move {
+                            let _ = req.into_body().data().await;
+                            stream.send_reset(reason);
+                        });
+                    }
+                    // Keep the response stream open; the test tears down the client side.
+                    None => std::mem::forget(stream),
+                }
+            }
+        });
+        let (mut send_req, conn) = h2::client::handshake(client_io).await.unwrap();
+        let driver = tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let req = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("http://example.com")
+            .body(())
+            .unwrap();
+        let (resp, send_stream) = send_req.send_request(req, false).unwrap();
+        let recv_stream = resp.await.unwrap().into_body();
+        let read = H2StreamReadHalf {
+            recv_stream,
+            _dropped: None,
+            teardown: teardown.clone(),
+        };
+        let write = H2StreamWriteHalf {
+            send_stream,
+            _dropped: None,
+            teardown,
+        };
+        (read, write, driver)
+    }
+
+    #[tokio::test]
+    async fn dropped_connection_without_failure_is_broken_pipe() {
+        let (mut read, _write, driver) = client_stream(TeardownCause::default(), None).await;
+        driver.abort();
+        let _ = driver.await;
+        let err = poll_fn(|cx| Pin::new(&mut read).poll_bytes(cx))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[tokio::test]
+    async fn dropped_connection_reports_ping_failure() {
+        let failure = TeardownCause::default();
+        let (mut read, mut write, driver) = client_stream(failure.clone(), None).await;
+        failure.set(Teardown::PingTimeout);
+        driver.abort();
+        let _ = driver.await;
+
+        let err = poll_fn(|cx| Pin::new(&mut read).poll_bytes(cx))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(err.to_string(), "HBONE ping timeout");
+
+        let err = poll_fn(|cx| Pin::new(&mut write).poll_write_buf(cx, Bytes::from_static(b"hi")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(err.to_string(), "HBONE ping timeout");
+    }
+
+    #[tokio::test]
+    async fn stream_error_is_not_attributed_to_connection_failure() {
+        let failure = TeardownCause::default();
+        let (mut read, mut write, _driver) =
+            client_stream(failure.clone(), Some(Reason::INTERNAL_ERROR)).await;
+        // The connection failure is recorded before the stream observes its own reset.
+        failure.set(Teardown::PingTimeout);
+        poll_fn(|cx| Pin::new(&mut write).poll_write_buf(cx, Bytes::from_static(b"hi")))
+            .await
+            .unwrap();
+
+        let err = poll_fn(|cx| Pin::new(&mut read).poll_bytes(cx))
+            .await
+            .unwrap_err();
+        assert_ne!(err.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert_ne!(err.to_string(), "HBONE ping timeout");
+    }
+
+    #[tokio::test]
+    async fn nested_connection_reports_outer_teardown() {
+        let outer = TeardownCause::default();
+        let (mut read, _write, driver) =
+            client_stream(TeardownCause::nested(outer.clone()), None).await;
+        outer.set(Teardown::CertificateRevoked);
+        driver.abort();
+        let _ = driver.await;
+
+        let err = poll_fn(|cx| Pin::new(&mut read).poll_bytes(cx))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert!(matches!(
+            err.get_ref().and_then(|e| e.downcast_ref::<Teardown>()),
+            Some(Teardown::CertificateRevoked)
+        ));
+    }
+
+    // Accepts a single stream on an in-memory h2 server and shuts the connection down abruptly,
+    // the way the server tears down a connection, returning what the server's stream reads next.
+    async fn read_after_abrupt_shutdown(teardown: Option<Teardown>) -> std::io::Result<Bytes> {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (mut send_req, client_conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = client_conn.await;
+        });
+        let req = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("http://example.com")
+            .body(())
+            .unwrap();
+        let (_resp, _send_stream) = send_req.send_request(req, false).unwrap();
+
+        let mut conn = h2::server::handshake(server_io).await.unwrap();
+        let (req, _respond) = conn.accept().await.unwrap().unwrap();
+        let cause = TeardownCause::default();
+        let mut read = H2StreamReadHalf {
+            recv_stream: req.into_body(),
+            _dropped: None,
+            teardown: cause.clone(),
+        };
+        if let Some(teardown) = teardown {
+            cause.set(teardown);
+        }
+        conn.abrupt_shutdown(Reason::NO_ERROR);
+        tokio::spawn(poll_fn(move |cx| conn.poll_closed(cx)));
+        poll_fn(|cx| Pin::new(&mut read).poll_bytes(cx)).await
+    }
+
+    #[tokio::test]
+    async fn abrupt_shutdown_without_teardown_is_eof() {
+        assert!(read_after_abrupt_shutdown(None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn abrupt_shutdown_reports_teardown() {
+        let err = read_after_abrupt_shutdown(Some(Teardown::CertificateRevoked))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(err.to_string(), "peer certificate revoked by CRL");
+    }
+
+    #[tokio::test]
+    async fn teardown_resets_copy_and_reports_cause() {
+        use tokio::io::AsyncReadExt;
+        let teardown = TeardownCause::default();
+        let (read, write, driver) = client_stream(teardown.clone(), None).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (downstream, _) = listener.accept().await.unwrap();
+        let copy = tokio::spawn(async move {
+            let cr = crate::copy::tests::connection_result();
+            crate::copy::copy_bidirectional(
+                crate::copy::TcpStreamSplitter(downstream),
+                H2Stream { read, write },
+                &cr,
+            )
+            .await
+        });
+
+        teardown.set(Teardown::CertificateRevoked);
+        driver.abort();
+
+        let err = client.read(&mut [0; 16]).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
+        assert!(matches!(
+            copy.await.unwrap(),
+            Err(crate::proxy::Error::Teardown(Teardown::CertificateRevoked))
+        ));
     }
 }
