@@ -15,6 +15,7 @@
 use crate::config;
 use crate::drain::DrainWatcher;
 use crate::proxy::Error;
+use crate::proxy::h2::{Teardown, TeardownCause};
 use crate::tls::revocation::{self, RevocationHandle};
 use bytes::Bytes;
 use futures_util::FutureExt;
@@ -32,6 +33,7 @@ pub struct H2Request {
     request: Parts,
     recv: h2::RecvStream,
     send: h2::server::SendResponse<Bytes>,
+    teardown: TeardownCause,
 }
 
 impl Debug for H2Request {
@@ -52,15 +54,24 @@ impl H2Request {
         self,
         resp: Response<()>,
     ) -> Result<crate::proxy::h2::H2Stream, Error> {
-        let H2Request { recv, mut send, .. } = self;
-        let send = send.send_response(resp, false)?;
+        let H2Request {
+            recv,
+            mut send,
+            teardown,
+            ..
+        } = self;
+        let send = send
+            .send_response(resp, false)
+            .map_err(|e| teardown.attribute(e))?;
         let read = crate::proxy::h2::H2StreamReadHalf {
             recv_stream: recv,
             _dropped: None, // We do not need to track on the server
+            teardown: teardown.clone(),
         };
         let write = crate::proxy::h2::H2StreamWriteHalf {
             send_stream: send,
             _dropped: None, // We do not need to track on the server
+            teardown,
         };
         let h2 = crate::proxy::h2::H2Stream { read, write };
         Ok(h2)
@@ -126,7 +137,7 @@ where
         .ping_pong()
         .expect("new connection should have ping_pong");
     // for ping to inform this fn to drop the connection
-    let (ping_drop_tx, mut ping_drop_rx) = oneshot::channel::<()>();
+    let (ping_drop_tx, mut ping_drop_rx) = oneshot::channel::<Teardown>();
     // for this fn to inform ping to give up when it is already dropped
     let dropped = Arc::new(AtomicBool::new(false));
     tokio::task::spawn(crate::proxy::h2::do_ping_pong(
@@ -135,6 +146,9 @@ where
         dropped.clone(),
     ));
 
+    // Each teardown arm records its cause before shutting down, so the streams report it rather
+    // than the GOAWAY, which they would otherwise read as a clean close.
+    let teardown = TeardownCause::default();
     let handler = |req| handler(req).map(|_| ());
     loop {
         let drain = drain.clone();
@@ -152,17 +166,20 @@ where
                     request,
                     recv,
                     send,
+                    teardown: teardown.clone(),
                 };
                 let handle = handler(req);
                 // Serve the stream in a new task
                 tokio::task::spawn(handle.in_current_span());
             }
-            _ = &mut ping_drop_rx => {
+            reason = &mut ping_drop_rx => {
                 // Ideally this would be a warning/error message. However, due to an issue during shutdown,
                 // by the time pods with in-pod know to shut down, the network namespace is destroyed.
                 // This blocks the ability to send a GOAWAY and gracefully shutdown.
                 // See https://github.com/istio/ztunnel/issues/1191.
-                debug!("HBONE ping timeout/error, peer may have shutdown");
+                let reason = reason.unwrap_or_else(|_| Teardown::PingError("ping task ended".to_string()));
+                debug!("{reason}, peer may have shutdown");
+                teardown.set(reason);
                 conn.abrupt_shutdown(h2::Reason::NO_ERROR);
                 break
             }
@@ -178,6 +195,7 @@ where
                         peer = %rev.peer(),
                         "terminating inbound connection: peer certificate revoked by CRL update"
                     );
+                    teardown.set(Teardown::CertificateRevoked);
                     conn.abrupt_shutdown(h2::Reason::NO_ERROR);
                     break;
                 }

@@ -725,7 +725,9 @@ impl ConnectionResult {
                 | proxy::Error::AuthorizationPolicyLateRejection => {
                     ResponseFlags::AuthorizationPolicyDenied
                 }
-                proxy::Error::CertificateRevoked => ResponseFlags::CertificateRevoked,
+                proxy::Error::Teardown(proxy::h2::Teardown::CertificateRevoked) => {
+                    ResponseFlags::CertificateRevoked
+                }
                 proxy::Error::ConnectionFailed(_) => ResponseFlags::ConnectionFailure,
                 _ => ResponseFlags::ConnectionFailure,
             };
@@ -816,4 +818,23 @@ fn to_value_owned<T: ToString>(t: T) -> impl Value {
 fn to_value<T: AsRef<str>>(t: &T) -> impl Value + '_ {
     let v: &str = t.as_ref();
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy::h2::Teardown;
+
+    #[test]
+    fn teardown_failure_reason() {
+        let reason = |e: proxy::Error| ConnectionResult::extract_failure_reason(&e);
+        assert_eq!(
+            reason(proxy::Error::Teardown(Teardown::CertificateRevoked)),
+            ResponseFlags::CertificateRevoked
+        );
+        assert_eq!(
+            reason(proxy::Error::Teardown(Teardown::PingTimeout)),
+            ResponseFlags::ConnectionFailure
+        );
+    }
 }

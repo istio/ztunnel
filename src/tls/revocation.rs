@@ -103,11 +103,6 @@ pub struct RevocationHandle {
 }
 
 impl RevocationHandle {
-    /// receiver for this connection's revocation signal
-    pub fn subscribe_revoked(&self) -> watch::Receiver<bool> {
-        self.revoked_rx.clone()
-    }
-
     /// peer identity string for access log attribution
     pub fn peer(&self) -> String {
         self.peer_identity
