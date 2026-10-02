@@ -175,11 +175,13 @@ where
         .as_mut()
         .expect("sides are only taken once copying ends");
     // A connection aborted error means a transport failed out from under the copy (e.g. an HBONE
-    // ping timeout). Rather than closing gracefully, which the peers would take as a clean end of
-    // stream, the other direction is stopped and both sides are reset. An abort caused by an HBONE
-    // teardown is reported as the teardown itself, whichever direction it surfaced in.
+    // ping timeout), and a connection reset means a peer aborted its connection. Rather than
+    // closing gracefully, which the other peer would take as a clean end of stream, the other
+    // direction is stopped and both sides are reset. An abort caused by an HBONE teardown is
+    // reported as the teardown itself, whichever direction it surfaced in, while a peer's reset is
+    // still not reported as an error (see `ignore_io_errors`).
     let aborted = AtomicBool::new(false);
-    let is_aborted = |res: &io::Result<u64>| matches!(res, Err(e) if e.kind() == io::ErrorKind::ConnectionAborted);
+    let is_aborted = |res: &io::Result<u64>| matches!(res, Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset));
     let downstream_to_upstream = async {
         let translate_error = |e: io::Error| {
             SendError(Box::new(match e.kind() {
@@ -193,7 +195,7 @@ where
         if is_aborted(&res) {
             aborted.store(true, Ordering::Relaxed);
             trace!(?res, "send aborted");
-            return res.map_err(|e| {
+            return ignore_io_errors(res).map_err(|e| {
                 proxy::Error::from_teardown(&e).unwrap_or_else(|| translate_error(e))
             });
         }
@@ -217,7 +219,7 @@ where
         if is_aborted(&res) {
             aborted.store(true, Ordering::Relaxed);
             trace!(?res, "receive aborted");
-            return res.map_err(|e| {
+            return ignore_io_errors(res).map_err(|e| {
                 proxy::Error::from_teardown(&e).unwrap_or_else(|| translate_error(e))
             });
         }
@@ -694,6 +696,13 @@ pub(crate) mod tests {
         let (read, res) = copy_with_failing_upstream(io::ErrorKind::ConnectionAborted).await;
         assert_eq!(read.unwrap_err().kind(), io::ErrorKind::ConnectionReset);
         assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn reset_upstream_resets_downstream_quietly() {
+        let (read, res) = copy_with_failing_upstream(io::ErrorKind::ConnectionReset).await;
+        assert_eq!(read.unwrap_err().kind(), io::ErrorKind::ConnectionReset);
+        assert!(res.is_ok());
     }
 
     #[tokio::test]
