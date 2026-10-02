@@ -423,17 +423,21 @@ fn stream_error(e: h2::Error) -> std::io::Error {
             h2_to_io_error(e)
         }
         Some(_) => Teardown::Transport(e.to_string()).into_io(),
+        None if e.is_reset() && e.is_remote() => peer_reset_error(e),
         None if e.is_remote() => Error::new(std::io::ErrorKind::ConnectionAborted, e),
         None => h2_to_io_error(e),
     }
 }
 
-// A reset the peer sent with an error aborts the stream, see `stream_error`.
-fn peer_reset_error(reason: Reason) -> std::io::Error {
-    Error::new(
-        std::io::ErrorKind::ConnectionAborted,
-        h2::Error::from(reason),
-    )
+// A reset the peer sent with an error aborts the stream, see `stream_error`. CONNECT_ERROR is how
+// the peer relays a TCP reset, so it is reported the same way as a reset of a local connection.
+fn peer_reset_error(e: impl Into<h2::Error>) -> std::io::Error {
+    let e = e.into();
+    let kind = match e.reason() {
+        Some(Reason::CONNECT_ERROR) => std::io::ErrorKind::ConnectionReset,
+        _ => std::io::ErrorKind::ConnectionAborted,
+    };
+    Error::new(kind, e)
 }
 
 fn h2_to_io_error(e: h2::Error) -> std::io::Error {
@@ -860,6 +864,44 @@ mod tests {
         assert_eq!(buf, b"hi");
         drop(backend);
         assert_eq!(app.read(&mut [0; 16]).await.unwrap(), 0);
+        assert!(server_copy.await.unwrap().is_ok());
+    }
+
+    // Aborts `from`'s TCP connection, sending a reset.
+    fn reset(from: tokio::net::TcpStream) {
+        from.set_zero_linger().unwrap();
+        drop(from);
+    }
+
+    #[tokio::test]
+    async fn app_reset_resets_backend() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut app, mut backend, server_copy) = tunnel().await;
+        app.write_all(b"hi").await.unwrap();
+        let mut buf = [0; 2];
+        backend.read_exact(&mut buf).await.unwrap();
+
+        reset(app);
+
+        let err = backend.read(&mut [0; 16]).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
+        // A peer's reset is propagated, but not reported as an error.
+        assert!(server_copy.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn backend_reset_resets_app() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut app, mut backend, server_copy) = tunnel().await;
+        backend.write_all(b"hi").await.unwrap();
+        let mut buf = [0; 2];
+        app.read_exact(&mut buf).await.unwrap();
+
+        reset(backend);
+
+        let err = app.read(&mut [0; 16]).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
+        // A peer's reset is propagated, but not reported as an error.
         assert!(server_copy.await.unwrap().is_ok());
     }
 }
