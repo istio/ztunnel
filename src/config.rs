@@ -107,7 +107,8 @@ const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24); // 24 hours
 const DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT: Duration = Duration::from_secs(60 * 5); // 5 minutes
 const DEFAULT_POOL_MAX_STREAMS_PER_CONNECTION: u16 = 100; //Go: 100, Hyper: 200, Envoy: 2147483647 (lol), Spec recommended minimum 100
-// Retries are off by default, so upgrading ztunnel does not change connect behavior.
+// Retries are off by default. With them off no per-attempt deadline is set either, so upgrading
+// ztunnel does not change connect behavior: only the TCP connect is bounded, as before.
 const DEFAULT_OUTBOUND_CONNECT_MAX_RETRIES: usize = 0;
 const DEFAULT_OUTBOUND_CONNECT_BASE_BACKOFF: Duration = Duration::from_millis(50);
 const DEFAULT_OUTBOUND_CONNECT_MAX_BACKOFF: Duration = Duration::from_millis(500);

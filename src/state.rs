@@ -420,71 +420,69 @@ impl ProxyState {
             return None;
         };
 
-        let candidates: Vec<_> = svc
-            .endpoints
-            .iter()
-            .filter_map(|ep| {
-                let Some(wl) = self.workloads.find_uid(&ep.workload_uid) else {
-                    debug!("failed to fetch workload for {}", ep.workload_uid);
-                    return None;
-                };
+        let candidates = svc.endpoints.iter().filter_map(|ep| {
+            let Some(wl) = self.workloads.find_uid(&ep.workload_uid) else {
+                debug!("failed to fetch workload for {}", ep.workload_uid);
+                return None;
+            };
 
-                let in_network = wl.network == src.network;
-                let has_network_gateway = wl.network_gateway.is_some();
-                let has_address = !wl.workload_ips.is_empty() || !wl.hostname.is_empty();
-                if !has_address {
-                    // Workload has no IP. We can only reach it via a network gateway
-                    // WDS is client-agnostic, so we will get a network gateway for a workload
-                    // even if it's in the same network; we should never use it.
-                    if in_network || !has_network_gateway {
+            let in_network = wl.network == src.network;
+            let has_network_gateway = wl.network_gateway.is_some();
+            let has_address = !wl.workload_ips.is_empty() || !wl.hostname.is_empty();
+            if !has_address {
+                // Workload has no IP. We can only reach it via a network gateway
+                // WDS is client-agnostic, so we will get a network gateway for a workload
+                // even if it's in the same network; we should never use it.
+                if in_network || !has_network_gateway {
+                    return None;
+                }
+            }
+
+            match resolution_mode {
+                ServiceResolutionMode::Standard => {
+                    if target_port.unwrap_or_default() == 0 && !ep.port.contains_key(&svc_port) {
+                        // Filter workload out, it doesn't have a matching port
+                        trace!(
+                            "filter endpoint {}, it does not have service port {}",
+                            ep.workload_uid, svc_port
+                        );
                         return None;
                     }
                 }
-
-                match resolution_mode {
-                    ServiceResolutionMode::Standard => {
-                        if target_port.unwrap_or_default() == 0 && !ep.port.contains_key(&svc_port)
-                        {
-                            // Filter workload out, it doesn't have a matching port
-                            trace!(
-                                "filter endpoint {}, it does not have service port {}",
-                                ep.workload_uid, svc_port
-                            );
-                            return None;
-                        }
-                    }
-                    ServiceResolutionMode::Waypoint => {
-                        if target_port.is_none() && wl.application_tunnel.is_none() {
-                            // We ignore this for app_tunnel; in this case, the port does not need to be on the service.
-                            // This is only valid for waypoints, which are not explicitly addressed by users.
-                            // We do happen to do a lookup by `waypoint-svc:15008`, this is not a literal call on that service;
-                            // the port is not required at all if they have application tunnel, as it will be handled by ztunnel on the other end.
-                            trace!(
-                                "filter waypoint endpoint {}, target port is not defined",
-                                ep.workload_uid
-                            );
-                            return None;
-                        }
+                ServiceResolutionMode::Waypoint => {
+                    if target_port.is_none() && wl.application_tunnel.is_none() {
+                        // We ignore this for app_tunnel; in this case, the port does not need to be on the service.
+                        // This is only valid for waypoints, which are not explicitly addressed by users.
+                        // We do happen to do a lookup by `waypoint-svc:15008`, this is not a literal call on that service;
+                        // the port is not required at all if they have application tunnel, as it will be handled by ztunnel on the other end.
+                        trace!(
+                            "filter waypoint endpoint {}, target port is not defined",
+                            ep.workload_uid
+                        );
+                        return None;
                     }
                 }
-                Some((ep, wl))
-            })
-            .collect();
+            }
+            Some((ep, wl))
+        });
 
-        if !deprioritized.is_empty() {
-            let fresh: Vec<_> = candidates
+        if deprioritized.is_empty() {
+            return self.select_endpoint(src, svc, candidates);
+        }
+
+        // Collected only here, since the fallback below walks the endpoints a second time.
+        let candidates: Vec<_> = candidates.collect();
+        {
+            let fresh = candidates
                 .iter()
                 .filter(|(_, wl)| !deprioritized.contains(&wl.uid))
-                .cloned()
-                .collect();
+                .cloned();
             // Prefer endpoints no earlier attempt has failed on. This deliberately runs *before*
             // the locality ranking in `select_endpoint`, so an untried endpoint in a worse
             // locality beats a tried one in a better locality. Ranking first would pin a Failover
             // service whose top-ranked tier holds a single endpoint to that same dead endpoint on
             // every retry.
-            if !fresh.is_empty()
-                && let Some(selected) = self.select_endpoint(src, svc, fresh)
-            {
+            if let Some(selected) = self.select_endpoint(src, svc, fresh) {
                 return Some(selected);
             }
             // Nothing selectable among the untried endpoints: either there were none, or a Strict
@@ -493,7 +491,7 @@ impl ProxyState {
             // than it was before the deprioritized list existed.
         }
 
-        self.select_endpoint(src, svc, candidates)
+        self.select_endpoint(src, svc, candidates.into_iter())
     }
 
     /// Picks one of `candidates`, honoring the service's locality load balancing mode and
@@ -502,14 +500,13 @@ impl ProxyState {
         &self,
         src: &Workload,
         svc: &Service,
-        candidates: Vec<(&'a Endpoint, Arc<Workload>)>,
+        candidates: impl Iterator<Item = (&'a Endpoint, Arc<Workload>)>,
     ) -> Option<(&'a Endpoint, Arc<Workload>)> {
         let options = match svc.load_balancer {
             Some(ref lb) if lb.mode != LoadBalancerMode::Standard => {
                 let network_preferred = !lb.routing_preferences.is_empty()
                     && lb.routing_preferences[0] == LoadBalancerScopes::Network;
                 let ranks = candidates
-                    .into_iter()
                     .filter_map(|(ep, wl)| {
                         // Load balancer will define N targets we want to match
                         // Consider [network, region, zone]
@@ -570,7 +567,7 @@ impl ProxyState {
                     .collect();
                 options
             }
-            _ => candidates,
+            _ => candidates.collect(),
         };
         options
             .choose_weighted(&mut rand::rng(), |(_, wl)| wl.capacity as u64)
