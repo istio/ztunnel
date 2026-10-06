@@ -2574,7 +2574,7 @@ mod tests {
         let cfg = crate::config::parse_config().unwrap();
         // Retries are opt-in, so an upgrade does not change connect behavior.
         assert_eq!(cfg.outbound_connect_max_retries, 0);
-        assert_eq!(cfg.outbound_connect_base_backoff, Duration::from_millis(50));
+        assert_eq!(cfg.outbound_connect_base_backoff, Duration::from_millis(10));
         assert_eq!(cfg.outbound_connect_max_backoff, Duration::from_millis(500));
     }
 
