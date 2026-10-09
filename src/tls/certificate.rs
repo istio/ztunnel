@@ -51,7 +51,10 @@ pub struct Expiration {
 pub struct WorkloadCertificate {
     /// cert is the leaf certificate
     pub cert: Certificate,
-    /// chain is the entire trust chain, excluding the leaf and root
+    /// chain is the certificates presented after the leaf.
+    /// - `new` (Istio CA): the intermediates only. The roots go to `roots`.
+    /// - `from_der` (SPIFFE): everything after the leaf in the SVID, normally the
+    ///   intermediates. It keeps a root too if the sender includes one.
     pub chain: Vec<Certificate>,
     pub private_key: PrivateKeyDer<'static>,
 
@@ -234,6 +237,20 @@ fn parse_cert_multi(mut cert: &[u8]) -> Result<Vec<Certificate>, Error> {
         .collect()
 }
 
+/// Parse concatenated DER certificates; each certificate's own length header delimits it.
+fn parse_cert_multi_der(mut der: &[u8]) -> Result<Vec<Certificate>, Error> {
+    let mut certs = Vec::new();
+    while !der.is_empty() {
+        let (rest, parsed) = x509_parser::parse_x509_certificate(der)?;
+        certs.push(Certificate {
+            der: CertificateDer::from(parsed.as_raw().to_vec()),
+            expiry: expiration(parsed),
+        });
+        der = rest;
+    }
+    Ok(certs)
+}
+
 fn parse_key(mut key: &[u8]) -> Result<PrivateKeyDer<'static>, Error> {
     let mut reader = std::io::BufReader::new(Cursor::new(&mut key));
     let parsed = rustls_pemfile::read_one(&mut reader)
@@ -275,6 +292,37 @@ impl WorkloadCertificate {
             cert,
             chain,
             private_key: key,
+            roots,
+            root_store: Arc::new(roots_store),
+        })
+    }
+
+    /// Build a certificate from the three DER fields of a SPIFFE `X509SVID`, as the Workload
+    /// and Broker APIs deliver them: a PKCS#8 private key, a chain with the leaf first and any
+    /// intermediates after it, and a trust bundle that may hold several roots.
+    pub fn from_der(key: &[u8], chain: &[u8], bundle: &[u8]) -> Result<WorkloadCertificate, Error> {
+        let mut chain = parse_cert_multi_der(chain)?.into_iter();
+        let cert = chain
+            .next()
+            .ok_or_else(|| Error::CertificateParseError("no certificate".to_string()))?;
+
+        let roots = parse_cert_multi_der(bundle)?;
+        if roots.is_empty() {
+            return Err(Error::InvalidRootCert(
+                "no root certificate present".to_string(),
+            ));
+        }
+
+        let mut roots_store = RootCertStore::empty();
+        let (_valid, invalid) =
+            roots_store.add_parsable_certificates(roots.iter().map(|c| c.der.clone()));
+        if invalid > 0 {
+            tracing::warn!("warning: found {invalid} invalid root certs");
+        }
+        Ok(WorkloadCertificate {
+            cert,
+            chain: chain.collect(),
+            private_key: PrivateKeyDer::Pkcs8(key.to_vec().into()),
             roots,
             root_store: Arc::new(roots_store),
         })
@@ -452,7 +500,7 @@ mod test {
         TEST_ROOT, TEST_ROOT_KEY, TEST_ROOT2, TEST_ROOT2_KEY, TestIdentity, crl_pem_revoking_cert,
         generate_intermediate_ca,
     };
-    use crate::tls::{WorkloadCertificate, io_error_is_cert_revoked};
+    use crate::tls::{Error, WorkloadCertificate, io_error_is_cert_revoked};
 
     use std::io::Write;
     use std::str::FromStr;
@@ -516,6 +564,13 @@ mod test {
         let mut buf = [0u8; 4];
         tls.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"serv");
+
+        // The same client rebuilt from DER, with both roots in one DER bundle.
+        let (key, chain, bundle) = der_parts(&cert2);
+        let cert2 = WorkloadCertificate::from_der(&key, &chain, &bundle).unwrap();
+        assert_eq!(cert2.roots.len(), 2);
+        let id = Identity::from_str("spiffe://td/ns/n/sa/a").unwrap();
+        handshake(&cert1, &cert2, id).await;
     }
 
     /// Outbound client must abort TLS when the peer's leaf cert appears in the loaded CRL (i.e. is revoked).
@@ -665,5 +720,95 @@ mod test {
             .await
             .expect_err("connection should fail: intermediate cert is revoked");
         assert!(io_error_is_cert_revoked(&err));
+    }
+
+    /// Split a PEM-built certificate into the three DER buffers that `from_der` takes.
+    fn der_parts(wc: &WorkloadCertificate) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let key = wc.private_key.secret_der().to_vec();
+        let chain: Vec<u8> = wc
+            .cert_and_intermediates_der()
+            .iter()
+            .flat_map(|c| c.as_ref().to_vec())
+            .collect();
+        let bundle: Vec<u8> = wc.roots.iter().flat_map(|c| c.der.to_vec()).collect();
+        (key, chain, bundle)
+    }
+
+    async fn handshake(server: &WorkloadCertificate, client: &WorkloadCertificate, id: Identity) {
+        let tls = TlsAcceptor::from(Arc::new(server.server_config(None).unwrap()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let (accepted, _) = listener.accept().await.unwrap();
+        let connector = client.outbound_connector(vec![id], None).unwrap();
+        tokio::try_join!(tls.accept(accepted), connector.connect(stream)).unwrap();
+    }
+
+    #[test]
+    fn from_der_round_trip() {
+        let pem = crate::tls::mock::generate_test_certs(
+            &TestIdentity::Identity(Identity::from_str("spiffe://td/ns/n/sa/a").unwrap()),
+            Duration::ZERO,
+            Duration::from_secs(60),
+        );
+        let (key, chain, bundle) = der_parts(&pem);
+
+        let der = WorkloadCertificate::from_der(&key, &chain, &bundle).unwrap();
+
+        assert_eq!(der.cert.der, pem.cert.der);
+        assert!(der.chain.is_empty(), "leaf-only chain has no intermediates");
+        assert_eq!(der.roots.len(), 1);
+        assert_eq!(der.private_key.secret_der(), pem.private_key.secret_der());
+    }
+
+    #[tokio::test]
+    async fn from_der_with_intermediate() {
+        helpers::initialize_telemetry();
+        let id = Identity::from_str("spiffe://td/ns/n/sa/a").unwrap();
+        let (ia_key, ia_cert, _) = generate_intermediate_ca(TEST_ROOT_KEY);
+
+        // Server: leaf signed by the intermediate, rebuilt from DER.
+        let (key, leaf) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(id.clone()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(60),
+            None,
+            ia_key.as_bytes(),
+        );
+        let pem = WorkloadCertificate::new(
+            key.as_bytes(),
+            leaf.as_bytes(),
+            vec![ia_cert.as_bytes(), TEST_ROOT],
+        )
+        .unwrap();
+        let (key, chain, bundle) = der_parts(&pem);
+        let server = WorkloadCertificate::from_der(&key, &chain, &bundle).unwrap();
+        assert_eq!(server.chain.len(), 1);
+        assert_eq!(server.chain[0].der, pem.chain[0].der);
+        assert_eq!(server.roots.len(), 1);
+
+        // Client: root-signed, trusts only the root; must verify leaf -> IA -> root.
+        let client = crate::tls::mock::generate_test_certs(
+            &TestIdentity::Identity(id.clone()),
+            Duration::ZERO,
+            Duration::from_secs(60),
+        );
+        handshake(&server, &client, id).await;
+    }
+
+    #[test]
+    fn from_der_rejects_bad_input() {
+        let pem = crate::tls::mock::generate_test_certs(
+            &TestIdentity::Identity(Identity::from_str("spiffe://td/ns/n/sa/a").unwrap()),
+            Duration::ZERO,
+            Duration::from_secs(60),
+        );
+        let (key, chain, bundle) = der_parts(&pem);
+
+        let err = WorkloadCertificate::from_der(&key, &[], &bundle).unwrap_err();
+        assert!(matches!(err, Error::CertificateParseError(_)), "{err:?}");
+        let err = WorkloadCertificate::from_der(&key, &chain, &[]).unwrap_err();
+        assert!(matches!(err, Error::InvalidRootCert(_)), "{err:?}");
+        assert!(WorkloadCertificate::from_der(&key, &chain[..chain.len() / 2], &bundle).is_err());
     }
 }
