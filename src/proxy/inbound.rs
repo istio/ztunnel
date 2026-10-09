@@ -318,7 +318,7 @@ impl Inbound {
 
             // Establish upstream connection between original source and destination
             // We are allowing a bind to the original source address locally even if the ip address isn't on this node.
-            let stream = super::freebind_connect(src, dst, pi.socket_factory.as_ref())
+            let stream = super::freebind_connect(src, dst, pi.socket_factory.as_ref(), None)
                 .await
                 .map_err(Error::ConnectionFailed)
                 .map_err(InboundFlagError::build(

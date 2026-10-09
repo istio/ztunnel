@@ -720,6 +720,18 @@ impl ConnectionResult {
                     ResponseFlags::Http2HandshakeFailure
                 }
                 proxy::Error::MaybeHBONENetworkPolicyError(_) => ResponseFlags::NetworkPolicyError,
+                proxy::Error::HandshakeTimeout(stage) => match stage {
+                    proxy::HandshakeStage::Tls | proxy::HandshakeStage::InnerTls => {
+                        ResponseFlags::TlsFailure
+                    }
+                    proxy::HandshakeStage::Http2 | proxy::HandshakeStage::InnerHttp2 => {
+                        ResponseFlags::Http2HandshakeFailure
+                    }
+                    // The tunnel is up; the peer just never answered the request on it.
+                    proxy::HandshakeStage::Connect | proxy::HandshakeStage::InnerConnect => {
+                        ResponseFlags::ConnectionFailure
+                    }
+                },
                 proxy::Error::Identity(_) => ResponseFlags::IdentityError,
                 proxy::Error::AuthorizationPolicyRejection(_)
                 | proxy::Error::AuthorizationPolicyLateRejection => {

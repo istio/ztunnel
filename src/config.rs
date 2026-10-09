@@ -73,6 +73,9 @@ const ZTUNNEL_RESOURCE_CPU_LIMIT: &str = "ZTUNNEL_RESOURCE_CPU_LIMIT";
 const ZTUNNEL_RESOURCE_CPU_REQUEST: &str = "ZTUNNEL_RESOURCE_CPU_REQUEST";
 const POOL_MAX_STREAMS_PER_CONNECTION: &str = "POOL_MAX_STREAMS_PER_CONNECTION";
 const POOL_UNUSED_RELEASE_TIMEOUT: &str = "POOL_UNUSED_RELEASE_TIMEOUT";
+const OUTBOUND_CONNECT_MAX_RETRIES: &str = "OUTBOUND_CONNECT_MAX_RETRIES";
+const OUTBOUND_CONNECT_BASE_BACKOFF: &str = "OUTBOUND_CONNECT_BASE_BACKOFF";
+const OUTBOUND_CONNECT_MAX_BACKOFF: &str = "OUTBOUND_CONNECT_MAX_BACKOFF";
 // CONNECTION_TERMINATION_DEADLINE configures an explicit deadline
 const CONNECTION_TERMINATION_DEADLINE: &str = "CONNECTION_TERMINATION_DEADLINE";
 // TERMINATION_GRACE_PERIOD_SECONDS configures the Kubernetes terminationGracePeriodSeconds configuration.
@@ -104,6 +107,11 @@ const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24); // 24 hours
 const DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT: Duration = Duration::from_secs(60 * 5); // 5 minutes
 const DEFAULT_POOL_MAX_STREAMS_PER_CONNECTION: u16 = 100; //Go: 100, Hyper: 200, Envoy: 2147483647 (lol), Spec recommended minimum 100
+// Retries are off by default. With them off no per-attempt deadline is set either, so upgrading
+// ztunnel does not change connect behavior: only the TCP connect is bounded, as before.
+const DEFAULT_OUTBOUND_CONNECT_MAX_RETRIES: usize = 0;
+const DEFAULT_OUTBOUND_CONNECT_BASE_BACKOFF: Duration = Duration::from_millis(10);
+const DEFAULT_OUTBOUND_CONNECT_MAX_BACKOFF: Duration = Duration::from_millis(500);
 
 const DEFAULT_INPOD_MARK: u32 = 1337;
 
@@ -226,6 +234,13 @@ pub struct Config {
     pub pool_max_streams_per_conn: u16,
 
     pub pool_unused_release_timeout: Duration,
+
+    /// Retries after the initial outbound connect attempt. 0 disables retrying.
+    pub outbound_connect_max_retries: usize,
+    /// Delay before the first outbound connect retry. Doubles after each subsequent failure.
+    pub outbound_connect_base_backoff: Duration,
+    /// Upper bound on the delay between outbound connect retries.
+    pub outbound_connect_max_backoff: Duration,
 
     pub socks5_addr: Option<SocketAddr>,
     pub admin_addr: Address,
@@ -797,6 +812,19 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT,
         )?,
 
+        outbound_connect_max_retries: parse_default(
+            OUTBOUND_CONNECT_MAX_RETRIES,
+            DEFAULT_OUTBOUND_CONNECT_MAX_RETRIES,
+        )?,
+        outbound_connect_base_backoff: parse_duration_default(
+            OUTBOUND_CONNECT_BASE_BACKOFF,
+            DEFAULT_OUTBOUND_CONNECT_BASE_BACKOFF,
+        )?,
+        outbound_connect_max_backoff: parse_duration_default(
+            OUTBOUND_CONNECT_MAX_BACKOFF,
+            DEFAULT_OUTBOUND_CONNECT_MAX_BACKOFF,
+        )?,
+
         // window size: per-stream limit
         window_size: parse_default(HTTP2_STREAM_WINDOW_SIZE, 4 * 1024 * 1024)?,
         // connection window size: per connection.
@@ -966,6 +994,13 @@ fn validate_config(cfg: Config) -> Result<Config, Error> {
     if !cfg.proxy && !cfg.dns_proxy {
         return Err(Error::ProxyConfig(anyhow!(
             "ztunnel run without any servers enabled"
+        )));
+    }
+
+    if cfg.outbound_connect_base_backoff > cfg.outbound_connect_max_backoff {
+        return Err(Error::InvalidState(format!(
+            "{OUTBOUND_CONNECT_BASE_BACKOFF} ({:?}) must not exceed {OUTBOUND_CONNECT_MAX_BACKOFF} ({:?})",
+            cfg.outbound_connect_base_backoff, cfg.outbound_connect_max_backoff
         )));
     }
 
@@ -1380,6 +1415,24 @@ pub mod tests {
             env::remove_var(ZTUNNEL_RESOURCE_CPU_LIMIT);
             env::remove_var(ZTUNNEL_RESOURCE_CPU_REQUEST);
         }
+    }
+
+    #[test]
+    fn outbound_connect_base_backoff_must_not_exceed_max() {
+        // Built from a parsed config rather than env vars, since other tests parse the
+        // environment concurrently and an invalid value there would break them.
+        let cfg = |base_ms, max_ms| Config {
+            outbound_connect_base_backoff: Duration::from_millis(base_ms),
+            outbound_connect_max_backoff: Duration::from_millis(max_ms),
+            ..parse_config().unwrap()
+        };
+        assert!(validate_config(cfg(50, 500)).is_ok());
+        assert!(validate_config(cfg(500, 500)).is_ok());
+        let err = validate_config(cfg(600, 500)).unwrap_err();
+        assert!(
+            matches!(&err, Error::InvalidState(msg) if msg.contains(OUTBOUND_CONNECT_BASE_BACKOFF)),
+            "{err}"
+        );
     }
 
     #[test]
