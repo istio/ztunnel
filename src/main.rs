@@ -69,8 +69,10 @@ fn main() -> anyhow::Result<()> {
         .build()
         .unwrap()
         .block_on(async move {
+            // Register signal handlers first, as PID 1 the kernel drops signals with no handler.
+            let shutdown = signal::Shutdown::new();
             let config = Arc::new(config::parse_config()?);
-            proxy(config).await
+            proxy(config, shutdown).await
         })
 }
 
@@ -93,9 +95,12 @@ fn version() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn proxy(cfg: Arc<config::Config>) -> anyhow::Result<()> {
+async fn proxy(cfg: Arc<config::Config>, shutdown: signal::Shutdown) -> anyhow::Result<()> {
     info!("version: {}", version::BuildInfo::new());
     increase_open_files_limit();
     info!("running with config: {}", serde_yaml::to_string(&cfg)?);
-    app::build(cfg).await?.wait_termination().await
+    app::build_with_shutdown(cfg, shutdown)
+        .await?
+        .wait_termination()
+        .await
 }
