@@ -24,10 +24,10 @@ use itertools::Itertools;
 use notify::{Config, RecommendedWatcher};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, FileIdMap, new_debouncer_opt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use std::future::Future;
-use std::io::Cursor;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,15 +44,13 @@ async fn root_to_store(root_cert: &RootCert) -> Result<rustls::RootCertStore, Er
             let certfile = tokio::fs::read(f)
                 .await
                 .map_err(|e| Error::InvalidRootCert(e.to_string()))?;
-            let mut reader = std::io::BufReader::new(Cursor::new(certfile));
-            let certs = rustls_pemfile::certs(&mut reader)
+            let certs = CertificateDer::pem_slice_iter(&certfile)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| Error::InvalidRootCert(e.to_string()))?;
             roots.add_parsable_certificates(certs);
         }
         RootCert::Static(b) => {
-            let mut reader = std::io::BufReader::new(Cursor::new(b));
-            let certs = rustls_pemfile::certs(&mut reader)
+            let certs = CertificateDer::pem_slice_iter(b.as_ref())
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| Error::InvalidRootCert(e.to_string()))?;
             roots.add_parsable_certificates(certs);
