@@ -16,6 +16,7 @@ use crate::config;
 use crate::drain::DrainWatcher;
 use crate::proxy::Error;
 use crate::tls::revocation::{self, RevocationHandle};
+use crate::tls::trust_domains::{self, TrustDomainHandle};
 use bytes::Bytes;
 use futures_util::FutureExt;
 use http::Response;
@@ -101,6 +102,7 @@ pub async fn serve_connection<F, Fut>(
     drain: DrainWatcher,
     mut force_shutdown: watch::Receiver<()>,
     mut revocation: Option<RevocationHandle>,
+    mut trust_domain: Option<TrustDomainHandle>,
     handler: F,
 ) -> Result<(), Error>
 where
@@ -177,6 +179,18 @@ where
                     debug!(
                         peer = %rev.peer(),
                         "terminating inbound connection: peer certificate revoked by CRL update"
+                    );
+                    conn.abrupt_shutdown(h2::Reason::NO_ERROR);
+                    break;
+                }
+            }
+            // Accepted trust domains changed and the peer's is no longer among them: like revocation, it
+            // is no longer trusted, so terminate rather than drain.
+            _ = trust_domains::wait_for_removal(trust_domain.as_mut()) => {
+                if let Some(td) = trust_domain.as_ref() {
+                    debug!(
+                        trust_domain = %td.trust_domain(),
+                        "terminating inbound connection: peer trust domain is no longer accepted"
                     );
                     conn.abrupt_shutdown(h2::Reason::NO_ERROR);
                     break;

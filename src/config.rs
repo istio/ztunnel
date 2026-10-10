@@ -90,6 +90,7 @@ const HTTP2_FRAME_SIZE: &str = "HTTP2_FRAME_SIZE";
 const UNSTABLE_ENABLE_SOCKS5: &str = "UNSTABLE_ENABLE_SOCKS5";
 
 const CRL_PATH: &str = "CRL_PATH";
+const TRUST_DOMAINS_PATH: &str = "TRUST_DOMAINS_PATH";
 
 const DEFAULT_WORKER_THREADS: u16 = 2;
 // Fraction of the node's logical cores used for worker threads when no explicit CPU limit is set.
@@ -336,6 +337,9 @@ pub struct Config {
 
     // path to CRL file; if set, enables CRL checking
     pub crl_path: Option<PathBuf>,
+    // path to the file listing trust domains accepted on inbound connections in addition to our own,
+    // one per line; reloaded on change
+    pub trust_domains_path: Option<PathBuf>,
     pub enable_enhanced_baggage: bool,
 }
 
@@ -949,6 +953,10 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ipv6_enabled,
 
         crl_path: env::var(CRL_PATH)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from),
+        trust_domains_path: env::var(TRUST_DOMAINS_PATH)
             .ok()
             .filter(|s| !s.is_empty())
             .map(PathBuf::from),

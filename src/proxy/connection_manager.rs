@@ -54,6 +54,36 @@ pub async fn await_revocation(rx: Option<watch::Receiver<bool>>) {
     }
 }
 
+/// A connection's pending close signal, boxed so it costs a single pointer in each stream's future.
+pub type ClosedSignal = std::pin::Pin<Box<dyn std::future::Future<Output = Error> + Send>>;
+
+/// Combines the signals that close an already accepted connection: CRL revocation of the peer's
+/// certificate, and removal of the peer's trust domain from the accepted set. Returns `None` when the
+/// connection has neither. Each resolves as [`await_revocation`] does, yielding the error to attribute.
+pub fn closed_signal(
+    crl_revoked: Option<watch::Receiver<bool>>,
+    trust_domain_removed: Option<watch::Receiver<bool>>,
+) -> Option<ClosedSignal> {
+    if crl_revoked.is_none() && trust_domain_removed.is_none() {
+        return None;
+    }
+    Some(Box::pin(async move {
+        tokio::select! {
+            biased;
+            _ = await_revocation(crl_revoked) => Error::CertificateRevoked,
+            _ = await_revocation(trust_domain_removed) => Error::TrustDomainRemoved,
+        }
+    }))
+}
+
+/// Resolves with the reason once `signal` fires; pends forever when there is none.
+pub async fn await_closed(signal: Option<ClosedSignal>) -> Error {
+    match signal {
+        None => std::future::pending().await,
+        Some(signal) => signal.await,
+    }
+}
+
 struct ConnectionDrain {
     // TODO: this should almost certainly be changed to a type which has counted references exposed.
     // tokio::sync::watch can be subscribed without taking a write lock and exposes references
@@ -112,23 +142,27 @@ pub struct ConnectionGuard {
 // Inlining it removes this entirely, and the macro ensures we do it consistently across the various areas we use it.
 #[macro_export]
 macro_rules! handle_connection {
-    // `$crl_revoked` is an `Option<tokio::sync::watch::Receiver<bool>>`: the per-connection CRL
-    // revocation signal (`None` when no client cert / no CRL, e.g. plaintext passthrough). The two
-    // termination arms mirror each other — the RBAC drain yields `AuthorizationPolicyLateRejection`
-    // and a CRL revocation yields `CertificateRevoked` — so the existing `record(res)` attributes
-    // either via `extract_failure_reason` with no call-site conditionals.
-    ($connguard:expr, $crl_revoked:expr, $future:expr) => {{
+    // `$crl_revoked` and `$trust_domain_removed` are `Option<tokio::sync::watch::Receiver<bool>>`: the
+    // per-connection signals that the peer's certificate was revoked by a CRL, or that its trust domain
+    // is no longer accepted (`None` when not tracked, e.g. plaintext passthrough). They are combined into
+    // one boxed arm to keep this per-stream future small. The termination arms mirror each other — the
+    // RBAC drain yields `AuthorizationPolicyLateRejection`, the close signal `CertificateRevoked` or
+    // `TrustDomainRemoved` — so the existing `record(res)` attributes either via `extract_failure_reason`
+    // with no call-site conditionals.
+    ($connguard:expr, $crl_revoked:expr, $trust_domain_removed:expr, $future:expr) => {{
         let watch = $connguard.watcher();
+        let closed =
+            $crate::proxy::connection_manager::closed_signal($crl_revoked, $trust_domain_removed);
         // `biased` with the termination arms first makes attribution deterministic.
         // Both signals are set *before* the connection is torn down,
         // so polling them ahead of `$future` guarantees a revocation/late-rejection
         // wins the race rather than the generic teardown error.
         tokio::select! {
             biased;
-            _ = $crate::proxy::connection_manager::await_revocation($crl_revoked) => {
-                // crl revocation signal originates in `RevocationIndex`, not `ConnectionManager` so release explicitly
+            err = $crate::proxy::connection_manager::await_closed(closed) => {
+                // close signals originate outside `ConnectionManager` so release explicitly
                 $connguard.release();
-                Err(Error::CertificateRevoked)
+                Err(err)
             }
             _signaled = watch.wait_for_drain() => Err(Error::AuthorizationPolicyLateRejection),
             res = $future => {
@@ -395,6 +429,46 @@ mod tests {
     use crate::rbac::Connection;
     use crate::state::{DemandProxyState, ProxyState};
     use crate::test_helpers::test_default_workload;
+    use tokio::sync::watch;
+
+    use super::{await_closed, closed_signal};
+    use crate::proxy::Error;
+
+    #[tokio::test]
+    async fn closed_signal_attribution() {
+        assert!(closed_signal(None, None).is_none());
+
+        let (crl_tx, crl_rx) = watch::channel(false);
+        let (td_tx, td_rx) = watch::channel(false);
+        let pending = closed_signal(Some(crl_rx.clone()), Some(td_rx.clone()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), await_closed(pending))
+                .await
+                .is_err(),
+            "must not resolve until signalled"
+        );
+
+        td_tx.send(true).unwrap();
+        let err = await_closed(closed_signal(Some(crl_rx.clone()), Some(td_rx.clone()))).await;
+        assert!(matches!(err, Error::TrustDomainRemoved), "got {err:?}");
+
+        // A revocation wins when both have fired.
+        crl_tx.send(true).unwrap();
+        let err = await_closed(closed_signal(Some(crl_rx), Some(td_rx))).await;
+        assert!(matches!(err, Error::CertificateRevoked), "got {err:?}");
+
+        // A dropped sender is not a close signal.
+        let (tx, rx) = watch::channel(false);
+        drop(tx);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                await_closed(closed_signal(None, Some(rx)))
+            )
+            .await
+            .is_err()
+        );
+    }
     use crate::xds::ProxyStateUpdateMutator;
     use crate::xds::istio::security::{Action, Authorization, Scope};
 
