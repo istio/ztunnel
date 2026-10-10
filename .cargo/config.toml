@@ -7,5 +7,11 @@ rustflags = ["-C", "force-frame-pointers"]
 [env]
 BORING_BSSL_FIPS_PATH = { value = "vendor/boringssl-fips/linux_x86_64", force = true, relative = true }
 BORING_BSSL_FIPS_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
-CFLAGS = "-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"
-CXXFLAGS = "-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"
+# The flag -mno-omit-leaf-frame-pointer is an x86/aarch64 only GCC option and breaks the C/C++ dependency builds on s390x and ppc64le.
+# So keeping only the portable -fno-omit-frame-pointer in the generic value and adding the leaf flag for the architectures whose compilers accept it.
+CFLAGS = "-fno-omit-frame-pointer"
+CXXFLAGS = "-fno-omit-frame-pointer"
+CFLAGS_x86_64_unknown_linux_gnu = "-mno-omit-leaf-frame-pointer"
+CXXFLAGS_x86_64_unknown_linux_gnu = "-mno-omit-leaf-frame-pointer"
+CFLAGS_aarch64_unknown_linux_gnu = "-mno-omit-leaf-frame-pointer"
+CXXFLAGS_aarch64_unknown_linux_gnu = "-mno-omit-leaf-frame-pointer"
