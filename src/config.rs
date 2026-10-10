@@ -202,6 +202,15 @@ impl serde::Serialize for MetadataVector {
 
 #[derive(serde::Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct MeshTlsConfig {
+    pub crypto_provider: String,
+    pub tls12_enabled: bool,
+    pub compliance_policy: String,
+    pub cipher_suites: Vec<String>,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct Config {
     /// If true, the HBONE proxy will be used.
     pub proxy: bool,
@@ -337,6 +346,8 @@ pub struct Config {
     // path to CRL file; if set, enables CRL checking
     pub crl_path: Option<PathBuf>,
     pub enable_enhanced_baggage: bool,
+
+    pub mesh_tls: MeshTlsConfig,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -953,6 +964,13 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .filter(|s| !s.is_empty())
             .map(PathBuf::from),
         enable_enhanced_baggage: parse_default(ENABLE_ENHANCED_BAGGAGE, true)?,
+
+        mesh_tls: MeshTlsConfig {
+            crypto_provider: crate::tls::CRYPTO_PROVIDER.to_string(),
+            tls12_enabled: *crate::TLS12_ENABLED,
+            compliance_policy: crate::COMPLIANCE_POLICY.clone(),
+            cipher_suites: crate::tls::MESH_CIPHER_SUITES.clone(),
+        },
     })
 }
 
