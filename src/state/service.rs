@@ -960,6 +960,21 @@ mod tests {
         IpAddr::V6(Ipv6Addr::from(segments))
     }
 
+    fn nshost(name: &str, ns: &str) -> NamespacedHostname {
+        NamespacedHostname {
+            namespace: ns.into(),
+            hostname: format!("{name}.{ns}.svc.cluster.local").into(),
+        }
+    }
+
+    fn endpoint(uid: &str, status: HealthStatus) -> Endpoint {
+        Endpoint {
+            workload_uid: uid.into(),
+            port: HashMap::new(),
+            status,
+        }
+    }
+
     #[test]
     fn shared_vip_different_namespaces() {
         let mut store = ServiceStore::default();
