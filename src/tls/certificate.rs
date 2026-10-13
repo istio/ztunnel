@@ -20,7 +20,7 @@ use itertools::Itertools;
 use std::{cmp, iter};
 
 use rustls::client::Resumption;
-use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::pem::{PemObject, SectionKind};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 use rustls::server::WebPkiClientVerifier;
@@ -207,10 +207,18 @@ pub fn parse_cert(cert: Vec<u8>) -> Result<Certificate, Error> {
 }
 
 fn parse_cert_multi(cert: &[u8]) -> Result<Vec<Certificate>, Error> {
-    CertificateDer::pem_slice_iter(cert)
+    // Iterate over all recognised sections (not just certificates) so that unexpected content,
+    // such as a private key in a root bundle, is rejected rather than silently skipped.
+    <(SectionKind, Vec<u8>)>::pem_slice_iter(cert)
         .map(|p| {
-            let der =
+            let (kind, der) =
                 p.map_err(|e| Error::CertificateParseError(format!("invalid certificate: {e}")))?;
+            if kind != SectionKind::Certificate {
+                return Err(Error::CertificateParseError(format!(
+                    "unexpected PEM section in certificate bundle: {kind:?}"
+                )));
+            }
+            let der = CertificateDer::from(der);
             let (_, parsed) = x509_parser::parse_x509_certificate(&der)?;
             let expiry = expiration(parsed);
             Ok(Certificate { der, expiry })
@@ -488,6 +496,27 @@ mod test {
         assert!(parse_cert_multi(b"").unwrap().is_empty());
         let e = parse_err(parse_cert_multi(&TEST_ROOT[..TEST_ROOT.len() / 2]));
         assert!(e.starts_with("invalid certificate:"), "{e}");
+    }
+
+    #[test]
+    fn parse_cert_multi_rejects_non_cert_sections() {
+        let (key, _) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(Identity::from_str("spiffe://td/ns/n/sa/a").unwrap()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(60),
+            None,
+            TEST_ROOT_KEY,
+        );
+        let mut bundle = TEST_ROOT.to_vec();
+        bundle.push(b'\n');
+        bundle.extend(key.as_bytes());
+        let e = parse_err(parse_cert_multi(&bundle));
+        assert!(e.contains("unexpected PEM section"), "{e}");
+        // Multiple certificates are still fine.
+        let mut ok = TEST_ROOT.to_vec();
+        ok.push(b'\n');
+        ok.extend(TEST_ROOT2);
+        assert_eq!(parse_cert_multi(&ok).unwrap().len(), 2);
     }
 
     #[test]
