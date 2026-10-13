@@ -179,8 +179,11 @@ where
         .expect("sides are only taken once copying ends");
     // A tunnel's teardown only reaches the copy through h2 I/O, which it may not be doing, e.g.
     // once the tunnel has finished sending and the copy waits on the other side. So the copy
-    // watches for it too. A copy has at most one tunnel side.
-    let cause = A::teardown_cause(rd).or_else(|| B::teardown_cause(ru));
+    // watches for it too. A copy has at most one tunnel side. The watch is boxed so that it does
+    // not grow every copy future.
+    let torn_down = A::teardown_cause(rd)
+        .or_else(|| B::teardown_cause(ru))
+        .map(|cause| Box::pin(async move { cause.torn_down().await }));
     // A connection aborted error means a transport failed out from under the copy (e.g. an HBONE
     // ping timeout), and a connection reset means a peer aborted its connection. Rather than
     // closing gracefully, which the other peer would take as a clean end of stream, the other
@@ -239,8 +242,8 @@ where
             Err(res) => return res,
         },
         teardown = async {
-            match cause {
-                Some(cause) => cause.torn_down().await,
+            match torn_down {
+                Some(torn_down) => torn_down.await,
                 None => std::future::pending().await,
             }
         } => {
