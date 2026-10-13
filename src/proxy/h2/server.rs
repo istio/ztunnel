@@ -161,7 +161,11 @@ where
                     dropped.store(true, Ordering::Relaxed);
                     return Ok(());
                 };
-                let (request, send) = request?;
+                let (request, send) = request.inspect_err(|e| {
+                    if let Some(reason) = Teardown::from_transport(e) {
+                        teardown.set(reason);
+                    }
+                })?;
                 let (request, recv) = request.into_parts();
                 let req = H2Request {
                     request,
@@ -210,7 +214,13 @@ where
         _ = force_shutdown.changed() => {
             return Err(Error::DrainTimeOut)
         }
-        _ = poll_closed => {}
+        res = poll_closed => {
+            if let Err(e) = res
+                && let Some(reason) = Teardown::from_transport(&e)
+            {
+                teardown.set(reason);
+            }
+        }
     }
     // Mark we are done with the connection
     drop(drain);
@@ -255,6 +265,44 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    // A stream that is not doing I/O still learns of the transport failure.
+    #[tokio::test]
+    async fn transport_failure_is_recorded() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (server_io, fail) = crate::proxy::h2::tests::FailingTransport::new(server_io);
+        let (_drain_trigger, drain) = drain::new();
+        let (_force_tx, force_rx) = watch::channel(());
+        let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve_connection(
+            Arc::new(crate::test_helpers::test_config()),
+            server_io,
+            drain,
+            force_rx,
+            None,
+            move |req: H2Request| {
+                let _ = req_tx.send(req);
+                async {}
+            },
+        ));
+        let (mut send_req, conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(conn);
+        let req = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("http://example.com")
+            .body(())
+            .unwrap();
+        let (_resp, _send) = send_req.send_request(req, false).unwrap();
+        let req = req_rx.recv().await.unwrap();
+
+        crate::proxy::h2::tests::fail_transport(&fail, std::io::ErrorKind::TimedOut);
+
+        let teardown =
+            tokio::time::timeout(std::time::Duration::from_secs(5), req.teardown.torn_down())
+                .await
+                .expect("the transport failure should be recorded");
+        assert!(matches!(teardown, Teardown::Transport(_)), "{teardown:?}");
     }
 
     /// A stream sending many small DATA frames that the application has not yet read should
