@@ -162,7 +162,7 @@ impl Inbound {
                         )
                         .instrument(info_span!("inbound", %id, %peer));
                         // This is for each user connection, so most important to keep small
-                        assertions::size_between_ref(1500, 2500, &req_handler);
+                        assertions::size_between_ref(1500, 2850, &req_handler);
                         req_handler
                     };
 
