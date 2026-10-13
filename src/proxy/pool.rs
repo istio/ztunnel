@@ -95,18 +95,18 @@ impl ConnSpawner {
         let tcp_stream =
             super::freebind_connect(None, key.dst, self.socket_factory.as_ref(), connect_timeout)
                 .await
-                .map_err(|e: io::Error| match e.kind() {
-                    io::ErrorKind::TimedOut => Error::MaybeHBONENetworkPolicyError(e),
-                    _ => e.into(),
-                })?;
+                .map_err(Error::Io)?;
 
         let tls_stream = super::with_deadline(
             deadline,
-            super::HandshakeStage::Tls,
-            connector.connect(tcp_stream).inspect_err(|e| {
-                if crate::tls::io_error_is_cert_revoked(e) {
+            super::HBONEHandshakeStage::Tls,
+            connector.connect(tcp_stream).map_err(|e| {
+                if crate::tls::io_error_is_cert_revoked(&e) {
                     self.metrics
                         .record_crl_rejection(crate::proxy::metrics::Reporter::source);
+                    Error::CertificateRevoked
+                } else {
+                    e.into()
                 }
             }),
         )
@@ -129,7 +129,7 @@ impl ConnSpawner {
         });
         let sender = super::with_deadline(
             deadline,
-            super::HandshakeStage::Http2,
+            super::HBONEHandshakeStage::Http2,
             h2::client::spawn_connection(
                 self.cfg.clone(),
                 tls_stream,
@@ -431,7 +431,7 @@ impl WorkloadHBONEPool {
         let revoked = connection.revoked_receiver();
         let (stream, baggage) = super::with_deadline(
             deadline,
-            super::HandshakeStage::Connect,
+            super::HBONEHandshakeStage::Connect,
             connection.send_request(request),
         )
         .await?;
@@ -608,7 +608,7 @@ mod test {
 
     use super::*;
     use crate::drain::DrainWatcher;
-    use crate::proxy::HandshakeStage;
+    use crate::proxy::HBONEHandshakeStage;
     use crate::state::workload;
     use crate::state::{DemandProxyState, ProxyState, WorkloadInfo};
     use crate::test_helpers::test_default_workload;
@@ -1171,7 +1171,7 @@ mod test {
 
         let (err, took) = send_with_deadline(&mut pool, addr).await;
         assert!(
-            matches!(err, Error::HandshakeTimeout(HandshakeStage::Tls)),
+            matches!(err, Error::HandshakeTimeout(HBONEHandshakeStage::Tls)),
             "got {err:?}"
         );
         assert!(took < Duration::from_secs(1), "took {took:?}");
@@ -1205,7 +1205,7 @@ mod test {
 
         let (err, took) = send_with_deadline(&mut pool, addr).await;
         assert!(
-            matches!(err, Error::HandshakeTimeout(HandshakeStage::Connect)),
+            matches!(err, Error::HandshakeTimeout(HBONEHandshakeStage::Connect)),
             "got {err:?}"
         );
         assert!(took < Duration::from_secs(1), "took {took:?}");

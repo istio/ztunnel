@@ -425,7 +425,7 @@ impl OutboundConnection {
             cert.outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())?;
         let tls_stream = super::with_deadline(
             deadline,
-            super::HandshakeStage::InnerTls,
+            super::HBONEHandshakeStage::InnerTls,
             connector.connect(upgraded).inspect_err(|e| {
                 if crate::tls::io_error_is_cert_revoked(e) {
                     self.pi
@@ -455,7 +455,7 @@ impl OutboundConnection {
         });
         let mut sender = super::with_deadline(
             deadline,
-            super::HandshakeStage::InnerHttp2,
+            super::HBONEHandshakeStage::InnerHttp2,
             super::h2::client::spawn_connection(
                 self.pi.cfg.clone(),
                 tls_stream,
@@ -471,7 +471,7 @@ impl OutboundConnection {
         let http_request = self.create_hbone_request(remote_addr, req, Some(origin_network));
         let (inner_upgraded, baggage) = super::with_deadline(
             deadline,
-            super::HandshakeStage::InnerConnect,
+            super::HBONEHandshakeStage::InnerConnect,
             sender.send_request(http_request),
         )
         .await?;
@@ -1000,7 +1000,7 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
-    use crate::proxy::HandshakeStage;
+    use crate::proxy::HBONEHandshakeStage;
     use crate::proxy::connection_manager::ConnectionManager;
     use crate::proxy::{LocalWorkloadInformation, pool::WorkloadHBONEPool};
     use crate::state::WorkloadInfo;
@@ -2590,12 +2590,12 @@ mod tests {
         ))));
 
         for stage in [
-            HandshakeStage::Tls,
-            HandshakeStage::Http2,
-            HandshakeStage::Connect,
-            HandshakeStage::InnerTls,
-            HandshakeStage::InnerHttp2,
-            HandshakeStage::InnerConnect,
+            HBONEHandshakeStage::Tls,
+            HBONEHandshakeStage::Http2,
+            HBONEHandshakeStage::Connect,
+            HBONEHandshakeStage::InnerTls,
+            HBONEHandshakeStage::InnerHttp2,
+            HBONEHandshakeStage::InnerConnect,
         ] {
             assert!(retriable(&Error::HandshakeTimeout(stage)), "{stage}");
         }

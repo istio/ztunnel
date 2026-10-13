@@ -721,15 +721,14 @@ impl ConnectionResult {
                 }
                 proxy::Error::MaybeHBONENetworkPolicyError(_) => ResponseFlags::NetworkPolicyError,
                 proxy::Error::HandshakeTimeout(stage) => match stage {
-                    proxy::HandshakeStage::Tls | proxy::HandshakeStage::InnerTls => {
+                    proxy::HBONEHandshakeStage::Tls | proxy::HBONEHandshakeStage::InnerTls => {
                         ResponseFlags::TlsFailure
                     }
-                    proxy::HandshakeStage::Http2 | proxy::HandshakeStage::InnerHttp2 => {
+                    proxy::HBONEHandshakeStage::Http2 | proxy::HBONEHandshakeStage::InnerHttp2 => {
                         ResponseFlags::Http2HandshakeFailure
                     }
-                    proxy::HandshakeStage::Connect | proxy::HandshakeStage::InnerConnect => {
-                        ResponseFlags::ConnectionFailure
-                    }
+                    proxy::HBONEHandshakeStage::Connect
+                    | proxy::HBONEHandshakeStage::InnerConnect => ResponseFlags::ConnectionFailure,
                 },
                 proxy::Error::Identity(_) => ResponseFlags::IdentityError,
                 proxy::Error::AuthorizationPolicyRejection(_)

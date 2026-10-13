@@ -396,7 +396,7 @@ pub enum Error {
     /// The peer accepted the TCP connection but did not finish setting up the tunnel on it in
     /// time.
     #[error("timed out during {0}")]
-    HandshakeTimeout(HandshakeStage),
+    HandshakeTimeout(HBONEHandshakeStage),
 
     #[error("destination disconnected before all data was written")]
     BackendDisconnected,
@@ -650,7 +650,7 @@ pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandshakeStage {
+pub enum HBONEHandshakeStage {
     Tls,
     Http2,
     Connect,
@@ -659,22 +659,22 @@ pub enum HandshakeStage {
     InnerConnect,
 }
 
-impl fmt::Display for HandshakeStage {
+impl fmt::Display for HBONEHandshakeStage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            HandshakeStage::Tls => "TLS handshake",
-            HandshakeStage::Http2 => "HTTP/2 handshake",
-            HandshakeStage::Connect => "HBONE CONNECT",
-            HandshakeStage::InnerTls => "inner TLS handshake",
-            HandshakeStage::InnerHttp2 => "inner HTTP/2 handshake",
-            HandshakeStage::InnerConnect => "inner HBONE CONNECT",
+            HBONEHandshakeStage::Tls => "TLS handshake",
+            HBONEHandshakeStage::Http2 => "HTTP/2 handshake",
+            HBONEHandshakeStage::Connect => "HBONE CONNECT",
+            HBONEHandshakeStage::InnerTls => "inner TLS handshake",
+            HBONEHandshakeStage::InnerHttp2 => "inner HTTP/2 handshake",
+            HBONEHandshakeStage::InnerConnect => "inner HBONE CONNECT",
         })
     }
 }
 
 pub(crate) async fn with_deadline<T, E: Into<Error>>(
     deadline: Option<tokio::time::Instant>,
-    stage: HandshakeStage,
+    stage: HBONEHandshakeStage,
     fut: impl Future<Output = Result<T, E>>,
 ) -> Result<T, Error> {
     match deadline {
