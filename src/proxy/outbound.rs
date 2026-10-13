@@ -154,20 +154,12 @@ impl Outbound {
 }
 
 /// An established upstream connection, before any downstream bytes have moved.
-///
-/// Named `ConnectedUpstream` because `crate::state::Upstream` already exists. Double HBONE collapses
-/// into `Hbone` too: by the time we splice, its inner `H2Stream` is indistinguishable from a
-/// single-hop one.
 enum ConnectedUpstream {
     Hbone {
         stream: H2Stream,
-        /// CRL revocation signal of each tunnel leg the stream rides on, outermost first. Double
-        /// HBONE fills both (outer gateway, inner destination); a single hop leaves the second
-        /// `None`, which `await_revocation` parks on forever. The splice therefore races a fixed two
-        /// arms and attributes revocation identically on both paths.
+        /// Revocation signals, ordered outer tunnel then inner tunnel.
         revoked: [Option<watch::Receiver<bool>>; 2],
-        /// Graceful termination signal for double HBONE's inner tunnel, fired once the copy is done.
-        /// A single hop's tunnel is pooled, so the pool owns its draining and this is `None`.
+        /// Drains the unpooled inner tunnel after copying; the pool drains single-hop tunnels.
         inner_drain: Option<watch::Sender<bool>>,
     },
     Tcp(TcpStream),
@@ -198,42 +190,12 @@ impl OutboundConnection {
         self.proxy_to(source_stream, source_addr, dst_addr).await;
     }
 
-    /// Whether a failed attempt is worth repeating.
-    ///
-    /// Two families qualify. A *build* failure means this ztunnel's view of the mesh may simply
-    /// not have converged yet -- an endpoint list caught mid-rollout is the common case -- and
-    /// rebuilding re-reads state. A *connect* failure means the endpoint we picked did not
-    /// answer; selection deprioritizes it on the way back around, so the retry lands somewhere
-    /// else. Without that deprioritization retrying a connect would be pointless, since it would
-    /// mostly re-pick the same dead endpoint.
-    ///
-    /// Deliberately excluded:
-    /// - `Identity` and `WorkloadHBONEPoolDraining`, which fail identically against every
-    ///   endpoint: the first is a local certificate fetch, the second is our own shutdown.
-    /// - `HttpStatus`, where the peer answered and refused. This carries RBAC denials, and a
-    ///   policy decision does not change on retry. The exception is any 5xx: the destination
-    ///   failed on its side, most often a 503 because it cannot reach the application (typically
-    ///   the pod is shutting down and the app already exited). It is the CONNECT response, so no
-    ///   data has been sent yet and another endpoint can take the connection.
-    /// - `CertificateRevoked`, which is a deliberate security outcome.
-    ///
-    /// `MaybeHBONENetworkPolicyError` is retried even though its usual cause, a NetworkPolicy
-    /// blocking 15008 mesh-wide, fails every attempt the same way. The attempts share one
-    /// `CONNECTION_TIMEOUT` (see [`Self::connect_budget`]), so retrying a blocked port gives up no
-    /// later than a single attempt would have. Not retrying it would be worse: retries shrink each
-    /// attempt's connect timeout, so a slow but reachable endpoint would time out on its share and
-    /// then get no second try, where a plain TCP connect timeout (`Io`) does.
-    ///
-    /// `HandshakeTimeout` is retried for the same reason, and because the peer accepted the TCP
-    /// connection, it is this endpoint that stalled rather than anything blocking the port.
     fn is_retriable_connection_error(err: &Error) -> bool {
         matches!(
             err,
-            // Build: our view of the mesh may not have caught up.
             Error::NoHealthyUpstream(_)
                 | Error::NoValidDestination(_)
                 | Error::NoService(_)
-                // Connect: this endpoint did not answer.
                 | Error::Io(_)
                 | Error::Tls(_)
                 | Error::Http2Handshake(_)
@@ -243,14 +205,12 @@ impl OutboundConnection {
         ) || matches!(err, Error::HttpStatus(status) if status.is_server_error())
     }
 
-    /// The delay before retry number `retry` (1-based): `base` for the first retry, doubling
-    /// after each subsequent failure, capped at `max`.
+    /// Retry numbers are 1-based.
     fn retry_backoff(retry: usize, base: Duration, max: Duration) -> Duration {
         let doublings = u32::try_from(retry.saturating_sub(1)).unwrap_or(u32::MAX);
         base.saturating_mul(2u32.saturating_pow(doublings)).min(max)
     }
 
-    /// [`Self::retry_backoff`] with this proxy's configured base and max.
     fn configured_retry_backoff(&self, retry: usize) -> Duration {
         Self::retry_backoff(
             retry,
@@ -259,9 +219,6 @@ impl OutboundConnection {
         )
     }
 
-    /// The backoff to sleep before retrying after `err`, or `None` if the connect should give up:
-    /// the error is not worth retrying, the retries are spent, or the retry could not start before
-    /// `CONNECTION_TIMEOUT` runs out.
     fn retry_delay(
         &self,
         err: &Error,
@@ -276,31 +233,11 @@ impl OutboundConnection {
         Self::retry_within_deadline(start, backoff).then_some(backoff)
     }
 
-    /// The smallest connect timeout an attempt may be handed.
-    ///
-    /// A share small enough to expire during an ordinary connect is worse than no retry at all:
-    /// it fails a connect that would have succeeded, and burns a retry doing it. This is the
-    /// floor below which the split stops dividing -- either because the retry count is high
-    /// enough to slice `CONNECTION_TIMEOUT` that thin, or because the earlier attempts already
-    /// spent the budget.
+    /// Minimum budget for a useful connection attempt.
     const MIN_CONNECT_BUDGET: Duration = Duration::from_millis(50);
 
-    /// The connect timeout a single attempt is allowed.
-    ///
-    /// `CONNECTION_TIMEOUT` bounds a connect as a whole, not each attempt, so retrying must not
-    /// multiply the time a client waits before we give up. Whatever is left of that budget at
-    /// `start` -- the same timestamp the access log measures connect latency from, so the backoff
-    /// sleeps between attempts are charged against it too -- is split evenly across the attempts
-    /// still allowed: the one about to run, plus every retry still owed after it. The bound
-    /// therefore holds however many of those attempts we end up spending.
-    ///
-    /// An attempt that finishes early leaves its unspent share to the attempts behind it, so a
-    /// fast failure (a refused connect, say) does not cost the retry its full share.
-    ///
-    /// The split is floored at [`Self::MIN_CONNECT_BUDGET`]. That floor could let the attempts
-    /// overrun `CONNECTION_TIMEOUT`, so [`Self::retry_within_deadline`] also refuses to start a
-    /// retry once the deadline has passed. Together they bound a connect at `CONNECTION_TIMEOUT`
-    /// plus one floor, the most the final attempt can overrun by.
+    /// Splits the remaining connect budget across remaining attempts, subject to the floor.
+    /// The floor may extend an attempt beyond the remaining budget.
     fn connect_budget(start: Instant, retries: usize, max_retries: usize) -> Duration {
         let time_left = super::CONNECTION_TIMEOUT.saturating_sub(start.elapsed());
         let attempts_left = u32::try_from(max_retries.saturating_sub(retries).saturating_add(1))
@@ -309,11 +246,6 @@ impl OutboundConnection {
         std::cmp::max(share, Self::MIN_CONNECT_BUDGET)
     }
 
-    /// Whether a retry that first sleeps `backoff` would still start before the overall
-    /// `CONNECTION_TIMEOUT` measured from `start` runs out.
-    ///
-    /// Checked before sleeping, so a retry that could not start in time does not make the client
-    /// wait through a backoff first.
     fn retry_within_deadline(start: Instant, backoff: Duration) -> bool {
         start.elapsed().saturating_add(backoff) < super::CONNECTION_TIMEOUT
     }
@@ -329,14 +261,9 @@ impl OutboundConnection {
         Option<DerivedWorkload>,
         Box<ConnectionResultBuilder>,
         Box<Request>,
-        // Handed back rather than dropped here: it is what lists the connection in the connection
-        // manager, and the connection is not established until the caller has spliced it. Dropping
-        // it at the end of a successful connect would leave every live connection unlisted.
         OutboundConnectionGuard,
     )> {
         let mut retries = 0;
-        // Endpoints a previous attempt already failed on. Endpoint selection prefers anything
-        // else, so a retry does not just re-roll the dice onto the same dead endpoint.
         let mut deprioritized = DeprioritizedEndpoints::default();
         loop {
             // First find the source workload of this traffic. If we don't know where the request is from
@@ -352,15 +279,11 @@ impl OutboundConnection {
             let req = match Box::pin(build).await {
                 Ok(req) => Box::new(req),
                 Err(err) => {
-                    // Nothing was selected, so there is no endpoint to deprioritize; the retry
-                    // just re-reads state, which is the whole point here.
                     if let Some(backoff) = self.retry_delay(&err, retries, max_retries, start) {
                         retries += 1;
                         tokio::time::sleep(backoff).await;
                         continue;
                     }
-                    // No `ConnectionResultBuilder` exists yet, so this is the only place a build
-                    // failure gets recorded.
                     metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
                     return None;
                 }
@@ -384,17 +307,9 @@ impl OutboundConnection {
                 metrics,
             ));
 
-            // This attempt's share of the overall connect budget. Recomputed per attempt, so it
-            // picks up both the time the attempts before it spent and the backoff they slept.
-            //
-            // With retries off there is nothing to share the budget with, so no deadline is set
-            // and each step keeps the bound it had before retries existed: the TCP connect at
-            // `CONNECTION_TIMEOUT`, the handshakes and CONNECT unbounded.
             let budget =
                 (max_retries > 0).then(|| Self::connect_budget(start, retries, max_retries));
 
-            // Establish the upstream connection. This half touches no part of the downstream socket and
-            // copies nothing, so on failure `source_stream` is still owned and untouched here.
             let connected = match req.protocol {
                 OutboundProtocol::DOUBLEHBONE => {
                     // We box this since its not a common path and it would make the future really big.
@@ -424,10 +339,7 @@ impl OutboundConnection {
                     let backoff = self.retry_delay(&e, retries, max_retries, start);
                     connection_result_builder.build().record(Err(e));
                     let backoff = backoff?;
-                    // Deprioritize the endpoint we just failed on, so the next `build_request`
-                    // prefers a different one. This is the next hop, which for waypointed or
-                    // cross-network traffic is the waypoint or E/W gateway rather than the
-                    // backend -- the same endpoint that actually failed here.
+                    // Deprioritize the failed next hop (possibly a waypoint or gateway).
                     if let Some(wl) = &req.actual_destination_workload {
                         deprioritized.push(wl.uid.clone());
                     }
@@ -453,12 +365,7 @@ impl OutboundConnection {
             metrics::log_early_deny(source_addr, dest_addr, Reporter::source, Error::SelfCall);
             return;
         }
-        // Boxed: the retry loop holds a build, a connect and their per-attempt state, and
-        // inlining that here would put all of it in every connection's future for the whole life
-        // of the connection -- including the splice below, which needs none of it.
-        // `_conn_guard` keeps this connection listed in the connection manager. It has to stay
-        // bound through the splice below: dropping it is what unlists the connection, so it is the
-        // one piece of connect state that deliberately outlives the connect.
+        // Keep the tracking guard alive through the splice.
         let (connected, derived_workload, mut connection_result_builder, req, _conn_guard) =
             match Box::pin(self.connect_with_retries(
                 source_addr,
@@ -471,52 +378,34 @@ impl OutboundConnection {
                 Some(result) => result,
                 None => return,
             };
-        // Only double HBONE learns anything about the destination while connecting (from the peer's
-        // baggage). Grafting it on here keeps the connect half free of metrics entirely.
         if let Some(derived_workload) = derived_workload {
             *connection_result_builder =
                 connection_result_builder.with_derived_destination(&derived_workload);
         }
-        // `build()` emits the "connection open" access log entry, so it happens exactly once, after
-        // the connect has settled.
         let connection_stats = Box::new(connection_result_builder.build());
         debug!(
             dst=%req.actual_destination,
             target=?req.hbone_target_destination,
             "starting copy",
         );
-        // Dropped explicitly, not left to fall out of scope: the splice below is the long-lived
-        // half of a connection, and nothing in it reads the request. Holding `req` across that
-        // await would pin its allocation for as long as the connection is open, for no reason.
         drop(req);
         let res = Box::pin(self.splice(source_stream, connected, &connection_stats)).await;
         connection_stats.record(res);
     }
 
-    /// Connects a request through two layers of HBONE.
-    ///
-    /// Called directly rather than through a shared connect dispatcher, because this is the only
-    /// connect that learns something about the destination on the way: the `DerivedWorkload` built
-    /// from the peer's baggage, which the caller grafts onto the access log record.
     async fn connect_hbone_double(
         &mut self,
         remote_addr: SocketAddr,
         req: &Request,
         connect_timeout: Option<Duration>,
     ) -> Result<(ConnectedUpstream, Option<DerivedWorkload>), Error> {
-        // Fetched before the deadline starts, for the reason given in `deadline_after_cert_fetch`.
-        // The inner leg needs it anyway, and the pool's fetch for the outer tunnel is then a cache
-        // hit.
         let cert = self
             .pi
             .local_workload_information
             .fetch_certificate()
             .await?;
         let deadline = connect_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
-        // One deadline for the whole attempt, shared by both legs: the inner tunnel rides on the
-        // outer one, so a stall anywhere in either handshake is this attempt's stall.
-        // Create the outer HBONE stream. The outer tunnel's revocation signal is captured here so
-        // it can still be attributed once we are splicing over the inner tunnel.
+        // Both HBONE legs share the attempt deadline.
         let (upgraded, _, outer_revoked) =
             Box::pin(self.send_hbone_request(remote_addr, req, deadline)).await?;
         // Wrap upgraded to implement tokio's Async{Write,Read}
@@ -532,7 +421,6 @@ impl OutboundConnection {
             dst: req.actual_destination,
         };
 
-        // Establish inner TLS connection.
         let connector =
             cert.outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())?;
         let tls_stream = super::with_deadline(
@@ -608,7 +496,6 @@ impl OutboundConnection {
         ))
     }
 
-    /// Connects a single HBONE tunnel to `req.actual_destination`.
     async fn connect_hbone(
         &mut self,
         remote_addr: SocketAddr,
@@ -620,21 +507,12 @@ impl OutboundConnection {
             Box::pin(self.send_hbone_request(remote_addr, req, deadline)).await?;
         Ok(ConnectedUpstream::Hbone {
             stream,
-            // Single hop: there is no inner leg, and `await_revocation(None)` parks forever.
             revoked: [revoked, None],
-            // The tunnel is pooled, so the pool owns its draining.
             inner_drain: None,
         })
     }
 
-    /// Starts an attempt's `connect_timeout` deadline, after making sure this workload's
-    /// certificate is fetched.
-    ///
-    /// The deadline bounds network steps, and the fetch is not one: on a freshly started pod it
-    /// waits on the CSR, which can take seconds. Started before the fetch, the deadline could run
-    /// out before the TCP connect even began, failing an attempt against a healthy endpoint. The
-    /// pool fetches the certificate again when it opens a tunnel, but that is now a cache hit.
-    /// With no timeout there is nothing to protect, so nothing is fetched.
+    /// Fetch the certificate before starting the attempt deadline so CSR latency doesn't consume it.
     async fn deadline_after_cert_fetch(
         &self,
         connect_timeout: Option<Duration>,
@@ -649,10 +527,7 @@ impl OutboundConnection {
         Ok(Some(tokio::time::Instant::now() + timeout))
     }
 
-    /// Copies bytes between the downstream socket and an established upstream until one side closes.
-    ///
-    /// Unlike the connect half this consumes `source`, so it cannot be re-run: once it has been
-    /// entered, downstream bytes may already have moved.
+    /// Retries must finish before splicing: downstream bytes may be consumed here.
     async fn splice(
         &self,
         source: TcpStream,
@@ -665,11 +540,7 @@ impl OutboundConnection {
                 revoked: [outer_revoked, inner_revoked],
                 inner_drain,
             } => {
-                // Race the data copy against every tunnel leg's revocation signal (for double HBONE,
-                // inner = final dest, outer = e/w gw). `biased` with the revocation arms first makes
-                // attribution deterministic: the driver sets the signal before tearing the tunnel
-                // down, so a teardown from either hop surfaces as CERT_REVOKED rather than the
-                // generic reset the copy observed.
+                // Check revocation first so tunnel teardown is reported as CERT_REVOKED.
                 let res = tokio::select! {
                     biased;
                     _ = await_revocation(outer_revoked) => Err(Error::CertificateRevoked),
@@ -747,15 +618,11 @@ impl OutboundConnection {
             src: remote_addr.ip(),
             dst: req.actual_destination,
         });
-        // The deadline bounds whatever the pool has to do for this request: opening a new tunnel
-        // (TCP connect, TLS and HTTP/2 handshakes) if there is none to reuse, and the CONNECT
-        // either way.
         Box::pin(self.pool.send_request_pooled(&pool_key, request, deadline))
             .instrument(trace_span!("outbound connect"))
             .await
     }
 
-    /// Connects a plaintext TCP stream to `req.actual_destination`.
     async fn connect_tcp(
         &self,
         req: &Request,
@@ -2458,9 +2325,6 @@ mod tests {
         );
     }
 
-    /// Builds an `OutboundConnection` over the given XDS state (plus the well-known
-    /// `source-workload`), for tests that need to drive the connect path rather than just
-    /// `build_request`.
     async fn test_outbound_connection(
         workloads: Vec<XdsWorkload>,
         services: Vec<XdsService>,
@@ -2516,9 +2380,6 @@ mod tests {
         }
     }
 
-    /// The `example.com` service. Its endpoints come from whichever workloads declare it in
-    /// their `services` map, so with no such workloads `build_request` fails with
-    /// `NoHealthyUpstream`.
     fn example_service() -> XdsService {
         XdsService {
             hostname: "example.com".to_string(),
@@ -2551,19 +2412,14 @@ mod tests {
         let base = Duration::from_millis(50);
         let max = Duration::from_millis(500);
         let backoff = |retry| OutboundConnection::retry_backoff(retry, base, max);
-        // The first retry waits exactly the base; each one after doubles it.
         assert_eq!(backoff(1), Duration::from_millis(50));
         assert_eq!(backoff(2), Duration::from_millis(100));
         assert_eq!(backoff(3), Duration::from_millis(200));
         assert_eq!(backoff(4), Duration::from_millis(400));
-        // 800ms and up would exceed the ceiling.
         assert_eq!(backoff(5), max);
         assert_eq!(backoff(20), max);
-        // The retry count is operator configured, so doubling must saturate, not overflow.
         assert_eq!(backoff(33), max);
         assert_eq!(backoff(usize::MAX), max);
-        // `connect_with_retries` never sleeps before the first attempt, but 0 must not
-        // underflow either.
         assert_eq!(backoff(0), base);
 
         for i in 0..40 {
@@ -2575,22 +2431,18 @@ mod tests {
     #[test]
     fn outbound_connect_defaults() {
         let cfg = crate::config::parse_config().unwrap();
-        // Retries are opt-in, so an upgrade does not change connect behavior.
         assert_eq!(cfg.outbound_connect_max_retries, 0);
         assert_eq!(cfg.outbound_connect_base_backoff, Duration::from_millis(10));
         assert_eq!(cfg.outbound_connect_max_backoff, Duration::from_millis(500));
     }
 
-    /// A connect that started `spent` ago. `connect_budget` reads a real clock, so a budget
-    /// computed from this is a hair under the ideal value; [`assert_budget`] allows for that.
     fn started_ago(spent: Duration) -> Instant {
         Instant::now() - spent
     }
 
     #[track_caller]
     fn assert_budget(actual: Duration, expected: Duration) {
-        // Whatever the test spent reading the clock comes out of the budget, never gets added
-        // to it, so the error is one-sided.
+        // Clock-read overhead can only reduce the remaining budget.
         let slack = Duration::from_millis(50);
         assert!(
             actual <= expected && actual + slack >= expected,
@@ -2603,28 +2455,18 @@ mod tests {
         let budget = OutboundConnection::connect_budget;
         let total = crate::proxy::CONNECTION_TIMEOUT;
 
-        // Nothing spent yet: three attempts (the first, plus two retries) each get a
-        // third of the budget, not a full `CONNECTION_TIMEOUT` apiece.
         assert_budget(budget(started_ago(Duration::ZERO), 0, 2), total / 3);
-        // An unretried connect still gets the whole thing, so a deployment that never retries
-        // sees exactly the timeout it saw before.
         assert_budget(budget(started_ago(Duration::ZERO), 0, 0), total);
 
-        // Time already spent comes off the top, and what is left is split across the attempts
-        // that remain.
         let half = started_ago(total / 2);
-        assert_budget(budget(half, 1, 2), total / 4); // half left, two attempts to go
-        assert_budget(budget(half, 2, 2), total / 2); // half left, last attempt takes it all
+        assert_budget(budget(half, 1, 2), total / 4);
+        assert_budget(budget(half, 2, 2), total / 2);
 
-        // An attempt that returned early leaves its unspent share behind: barely any time gone,
-        // so the retry gets close to half of the full budget rather than another third.
         assert_budget(
             budget(started_ago(Duration::from_millis(1)), 1, 2),
             total / 2,
         );
 
-        // An overrun does not wrap, and does not hand back a budget an attempt cannot use: the
-        // floor is what a connect gets once the earlier attempts have spent everything.
         assert_eq!(
             budget(started_ago(total * 2), 0, 2),
             OutboundConnection::MIN_CONNECT_BUDGET
@@ -2637,17 +2479,11 @@ mod tests {
         let floor = OutboundConnection::MIN_CONNECT_BUDGET;
         let total = crate::proxy::CONNECTION_TIMEOUT;
 
-        // A modest retry count divides nowhere near the floor, so the floor changes nothing
-        // about how a normal connect is budgeted.
         assert!(budget(started_ago(Duration::ZERO), 0, 2) > floor);
 
-        // A retry count high enough to slice the budget below the floor stops at it instead.
-        // `CONNECTION_TIMEOUT / 400` is 25ms, half the floor.
         assert_eq!(budget(started_ago(Duration::ZERO), 0, 399), floor);
-        // And no retry count, however absurd, divides past it.
         assert_eq!(budget(started_ago(Duration::ZERO), 0, usize::MAX), floor);
 
-        // A budget nearly spent, with attempts still owed, hits the floor the same way.
         assert_eq!(
             budget(started_ago(total - Duration::from_millis(1)), 1, 2),
             floor
@@ -2656,10 +2492,7 @@ mod tests {
 
     #[test]
     fn connect_budget_never_exceeds_the_connect_timeout() {
-        // Walk the attempts of a fully retried connect in order, with each one hanging for its
-        // whole share -- the worst case. The total spent connecting must still fit in
-        // `CONNECTION_TIMEOUT`, which is the point of splitting it up in the first place. Retry
-        // counts this low never divide down to the floor, so it cannot buy any overshoot here.
+        // Model attempts that consume their full budgets, excluding backoff.
         for max_retries in 0..8 {
             let mut spent = Duration::ZERO;
             for retries in 0..=max_retries {
@@ -2681,9 +2514,7 @@ mod tests {
 
     #[test]
     fn connect_budget_floor_bounds_its_own_overshoot() {
-        // `connect_budget` on its own, without the deadline check: once the retry count is high
-        // enough for the floor to engage, the floor can overrun the budget by one floor per
-        // attempt. `deadline_bounds_a_fully_retried_connect` covers how the loop caps that.
+        // This tests budget allocation alone; the retry loop also checks the overall deadline.
         let floor = OutboundConnection::MIN_CONNECT_BUDGET;
         for max_retries in [8usize, 100, 400] {
             let attempts = max_retries + 1;
@@ -2707,21 +2538,14 @@ mod tests {
         let backoff = Duration::from_millis(100);
 
         assert!(within(started_ago(Duration::ZERO), backoff));
-        // A retry whose backoff alone would reach the deadline is not worth sleeping for.
         assert!(!within(started_ago(total - backoff), backoff));
-        // Once the deadline has passed, nothing more is attempted, whatever the backoff.
         assert!(!within(started_ago(total), Duration::ZERO));
         assert!(!within(started_ago(total * 2), Duration::ZERO));
-        // A huge configured backoff must not overflow the check.
         assert!(!within(started_ago(Duration::ZERO), Duration::MAX));
     }
 
     #[test]
     fn deadline_bounds_a_fully_retried_connect() {
-        // Walk a connect where every attempt hangs for its whole budget, the way
-        // `connect_with_retries` would: retry only while the deadline allows it. With the
-        // deadline check the floor can overrun `CONNECTION_TIMEOUT` by at most one floor, however
-        // many retries are configured -- rather than one floor per attempt.
         let floor = OutboundConnection::MIN_CONNECT_BUDGET;
         let total = crate::proxy::CONNECTION_TIMEOUT;
         for max_retries in [0usize, 2, 8, 100, 400, 10_000] {
@@ -2752,15 +2576,12 @@ mod tests {
         let retriable = OutboundConnection::is_retriable_connection_error;
         let addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
 
-        // Build failures: our view of the mesh may not have caught up yet.
         assert!(retriable(&Error::NoHealthyUpstream(addr)));
         assert!(retriable(&Error::NoValidDestination(Box::new(
             crate::test_helpers::test_default_workload()
         ))));
         assert!(retriable(&Error::NoService(addr)));
 
-        // Connect failures against the endpoint we picked. Retrying these is only worthwhile
-        // because selection deprioritizes that endpoint on the way back around.
         assert!(retriable(&Error::Io(std::io::Error::from(
             std::io::ErrorKind::ConnectionRefused
         ))));
@@ -2768,8 +2589,6 @@ mod tests {
             std::io::ErrorKind::ConnectionReset
         ))));
 
-        // A peer that accepted the TCP connection and then stalled: this endpoint is the problem,
-        // so another may well answer.
         for stage in [
             HandshakeStage::Tls,
             HandshakeStage::Http2,
@@ -2780,20 +2599,13 @@ mod tests {
         ] {
             assert!(retriable(&Error::HandshakeTimeout(stage)), "{stage}");
         }
-        // An HBONE connect timeout. Retrying cannot outlast the shared `CONNECTION_TIMEOUT`, and
-        // with retries on, each attempt's share is short enough to expire on a slow but reachable
-        // endpoint.
         assert!(retriable(&Error::MaybeHBONENetworkPolicyError(
             std::io::Error::from(std::io::ErrorKind::TimedOut)
         )));
 
-        // A peer that answered and refused: this carries RBAC denials, which a retry cannot
-        // change.
         assert!(!retriable(&Error::HttpStatus(
             http::StatusCode::UNAUTHORIZED
         )));
-        // Except a 5xx to the CONNECT: the destination failed on its side (a 503 when it could not
-        // reach its application), and nothing was sent to it, so another endpoint can serve this.
         assert!(retriable(&Error::HttpStatus(
             http::StatusCode::SERVICE_UNAVAILABLE
         )));
@@ -2804,12 +2616,9 @@ mod tests {
         assert!(retriable(&Error::HttpStatus(
             http::StatusCode::GATEWAY_TIMEOUT
         )));
-        // A deliberate security outcome, not a flaky endpoint.
         assert!(!retriable(&Error::CertificateRevoked));
-        // Our own shutdown: every endpoint fails the same way.
         assert!(!retriable(&Error::WorkloadHBONEPoolDraining));
 
-        // Nothing a retry can influence.
         assert!(!retriable(&Error::SelfCall));
         assert!(!retriable(&Error::NoWorkloadEndpoints(
             "example.com".to_string()
@@ -2822,8 +2631,6 @@ mod tests {
         )));
     }
 
-    /// How many outbound connections the connection manager is currently listing, read the same
-    /// way the admin dump reads them.
     fn listed_outbound(cm: &ConnectionManager) -> usize {
         let dump = serde_json::to_value(cm).expect("connection manager serializes");
         dump["outbound"]
@@ -2832,10 +2639,6 @@ mod tests {
             .len()
     }
 
-    /// A connection stays listed for as long as it is open, not just while it is being
-    /// established. The tracking guard is created inside the connect, so `connect_with_retries`
-    /// has to hand it back and `proxy_to` has to hold it across the splice -- dropping it when the
-    /// connect returns would leave a busy ztunnel reporting no outbound connections at all.
     #[tokio::test]
     async fn an_open_connection_stays_listed() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2846,7 +2649,6 @@ mod tests {
             test_outbound_connection(vec![dest_workload(2, "dest-workload")], vec![]).await;
         let cm = oc.pi.connection_manager.clone();
 
-        // A downstream connection for `proxy_to` to splice.
         let downstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = tokio::net::TcpStream::connect(downstream.local_addr().unwrap())
             .await
@@ -2859,9 +2661,7 @@ mod tests {
             oc.proxy_to(source_stream, source_addr, dest).await;
         });
 
-        // Round-trip a byte before asserting. Accepting upstream only proves the connect's TCP
-        // handshake landed, which this task can observe while `proxy_to` is still returning from
-        // the connect; bytes arriving upstream prove it has reached the splice.
+        // Round-trip data to ensure proxy_to has entered the splice before checking the listing.
         let (mut upstream_side, _) = upstream.accept().await.unwrap();
         client.write_all(b"x").await.unwrap();
         let mut buf = [0u8; 1];
@@ -2869,7 +2669,6 @@ mod tests {
 
         assert_eq!(listed_outbound(&cm), 1, "an open connection must be listed");
 
-        // Closing both ends ends the splice, and the listing with it.
         drop(client);
         drop(upstream_side);
         tokio::time::timeout(Duration::from_secs(5), proxy)
@@ -2886,7 +2685,6 @@ mod tests {
     #[tokio::test]
     async fn connect_with_retries_succeeds_without_backoff() {
         initialize_telemetry();
-        // A real listener, so the TCP connect half actually completes.
         let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
         let dest = listener.local_addr().unwrap();
 
@@ -2900,11 +2698,9 @@ mod tests {
             .expect("connect to a live listener should succeed");
 
         assert!(matches!(connected, ConnectedUpstream::Tcp(_)));
-        // Only double HBONE derives a workload while connecting.
         assert!(derived_workload.is_none());
         assert_eq!(req.protocol, OutboundProtocol::TCP);
         assert_eq!(req.actual_destination, dest);
-        // Nothing failed, so no backoff was paid.
         assert!(
             start.elapsed() < oc.configured_retry_backoff(1),
             "a first-try success must not sleep"
@@ -2928,8 +2724,6 @@ mod tests {
             .connect_with_retries("127.0.0.1:1234".parse().unwrap(), dest, 2, start)
             .await;
 
-        // This workload is the only endpoint, so every retry lands back on the same refused
-        // address and the connect still fails -- but it must have been retried.
         assert!(
             res.is_none(),
             "a refused connect must not yield an upstream"
@@ -2947,8 +2741,6 @@ mod tests {
         let target: SocketAddr = "127.0.0.3:80".parse().unwrap();
         let mut oc = test_outbound_connection(vec![], vec![example_service()]).await;
 
-        // Sanity check: this destination fails at the *build* step, before any endpoint is
-        // selected, with an error that means "state may not have converged yet".
         let local = oc
             .pi
             .local_workload_information
@@ -2972,15 +2764,12 @@ mod tests {
             .connect_with_retries("127.0.0.1:1234".parse().unwrap(), target, 2, start)
             .await;
 
-        // No endpoint ever appears, so the connect still fails -- but each attempt re-reads
-        // state, which is what rescues a destination caught mid-rollout.
         assert!(res.is_none());
         let backoffs: Duration = (1..=2).map(|r| oc.configured_retry_backoff(r)).sum();
         assert!(
             start.elapsed() >= backoffs,
             "a retriable build failure must pay both backoffs"
         );
-        // The failure is still reported, from the build arm's early-deny log.
         crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
             ("error", "no healthy upstream: 127.0.0.3:80"),
             ("message", "connection failed"),
@@ -2990,8 +2779,6 @@ mod tests {
     #[tokio::test]
     async fn connect_with_retries_stops_at_the_deadline() {
         initialize_telemetry();
-        // A refused connect is retriable and fails fast, so without the deadline this would
-        // happily burn through every configured retry.
         let dest = {
             let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
             listener.local_addr().unwrap()
@@ -2999,7 +2786,6 @@ mod tests {
         let mut oc =
             test_outbound_connection(vec![dest_workload(2, "dest-workload")], vec![]).await;
 
-        // The connect budget is already spent, so the first failure must end the loop.
         let start = started_ago(crate::proxy::CONNECTION_TIMEOUT);
         let before = Instant::now();
         let res = oc
@@ -3016,7 +2802,6 @@ mod tests {
     #[tokio::test]
     async fn connect_with_retries_stops_build_retries_at_the_deadline() {
         initialize_telemetry();
-        // No endpoints, so every build fails with a retriable `NoHealthyUpstream`.
         let target: SocketAddr = "127.0.0.3:80".parse().unwrap();
         let mut oc = test_outbound_connection(vec![], vec![example_service()]).await;
 
@@ -3031,7 +2816,6 @@ mod tests {
             before.elapsed() < oc.configured_retry_backoff(1),
             "a build failure past the deadline must not sleep for a retry"
         );
-        // The give-up is still reported.
         crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
             ("error", "no healthy upstream: 127.0.0.3:80"),
             ("message", "connection failed"),
@@ -3083,8 +2867,7 @@ mod tests {
                 .actual_destination
         };
 
-        // Selection is random, so sample it enough times that a preference which only mostly
-        // holds would show up. Baseline: both endpoints get picked.
+        // Sample randomized selection before applying endpoint deprioritization.
         let mut seen = std::collections::HashSet::new();
         for _ in 0..50 {
             seen.insert(build(&Default::default()).await);
@@ -3095,8 +2878,6 @@ mod tests {
             "both endpoints must be reachable without a deprioritized list"
         );
 
-        // Deprioritizing one endpoint pins every build to the other, which is what makes a retry
-        // worth attempting at all.
         let mut deprioritized = DeprioritizedEndpoints::default();
         deprioritized.push(backend_a.uid.as_str().into());
         for _ in 0..50 {

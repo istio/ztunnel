@@ -82,12 +82,6 @@ struct ConnSpawner {
 
 // Does nothing but spawn new conns when asked
 impl ConnSpawner {
-    /// Opens a new tunnel to `key.dst`.
-    ///
-    /// `deadline` bounds every network step of setting it up: the TCP connect, and the TLS and
-    /// HTTP/2 handshakes after it. A peer that accepts the TCP connection and then stalls would
-    /// otherwise hold the caller forever. `None` bounds only the TCP connect, at the default
-    /// connection timeout.
     async fn new_pool_conn(
         &self,
         key: WorkloadKey,
@@ -435,8 +429,6 @@ impl WorkloadHBONEPool {
 
         // Surface the tunnel's revocation signal so the caller can attribute a revoked teardown.
         let revoked = connection.revoked_receiver();
-        // The deadline covers the CONNECT too, even on a reused tunnel: a peer that never answers
-        // it stalls the caller just as surely as one that stalls the handshake.
         let (stream, baggage) = super::with_deadline(
             deadline,
             super::HandshakeStage::Connect,
@@ -1140,7 +1132,6 @@ mod test {
             .unwrap()
     }
 
-    /// Sends a CONNECT to `dst` with a short deadline, returning the error and how long it took.
     async fn send_with_deadline(
         pool: &mut WorkloadHBONEPool,
         dst: SocketAddr,

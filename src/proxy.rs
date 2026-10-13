@@ -649,9 +649,6 @@ pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The step of setting up an HBONE tunnel that a [`Error::HandshakeTimeout`] stalled in.
-///
-/// The `Inner` stages are double HBONE's inner tunnel, which runs through the outer one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandshakeStage {
     Tls,
@@ -675,9 +672,6 @@ impl fmt::Display for HandshakeStage {
     }
 }
 
-/// Runs `fut`, failing with [`Error::HandshakeTimeout`] for `stage` if `deadline` passes first.
-///
-/// `None` means no deadline, so callers that never set one keep their unbounded behavior.
 pub(crate) async fn with_deadline<T, E: Into<Error>>(
     deadline: Option<tokio::time::Instant>,
     stage: HandshakeStage,

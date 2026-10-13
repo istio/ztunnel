@@ -57,17 +57,10 @@ pub mod policy;
 pub mod service;
 pub mod workload;
 
-/// Endpoints, keyed by workload UID, that an earlier attempt on this connection already tried
-/// and failed to reach.
-///
-/// Selection treats these as a last resort rather than as ineligible: a retry prefers an untried
-/// endpoint, but still falls back to a tried one when nothing else is selectable. The list is
-/// per-connection and holds at most one entry per retry, so a `Vec` scan beats hashing.
 #[derive(Debug, Default, Clone)]
 pub struct DeprioritizedEndpoints(Vec<Strng>);
 
 impl DeprioritizedEndpoints {
-    /// Records `uid` as tried. Duplicates are harmless, so callers need not check first.
     pub fn push(&mut self, uid: Strng) {
         self.0.push(uid);
     }
@@ -470,32 +463,21 @@ impl ProxyState {
             return self.select_endpoint(src, svc, candidates);
         }
 
-        // Collected only here, since the fallback below walks the endpoints a second time.
         let candidates: Vec<_> = candidates.collect();
         {
             let fresh = candidates
                 .iter()
                 .filter(|(_, wl)| !deprioritized.contains(&wl.uid))
                 .cloned();
-            // Prefer endpoints no earlier attempt has failed on. This deliberately runs *before*
-            // the locality ranking in `select_endpoint`, so an untried endpoint in a worse
-            // locality beats a tried one in a better locality. Ranking first would pin a Failover
-            // service whose top-ranked tier holds a single endpoint to that same dead endpoint on
-            // every retry.
+            // Apply deprioritization before locality ranking; Strict locality constraints still apply.
             if let Some(selected) = self.select_endpoint(src, svc, fresh) {
                 return Some(selected);
             }
-            // Nothing selectable among the untried endpoints: either there were none, or a Strict
-            // locality LB rejected all of them. Fall through to the full set, since retrying a
-            // tried endpoint beats failing the connection outright. This keeps selection no worse
-            // than it was before the deprioritized list existed.
         }
 
         self.select_endpoint(src, svc, candidates.into_iter())
     }
 
-    /// Picks one of `candidates`, honoring the service's locality load balancing mode and
-    /// weighting the draw by workload capacity.
     fn select_endpoint<'a>(
         &self,
         src: &Workload,
@@ -2290,8 +2272,7 @@ mod tests {
         initialize_telemetry();
         let mut state = ProxyState::new(None);
 
-        // Three interchangeable endpoints in the local network/locality, plus one in a worse
-        // locality so the failover cases below have somewhere to fall back to.
+        // Include a remote endpoint to exercise locality failover.
         let workload = |name: &str, last_octet: u8, zone: &str| Workload {
             uid: format!("cluster1//v1/Pod/default/{name}").into(),
             name: name.into(),
@@ -2359,8 +2340,6 @@ mod tests {
             }
             d
         };
-        // Selection is random, so sample it enough times to catch a preference that only mostly
-        // holds. Returns the set of endpoints that came up.
         let selected = |src: &Workload, svc: &Service, d: &DeprioritizedEndpoints| {
             let mut got = HashSet::new();
             for _ in 0..50 {
@@ -2373,7 +2352,6 @@ mod tests {
             got
         };
 
-        // Baseline: with nothing deprioritized every endpoint is reachable.
         assert_eq!(
             selected(&wl_a, &svc, &DeprioritizedEndpoints::default()),
             HashSet::from_iter([
@@ -2385,24 +2363,18 @@ mod tests {
             "without a deprioritized list, selection is unchanged",
         );
 
-        // Deprioritized endpoints are skipped entirely while any other endpoint remains.
         assert_eq!(
             selected(&wl_a, &svc, &deprioritize(&[&wl_a, &wl_b, &wl_far])),
             HashSet::from_iter([Some(wl_c.uid.to_string())]),
             "the only untried endpoint must be selected every time",
         );
 
-        // ...but they are a preference, not a filter: once everything has been tried we must
-        // still hand back an endpoint rather than failing the connection.
         let all_tried = selected(&wl_a, &svc, &deprioritize(&[&wl_a, &wl_b, &wl_c, &wl_far]));
         assert!(
             !all_tried.contains(&None),
             "exhausting the endpoints must fall back, not return None: {all_tried:?}"
         );
 
-        // Deprioritization outranks locality: `wl_a`/`wl_b`/`wl_c` are the top-ranked tier for
-        // this source, and once they are all tried a Failover service must reach past its
-        // preferred locality to the untried `wl_far` rather than re-picking a dead endpoint.
         assert_eq!(
             selected(&wl_a, &failover_svc, &DeprioritizedEndpoints::default()),
             HashSet::from_iter([
@@ -2418,8 +2390,6 @@ mod tests {
             "failover must cross the locality boundary rather than reuse a tried endpoint",
         );
 
-        // Strict is the exception: it may not cross the locality boundary at all. `wl_far` is
-        // ineligible, so exhausting the eligible endpoints falls back within them.
         let strict_all_tried = selected(&wl_a, &strict_svc, &deprioritize(&[&wl_a, &wl_b, &wl_c]));
         assert!(
             !strict_all_tried.contains(&None)

@@ -727,7 +727,6 @@ impl ConnectionResult {
                     proxy::HandshakeStage::Http2 | proxy::HandshakeStage::InnerHttp2 => {
                         ResponseFlags::Http2HandshakeFailure
                     }
-                    // The tunnel is up; the peer just never answered the request on it.
                     proxy::HandshakeStage::Connect | proxy::HandshakeStage::InnerConnect => {
                         ResponseFlags::ConnectionFailure
                     }
