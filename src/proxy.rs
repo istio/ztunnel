@@ -51,6 +51,7 @@ pub mod connection_manager;
 pub mod inbound;
 
 mod h2;
+pub(crate) use h2::TeardownCause;
 mod inbound_passthrough;
 #[allow(non_camel_case_types)]
 pub mod metrics;

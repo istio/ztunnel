@@ -23,6 +23,7 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::trace;
 
 pub mod client;
@@ -52,28 +53,47 @@ impl Teardown {
 /// The teardown cause of one HBONE connection, set once by its driver before it tears the
 /// connection down. A tunnel carried inside another tunnel's stream also reports the outer cause,
 /// since the outer teardown only reaches the inner streams as an opaque transport error.
+///
+/// Streams only see the teardown through h2 I/O, so a copy that is waiting on the other side of
+/// the tunnel (e.g. once the stream's peer has finished sending) waits on [`Self::torn_down`] too.
 #[derive(Clone, Debug, Default)]
-pub struct TeardownCause {
-    cause: Arc<OnceLock<Teardown>>,
-    outer: Option<Arc<TeardownCause>>,
+pub struct TeardownCause(Arc<TeardownCauseInner>);
+
+#[derive(Debug, Default)]
+struct TeardownCauseInner {
+    cause: OnceLock<Teardown>,
+    outer: Option<TeardownCause>,
+    // Cancelled once a cause is set, here or on the outer connection.
+    signal: CancellationToken,
 }
 
 impl TeardownCause {
     pub fn nested(outer: TeardownCause) -> Self {
-        Self {
-            cause: Default::default(),
-            outer: Some(Arc::new(outer)),
-        }
+        Self(Arc::new(TeardownCauseInner {
+            cause: OnceLock::new(),
+            signal: outer.0.signal.child_token(),
+            outer: Some(outer),
+        }))
     }
 
     pub(crate) fn set(&self, teardown: Teardown) {
-        let _ = self.cause.set(teardown);
+        let _ = self.0.cause.set(teardown);
+        self.0.signal.cancel();
+    }
+
+    /// Resolves to the cause once the connection, or the connection carrying it, is torn down.
+    pub(crate) async fn torn_down(&self) -> Teardown {
+        self.0.signal.cancelled().await;
+        self.get()
+            .cloned()
+            .expect("the cause is set before the signal")
     }
 
     fn get(&self) -> Option<&Teardown> {
-        self.cause
+        self.0
+            .cause
             .get()
-            .or_else(|| self.outer.as_ref().and_then(|o| o.get()))
+            .or_else(|| self.0.outer.as_ref().and_then(|o| o.get()))
     }
 
     /// Reports `e` as the teardown, if there was one.
@@ -191,6 +211,10 @@ impl crate::copy::BufferedSplitter for H2Stream {
     fn split_into_buffered_reader(self) -> (H2StreamReadHalf, H2StreamWriteHalf) {
         let H2Stream { read, write } = self;
         (read, write)
+    }
+
+    fn teardown_cause(r: &H2StreamReadHalf) -> Option<TeardownCause> {
+        Some(r.teardown.clone())
     }
 
     fn reset(_r: H2StreamReadHalf, mut w: H2StreamWriteHalf) {
@@ -667,6 +691,89 @@ mod tests {
             copy.await.unwrap(),
             Err(crate::proxy::Error::Teardown(Teardown::CertificateRevoked))
         ));
+    }
+
+    // The copy is waiting on the app, not the tunnel, once the tunnel has finished sending, so
+    // only the teardown signal can end it.
+    #[tokio::test]
+    async fn teardown_aborts_copy_idle_on_tunnel() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let mut conn = h2::server::handshake(server_io).await.unwrap();
+            let (_req, mut respond) = conn.accept().await.unwrap().unwrap();
+            let resp = http::Response::builder().status(200).body(()).unwrap();
+            respond.send_response(resp, true).unwrap();
+            while conn.accept().await.is_some() {}
+        });
+        let (mut send_req, conn) = h2::client::handshake(client_io).await.unwrap();
+        let driver = tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let req = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("http://example.com")
+            .body(())
+            .unwrap();
+        let (resp, send_stream) = send_req.send_request(req, false).unwrap();
+        let recv_stream = resp.await.unwrap().into_body();
+        let teardown = TeardownCause::default();
+        let read = H2StreamReadHalf {
+            recv_stream,
+            _dropped: None,
+            teardown: teardown.clone(),
+        };
+        let write = H2StreamWriteHalf {
+            send_stream,
+            _dropped: None,
+            teardown: teardown.clone(),
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (downstream, _) = listener.accept().await.unwrap();
+        let copy = tokio::spawn(async move {
+            let cr = crate::copy::tests::connection_result();
+            crate::copy::copy_bidirectional(
+                crate::copy::TcpStreamSplitter(downstream),
+                H2Stream { read, write },
+                &cr,
+            )
+            .await
+        });
+        // The tunnel's end of stream reaches the app, and the copy now only waits on the app.
+        assert_eq!(client.read(&mut [0; 16]).await.unwrap(), 0);
+
+        teardown.set(Teardown::CertificateRevoked);
+        driver.abort();
+
+        let res = tokio::time::timeout(Duration::from_secs(5), copy)
+            .await
+            .expect("teardown should end the copy")
+            .unwrap();
+        assert!(matches!(
+            res,
+            Err(crate::proxy::Error::Teardown(Teardown::CertificateRevoked))
+        ));
+        // Having already read the end of stream, the app sees the reset when it next writes.
+        let err = client.write_all(b"hello").await.unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_cause_is_torn_down_by_outer() {
+        let outer = TeardownCause::default();
+        let inner = TeardownCause::nested(outer.clone());
+        outer.set(Teardown::PingTimeout);
+        assert!(matches!(inner.torn_down().await, Teardown::PingTimeout));
     }
 
     // A transport whose reads start failing with `kind` once `fail` is set.

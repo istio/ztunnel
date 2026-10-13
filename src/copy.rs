@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::proxy::Error::{BackendDisconnected, ClientDisconnected, ReceiveError, SendError};
+use crate::proxy::TeardownCause;
 use crate::proxy::{self, ConnectionResult};
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::future::{maybe_done, poll_fn};
@@ -38,6 +39,10 @@ pub trait BufferedSplitter: Unpin {
     /// By default the halves are just dropped.
     fn reset(r: Self::R, w: Self::W) {
         drop((r, w));
+    }
+    /// The teardown cause of the HBONE connection carrying this side, if it is a tunnel.
+    fn teardown_cause(_r: &Self::R) -> Option<TeardownCause> {
+        None
     }
 }
 
@@ -174,6 +179,13 @@ where
         .0
         .as_mut()
         .expect("sides are only taken once copying ends");
+    // A tunnel's teardown only reaches the copy through h2 I/O, which it may not be doing, e.g.
+    // once the tunnel has finished sending and the copy waits on the other side. So the copy
+    // watches for it too. A copy has at most one tunnel side. The watch is boxed so that it does
+    // not grow every copy future.
+    let mut torn_down = A::teardown_cause(rd)
+        .or_else(|| B::teardown_cause(ru))
+        .map(|teardown| Box::pin(async move { teardown.torn_down().await }));
     // A connection aborted error means a transport failed out from under the copy (e.g. an HBONE
     // ping timeout), and a connection reset means a peer aborted its connection. Rather than
     // closing gracefully, which the other peer would take as a clean end of stream, the other
@@ -233,20 +245,28 @@ where
 
     // Join them rather than try_join them so that we keep complete either end once one side is complete.
     // Once aborted, the direction that did not fail has nothing left to deliver, so it is dropped.
-    // This is join!() by hand, which keeps the copy no larger than join!() does.
+    // A teardown aborts both directions. This is join!() by hand, which keeps the copy no larger
+    // than join!() does.
     let (sent, received) = {
         let mut sent = pin!(maybe_done(downstream_to_upstream));
         let mut received = pin!(maybe_done(upstream_to_downstream));
-        poll_fn(|cx| {
+        let torn_down = poll_fn(|cx| {
             let sent_done = sent.as_mut().poll(cx).is_ready();
             let received_done = received.as_mut().poll(cx).is_ready();
             if (sent_done && received_done) || aborted.load(Ordering::Relaxed) {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
+                return Poll::Ready(None);
+            }
+            match &mut torn_down {
+                Some(torn_down) => torn_down.as_mut().poll(cx).map(Some),
+                None => Poll::Pending,
             }
         })
         .await;
+        if let Some(teardown) = torn_down {
+            trace!(%teardown, "copy aborted");
+            // Dropping the sides resets them.
+            return Err(teardown.into());
+        }
         (
             sent.take_output().unwrap_or(Ok(0)),
             received.take_output().unwrap_or(Ok(0)),
