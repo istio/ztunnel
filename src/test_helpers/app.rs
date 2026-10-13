@@ -195,7 +195,7 @@ impl TestApp {
         let resp = client
             .request(req)
             .await
-            .expect("error sending ready healthcheck request");
+            .map_err(|e| anyhow!("error sending ready healthcheck request: {e:?}"))?;
         match resp.status() {
             hyper::StatusCode::OK => Ok(()),
             other => Err(anyhow::anyhow!(
