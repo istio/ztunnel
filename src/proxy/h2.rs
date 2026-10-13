@@ -48,6 +48,18 @@ impl Teardown {
     fn into_io(self) -> Error {
         Error::new(std::io::ErrorKind::ConnectionAborted, self)
     }
+
+    /// The teardown an HBONE connection's error amounts to, if its transport failed.
+    pub(crate) fn from_transport(e: &h2::Error) -> Option<Teardown> {
+        match e.get_io().map(|io| io.kind()) {
+            // Already an abort, e.g. from the tunnel carrying this connection.
+            Some(std::io::ErrorKind::BrokenPipe) | Some(std::io::ErrorKind::ConnectionAborted) => {
+                None
+            }
+            Some(_) => Some(Teardown::Transport(e.to_string())),
+            None => None,
+        }
+    }
 }
 
 /// The teardown cause of one HBONE connection, set once by its driver before it tears the
@@ -441,12 +453,11 @@ impl H2StreamWriteHalf {
 // connection aborted. A broken pipe is left alone: it is also how a stream sees its connection
 // dropped while draining.
 fn stream_error(e: h2::Error) -> std::io::Error {
-    match e.get_io().map(|io| io.kind()) {
-        // Already an abort, e.g. from the tunnel carrying this connection.
-        Some(std::io::ErrorKind::BrokenPipe) | Some(std::io::ErrorKind::ConnectionAborted) => {
-            h2_to_io_error(e)
-        }
-        Some(_) => Teardown::Transport(e.to_string()).into_io(),
+    if let Some(teardown) = Teardown::from_transport(&e) {
+        return teardown.into_io();
+    }
+    match e.get_io() {
+        Some(_) => h2_to_io_error(e),
         None if e.is_reset() && e.is_remote() => peer_reset_error(e),
         None if e.is_remote() => Error::new(std::io::ErrorKind::ConnectionAborted, e),
         None => h2_to_io_error(e),
@@ -776,10 +787,36 @@ mod tests {
         assert!(matches!(inner.torn_down().await, Teardown::PingTimeout));
     }
 
-    // A transport whose reads start failing with `kind` once `fail` is set.
-    struct FailingTransport {
+    type TransportFailure =
+        Arc<std::sync::Mutex<(Option<std::io::ErrorKind>, Option<std::task::Waker>)>>;
+
+    // A transport whose reads start failing once `fail_transport` is called.
+    pub(super) struct FailingTransport {
         inner: tokio::io::DuplexStream,
-        fail: Arc<std::sync::Mutex<(Option<std::io::ErrorKind>, Option<std::task::Waker>)>>,
+        fail: TransportFailure,
+    }
+
+    impl FailingTransport {
+        pub(super) fn new(inner: tokio::io::DuplexStream) -> (Self, TransportFailure) {
+            let fail = TransportFailure::default();
+            let transport = FailingTransport {
+                inner,
+                fail: fail.clone(),
+            };
+            (transport, fail)
+        }
+    }
+
+    // Fails the transport's reads with `kind`, e.g. TCP keepalive giving up on the connection.
+    pub(super) fn fail_transport(fail: &TransportFailure, kind: std::io::ErrorKind) {
+        let waker = {
+            let mut fail = fail.lock().unwrap();
+            fail.0 = Some(kind);
+            fail.1.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
     }
 
     impl tokio::io::AsyncRead for FailingTransport {
@@ -820,11 +857,7 @@ mod tests {
     #[tokio::test]
     async fn transport_failure_aborts_stream() {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-        let fail = Arc::new(std::sync::Mutex::new((None, None)));
-        let client_io = FailingTransport {
-            inner: client_io,
-            fail: fail.clone(),
-        };
+        let (client_io, fail) = FailingTransport::new(client_io);
         tokio::spawn(async move {
             let mut conn = h2::server::handshake(server_io).await.unwrap();
             while let Some(Ok((_req, mut respond))) = conn.accept().await {
@@ -848,13 +881,7 @@ mod tests {
             teardown: TeardownCause::default(),
         };
 
-        // e.g. TCP keepalive giving up on the HBONE connection
-        let waker = {
-            let mut fail = fail.lock().unwrap();
-            fail.0 = Some(std::io::ErrorKind::TimedOut);
-            fail.1.take()
-        };
-        waker.unwrap().wake();
+        fail_transport(&fail, std::io::ErrorKind::TimedOut);
 
         let err = poll_fn(|cx| Pin::new(&mut read).poll_bytes(cx))
             .await

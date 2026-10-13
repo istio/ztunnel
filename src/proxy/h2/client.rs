@@ -253,6 +253,9 @@ async fn drive_connection<S, B>(
             match res {
                 Err(e) => {
                     error!("Error in HBONE connection handshake: {:?}", e);
+                    if let Some(reason) = Teardown::from_transport(&e) {
+                        teardown.set(reason);
+                    }
                 }
                 Ok(_) => {
                     debug!("done with HBONE connection handshake: {:?}", res);
@@ -274,6 +277,59 @@ mod tests {
     use futures_util::future::poll_fn;
     use std::pin::Pin;
 
+    fn wl_key() -> WorkloadKey {
+        WorkloadKey {
+            src_id: Identity::default(),
+            dst_id: vec![Identity::default()],
+            src: IpAddr::from([127, 0, 0, 1]),
+            dst: SocketAddr::from(([127, 0, 0, 2], 15008)),
+        }
+    }
+
+    fn connect_request() -> http::Request<()> {
+        http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("http://example.com")
+            .body(())
+            .unwrap()
+    }
+
+    // A stream that is not doing I/O still learns of the transport failure.
+    #[tokio::test]
+    async fn transport_failure_is_recorded() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client_io, fail) = crate::proxy::h2::tests::FailingTransport::new(client_io);
+        tokio::spawn(async move {
+            let mut conn = h2::server::handshake(server_io).await.unwrap();
+            while let Some(Ok((_req, mut respond))) = conn.accept().await {
+                let resp = http::Response::builder().status(200).body(()).unwrap();
+                std::mem::forget(respond.send_response(resp, false).unwrap());
+            }
+        });
+        let (_drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+        let mut client = spawn_connection(
+            Arc::new(crate::test_helpers::test_config()),
+            client_io,
+            drain_rx,
+            wl_key(),
+            None,
+            TeardownCause::default(),
+        )
+        .await
+        .unwrap();
+        let (stream, _) = client.send_request(connect_request()).await.unwrap();
+
+        crate::proxy::h2::tests::fail_transport(&fail, std::io::ErrorKind::TimedOut);
+
+        let teardown = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.teardown_cause().torn_down(),
+        )
+        .await
+        .expect("the transport failure should be recorded");
+        assert!(matches!(teardown, Teardown::Transport(_)), "{teardown:?}");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn ping_timeout_is_reported_by_streams() {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
@@ -293,28 +349,17 @@ mod tests {
         });
 
         let (_drain_tx, drain_rx) = tokio::sync::watch::channel(false);
-        let wl_key = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 1]),
-            dst: SocketAddr::from(([127, 0, 0, 2], 15008)),
-        };
         let mut client = spawn_connection(
             Arc::new(crate::test_helpers::test_config()),
             client_io,
             drain_rx,
-            wl_key,
+            wl_key(),
             None,
             TeardownCause::default(),
         )
         .await
         .unwrap();
-        let req = http::Request::builder()
-            .method(http::Method::CONNECT)
-            .uri("http://example.com")
-            .body(())
-            .unwrap();
-        let (mut stream, _) = client.send_request(req).await.unwrap();
+        let (mut stream, _) = client.send_request(connect_request()).await.unwrap();
         stop_tx.send(()).unwrap();
 
         let err = poll_fn(|cx| Pin::new(&mut stream.read).poll_bytes(cx))
