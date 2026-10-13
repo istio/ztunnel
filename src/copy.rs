@@ -16,13 +16,11 @@ use crate::proxy::Error::{BackendDisconnected, ClientDisconnected, ReceiveError,
 use crate::proxy::TeardownCause;
 use crate::proxy::{self, ConnectionResult};
 use bytes::{Buf, Bytes, BytesMut};
-use futures_util::future::{maybe_done, poll_fn};
 use pin_project_lite::pin_project;
 use std::future::Future;
 use std::io::Error;
 use std::marker::PhantomPinned;
-use std::pin::{Pin, pin};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -181,18 +179,13 @@ where
         .expect("sides are only taken once copying ends");
     // A tunnel's teardown only reaches the copy through h2 I/O, which it may not be doing, e.g.
     // once the tunnel has finished sending and the copy waits on the other side. So the copy
-    // watches for it too. A copy has at most one tunnel side. The watch is boxed so that it does
-    // not grow every copy future.
-    let mut torn_down = A::teardown_cause(rd)
-        .or_else(|| B::teardown_cause(ru))
-        .map(|teardown| Box::pin(async move { teardown.torn_down().await }));
+    // watches for it too. A copy has at most one tunnel side.
+    let cause = A::teardown_cause(rd).or_else(|| B::teardown_cause(ru));
     // A connection aborted error means a transport failed out from under the copy (e.g. an HBONE
     // ping timeout), and a connection reset means a peer aborted its connection. Rather than
     // closing gracefully, which the other peer would take as a clean end of stream, the other
-    // direction is stopped and both sides are reset. An abort caused by an HBONE teardown is
-    // reported as the teardown itself, whichever direction it surfaced in, while a peer's reset is
-    // still not reported as an error (see `ignore_io_errors`).
-    let aborted = AtomicBool::new(false);
+    // direction is stopped and both sides are reset. So each direction completes with `Ok` and its
+    // own result, or, when it aborts, with `Err` and the result of the whole copy.
     let is_aborted = |res: &io::Result<u64>| matches!(res, Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset));
     let downstream_to_upstream = async {
         let translate_error = |e: io::Error| {
@@ -205,18 +198,15 @@ where
         };
         let res = copy_buf(rd, wu, stats, false).await;
         if is_aborted(&res) {
-            aborted.store(true, Ordering::Relaxed);
             trace!(?res, "send aborted");
-            return ignore_io_errors(res).map_err(|e| {
-                proxy::Error::from_teardown(&e).unwrap_or_else(|| translate_error(e))
-            });
+            return Err(aborted_result(res, translate_error));
         }
         let res = ignore_io_errors(res).map_err(translate_error);
         trace!(?res, "send");
-        ignore_shutdown_errors(shutdown(wu).await)
+        let shutdown = ignore_shutdown_errors(shutdown(wu).await)
             .map_err(translate_error)
-            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)))?;
-        res
+            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)));
+        Ok(shutdown.and(res))
     };
 
     let upstream_to_downstream = async {
@@ -229,59 +219,55 @@ where
         };
         let res = copy_buf(ru, wd, stats, true).await;
         if is_aborted(&res) {
-            aborted.store(true, Ordering::Relaxed);
             trace!(?res, "receive aborted");
-            return ignore_io_errors(res).map_err(|e| {
-                proxy::Error::from_teardown(&e).unwrap_or_else(|| translate_error(e))
-            });
+            return Err(aborted_result(res, translate_error));
         }
         let res = ignore_io_errors(res).map_err(translate_error);
         trace!(?res, "receive");
-        ignore_shutdown_errors(shutdown(wd).await)
+        let shutdown = ignore_shutdown_errors(shutdown(wd).await)
             .map_err(translate_error)
-            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)))?;
-        res
+            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)));
+        Ok(shutdown.and(res))
     };
 
-    // Join them rather than try_join them so that we keep complete either end once one side is complete.
-    // Once aborted, the direction that did not fail has nothing left to deliver, so it is dropped.
-    // A teardown aborts both directions. This is join!() by hand, which keeps the copy no larger
-    // than join!() does.
-    let (sent, received) = {
-        let mut sent = pin!(maybe_done(downstream_to_upstream));
-        let mut received = pin!(maybe_done(upstream_to_downstream));
-        let torn_down = poll_fn(|cx| {
-            let sent_done = sent.as_mut().poll(cx).is_ready();
-            let received_done = received.as_mut().poll(cx).is_ready();
-            if (sent_done && received_done) || aborted.load(Ordering::Relaxed) {
-                return Poll::Ready(None);
+    // Join the directions so that we keep completing either end once one side is complete; only
+    // an abort stops the other direction. A teardown aborts both. On an abort, dropping the sides
+    // resets them.
+    let (sent, received) = tokio::select! {
+        res = async { tokio::try_join!(downstream_to_upstream, upstream_to_downstream) } => match res {
+            Ok(results) => results,
+            Err(res) => return res,
+        },
+        teardown = async {
+            match cause {
+                Some(cause) => cause.torn_down().await,
+                None => std::future::pending().await,
             }
-            match &mut torn_down {
-                Some(torn_down) => torn_down.as_mut().poll(cx).map(Some),
-                None => Poll::Pending,
-            }
-        })
-        .await;
-        if let Some(teardown) = torn_down {
+        } => {
             trace!(%teardown, "copy aborted");
-            // Dropping the sides resets them.
             return Err(teardown.into());
         }
-        (
-            sent.take_output().unwrap_or(Ok(0)),
-            received.take_output().unwrap_or(Ok(0)),
-        )
     };
-    if !aborted.into_inner() {
-        // Copying ended on its own, so the sides close gracefully rather than being reset.
-        drop(sides.0.take());
-    }
+    // Copying ended on its own, so the sides close gracefully rather than being reset.
+    drop(sides.0.take());
 
     // Convert some error messages to easier to understand
     let sent = sent?;
     let received = received?;
     trace!(sent, received, "copy complete");
     Ok(())
+}
+
+// The result of a copy that a direction aborted. An abort caused by an HBONE teardown is reported
+// as the teardown itself, whichever direction it surfaced in, while a peer's reset is still not
+// reported as an error (see `ignore_io_errors`).
+fn aborted_result(
+    res: io::Result<u64>,
+    translate_error: impl FnOnce(io::Error) -> proxy::Error,
+) -> Result<(), proxy::Error> {
+    ignore_io_errors(res)
+        .map(drop)
+        .map_err(|e| proxy::Error::from_teardown(&e).unwrap_or_else(|| translate_error(e)))
 }
 
 type Halves<S> = (<S as BufferedSplitter>::R, <S as BufferedSplitter>::W);
