@@ -18,11 +18,27 @@ use prometheus_client::{
     registry::{Registry, Unit},
 };
 
-use crate::identity::Identity;
+use crate::identity::{CacheKey, Identity};
 
 #[derive(Clone, Hash, Debug, PartialEq, Eq, EncodeLabelSet)]
 pub struct CertExpiryLabels {
     pub identity: Identity,
+    pub uid: String,
+}
+
+impl CertExpiryLabels {
+    pub fn from_cache_key(key: &CacheKey) -> Self {
+        match key {
+            CacheKey::Identity(id) => CertExpiryLabels {
+                identity: id.clone(),
+                uid: String::new(),
+            },
+            CacheKey::Workload { id, uid, .. } => CertExpiryLabels {
+                identity: id.clone(),
+                uid: uid.to_string(),
+            },
+        }
+    }
 }
 
 #[derive(Default)]
