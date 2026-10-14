@@ -31,6 +31,10 @@ harness = false
 name = "basic"
 harness = false
 
+[[bench]]
+name = "pool"
+harness = false
+
 [dependencies]
 # Enabled with 'tls-boring'
 boring-rustls-provider = { git = "https://github.com/janrueth/boring-rustls-provider", optional = true } #

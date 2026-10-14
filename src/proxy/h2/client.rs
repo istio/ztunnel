@@ -153,6 +153,43 @@ impl H2ConnectClient {
     pub fn revoked_receiver(&self) -> Option<watch::Receiver<bool>> {
         self.revoked_rx.clone()
     }
+
+    #[cfg(feature = "testing")]
+    pub async fn benchmark_client(wl_key: WorkloadKey, max_allowed_streams: u16) -> Self {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+
+        tokio::spawn(async move {
+            let Ok(mut server) = h2::server::handshake(server_io).await else {
+                return;
+            };
+
+            while let Some(request) = server.accept().await {
+                let Ok((_request, mut respond)) = request else {
+                    return;
+                };
+
+                let _ = respond.send_response(http::Response::new(()), true);
+            }
+        });
+
+        let (sender, connection) = h2::client::Builder::new()
+            .initial_max_send_streams(max_allowed_streams as usize)
+            .handshake::<_, Bytes>(client_io)
+            .await
+            .unwrap();
+
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        Self {
+            sender,
+            max_allowed_streams,
+            stream_count: Arc::new(AtomicU16::new(0)),
+            wl_key,
+            revoked_rx: None,
+        }
+    }
 }
 
 pub async fn spawn_connection(
