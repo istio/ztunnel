@@ -112,7 +112,7 @@ backoff = "0.4"
 pin-project-lite = "0.2"
 pingora-pool = "0.8"
 flurry = "0.5"
-h2 = "=0.4.15" # https://github.com/istio/ztunnel/issues/2100
+h2 = "=0.4.19" # https://github.com/istio/ztunnel/issues/2100
 http = "1.4"
 split-iter = "0.1"
 arcstr = { version = "1.2", features = ["serde"] }
