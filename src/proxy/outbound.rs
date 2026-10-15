@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use futures_util::TryFutureExt;
 use hyper::header::FORWARDED;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
 use tokio::sync::watch;
@@ -27,13 +27,15 @@ use tracing::{Instrument, debug, error, info, info_span, trace_span};
 use crate::identity::Identity;
 use crate::strng::Strng;
 
-use crate::proxy::connection_manager::await_revocation;
+use crate::proxy::connection_manager::{OutboundConnectionGuard, await_revocation};
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{
     BAGGAGE_HEADER, Error, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent,
     X_FORWARDED_NETWORK_HEADER, util,
 };
-use crate::proxy::{ConnectionOpen, ConnectionResultBuilder, DerivedWorkload, metrics};
+use crate::proxy::{
+    ConnectionOpen, ConnectionResult, ConnectionResultBuilder, DerivedWorkload, metrics,
+};
 
 use crate::baggage::{self, Baggage};
 use crate::drain::DrainWatcher;
@@ -42,7 +44,7 @@ use crate::proxy::h2::{H2Stream, client::WorkloadKey};
 use crate::state::service::{LoadBalancerMode, Service, ServiceDescription};
 use crate::state::workload::OutboundProtocol;
 use crate::state::workload::{InboundProtocol, NetworkAddress, Workload, address::Address};
-use crate::state::{ServiceResolutionMode, Upstream};
+use crate::state::{DeprioritizedEndpoints, ServiceResolutionMode, Upstream};
 use crate::{assertions, copy, proxy, socket, tls};
 
 use super::h2::TokioH2Stream;
@@ -128,7 +130,7 @@ impl Outbound {
                             debug!(component="outbound", dur=?start.elapsed(), "connection completed");
                         }.instrument(span);
 
-                        assertions::size_between_ref(1000, 2000, &serve_outbound_connection);
+                        assertions::size_between_ref(600, 1200, &serve_outbound_connection);
                         tokio::spawn(serve_outbound_connection);
                     }
                     Err(e) => {
@@ -149,6 +151,18 @@ impl Outbound {
         )
         .await
     }
+}
+
+/// An established upstream connection, before any downstream bytes have moved.
+enum ConnectedUpstream {
+    Hbone {
+        stream: H2Stream,
+        /// Revocation signals, ordered outer tunnel then inner tunnel.
+        revoked: [Option<watch::Receiver<bool>>; 2],
+        /// Drains the unpooled inner tunnel after copying; the pool drains single-hop tunnels.
+        inner_drain: Option<watch::Sender<bool>>,
+    },
+    Tcp(TcpStream),
 }
 
 pub(super) struct OutboundConnection {
@@ -176,6 +190,167 @@ impl OutboundConnection {
         self.proxy_to(source_stream, source_addr, dst_addr).await;
     }
 
+    fn is_retriable_connection_error(err: &Error) -> bool {
+        matches!(
+            err,
+            Error::NoHealthyUpstream(_)
+                | Error::NoValidDestination(_)
+                | Error::NoService(_)
+                | Error::Io(_)
+                | Error::Tls(_)
+                | Error::Http2Handshake(_)
+                | Error::H2(_)
+                | Error::HandshakeTimeout(_)
+                | Error::MaybeHBONENetworkPolicyError(_)
+        ) || matches!(err, Error::HttpStatus(status) if status.is_server_error())
+    }
+
+    /// Retry numbers are 1-based.
+    fn retry_backoff(retry: usize, base: Duration, max: Duration) -> Duration {
+        let doublings = u32::try_from(retry.saturating_sub(1)).unwrap_or(u32::MAX);
+        base.saturating_mul(2u32.saturating_pow(doublings)).min(max)
+    }
+
+    fn configured_retry_backoff(&self, retry: usize) -> Duration {
+        Self::retry_backoff(
+            retry,
+            self.pi.cfg.outbound_connect_base_backoff,
+            self.pi.cfg.outbound_connect_max_backoff,
+        )
+    }
+
+    fn retry_delay(
+        &self,
+        err: &Error,
+        retries: usize,
+        max_retries: usize,
+        start: Instant,
+    ) -> Option<Duration> {
+        if !Self::is_retriable_connection_error(err) || retries >= max_retries {
+            return None;
+        }
+        let backoff = self.configured_retry_backoff(retries + 1);
+        Self::retry_within_deadline(start, backoff).then_some(backoff)
+    }
+
+    /// Minimum budget for a useful connection attempt.
+    const MIN_CONNECT_BUDGET: Duration = Duration::from_millis(50);
+
+    /// Splits the remaining connect budget across remaining attempts, subject to the floor.
+    /// The floor may extend an attempt beyond the remaining budget.
+    fn connect_budget(start: Instant, retries: usize, max_retries: usize) -> Duration {
+        let time_left = super::CONNECTION_TIMEOUT.saturating_sub(start.elapsed());
+        let attempts_left = u32::try_from(max_retries.saturating_sub(retries).saturating_add(1))
+            .unwrap_or(u32::MAX);
+        let share = time_left / attempts_left;
+        std::cmp::max(share, Self::MIN_CONNECT_BUDGET)
+    }
+
+    fn retry_within_deadline(start: Instant, backoff: Duration) -> bool {
+        start.elapsed().saturating_add(backoff) < super::CONNECTION_TIMEOUT
+    }
+
+    async fn connect_with_retries(
+        &mut self,
+        source_addr: SocketAddr,
+        dest_addr: SocketAddr,
+        max_retries: usize,
+        start: Instant,
+    ) -> Option<(
+        ConnectedUpstream,
+        Option<DerivedWorkload>,
+        Box<ConnectionResultBuilder>,
+        Box<Request>,
+        OutboundConnectionGuard,
+    )> {
+        let mut retries = 0;
+        let mut deprioritized = DeprioritizedEndpoints::default();
+        loop {
+            // First find the source workload of this traffic. If we don't know where the request is from
+            // we will reject it.
+            let build = self
+                .pi
+                .local_workload_information
+                .get_workload()
+                .and_then(|source| {
+                    self.build_request(source, source_addr.ip(), dest_addr, &deprioritized)
+                });
+
+            let req = match Box::pin(build).await {
+                Ok(req) => Box::new(req),
+                Err(err) => {
+                    if let Some(backoff) = self.retry_delay(&err, retries, max_retries, start) {
+                        retries += 1;
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
+                    return None;
+                }
+            };
+            // TODO: should we use the original address or the actual address? Both seems nice!
+            let conn_guard = self.pi.connection_manager.track_outbound(
+                source_addr,
+                dest_addr,
+                req.actual_destination,
+                req.protocol,
+            );
+
+            let metrics = self.pi.metrics.clone();
+            let hbone_target = req.hbone_target_destination.clone();
+            let connection_result_builder = Box::new(ConnectionResultBuilder::new(
+                source_addr,
+                req.actual_destination,
+                hbone_target,
+                start,
+                Self::conn_metrics_from_request(&req),
+                metrics,
+            ));
+
+            let budget =
+                (max_retries > 0).then(|| Self::connect_budget(start, retries, max_retries));
+
+            let connected = match req.protocol {
+                OutboundProtocol::DOUBLEHBONE => {
+                    // We box this since its not a common path and it would make the future really big.
+                    Box::pin(self.connect_hbone_double(source_addr, &req, budget)).await
+                }
+                OutboundProtocol::HBONE => self
+                    .connect_hbone(source_addr, &req, budget)
+                    .await
+                    .map(|upstream| (upstream, None)),
+                OutboundProtocol::TCP => self
+                    .connect_tcp(&req, budget)
+                    .await
+                    .map(|upstream| (upstream, None)),
+            };
+
+            match connected {
+                Ok((connected, derived_workload)) => {
+                    return Some((
+                        connected,
+                        derived_workload,
+                        connection_result_builder,
+                        req,
+                        conn_guard,
+                    ));
+                }
+                Err(e) => {
+                    let backoff = self.retry_delay(&e, retries, max_retries, start);
+                    connection_result_builder.build().record(Err(e));
+                    let backoff = backoff?;
+                    // Deprioritize the failed next hop (possibly a waypoint or gateway).
+                    if let Some(wl) = &req.actual_destination_workload {
+                        deprioritized.push(wl.uid.clone());
+                    }
+                    retries += 1;
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+            };
+        }
+    }
+
     pub async fn proxy_to(
         &mut self,
         source_stream: TcpStream,
@@ -190,214 +365,206 @@ impl OutboundConnection {
             metrics::log_early_deny(source_addr, dest_addr, Reporter::source, Error::SelfCall);
             return;
         }
-        // First find the source workload of this traffic. If we don't know where the request is from
-        // we will reject it.
-        let build = self
-            .pi
-            .local_workload_information
-            .get_workload()
-            .and_then(|source| self.build_request(source, source_addr.ip(), dest_addr));
-        let req = match Box::pin(build).await {
-            Ok(req) => Box::new(req),
-            Err(err) => {
-                metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
-                return;
-            }
-        };
-        // TODO: should we use the original address or the actual address? Both seems nice!
-        let _conn_guard = self.pi.connection_manager.track_outbound(
-            source_addr,
-            dest_addr,
-            req.actual_destination,
-            req.protocol,
+        // Keep the tracking guard alive through the splice.
+        let (connected, derived_workload, mut connection_result_builder, req, _conn_guard) =
+            match Box::pin(self.connect_with_retries(
+                source_addr,
+                dest_addr,
+                self.pi.cfg.outbound_connect_max_retries,
+                start,
+            ))
+            .await
+            {
+                Some(result) => result,
+                None => return,
+            };
+        if let Some(derived_workload) = derived_workload {
+            *connection_result_builder =
+                connection_result_builder.with_derived_destination(&derived_workload);
+        }
+        let connection_stats = Box::new(connection_result_builder.build());
+        debug!(
+            dst=%req.actual_destination,
+            target=?req.hbone_target_destination,
+            "starting copy",
         );
-
-        let metrics = self.pi.metrics.clone();
-        let hbone_target = req.hbone_target_destination.clone();
-        let connection_result_builder = Box::new(ConnectionResultBuilder::new(
-            source_addr,
-            req.actual_destination,
-            hbone_target,
-            start,
-            Self::conn_metrics_from_request(&req),
-            metrics,
-        ));
-
-        match req.protocol {
-            OutboundProtocol::DOUBLEHBONE => {
-                // We box this since its not a common path and it would make the future really big.
-                Box::pin(self.proxy_to_double_hbone(
-                    source_stream,
-                    source_addr,
-                    &req,
-                    connection_result_builder,
-                ))
-                .await
-            }
-            OutboundProtocol::HBONE => {
-                self.proxy_to_hbone(source_stream, source_addr, &req, connection_result_builder)
-                    .await
-            }
-            OutboundProtocol::TCP => {
-                self.proxy_to_tcp(source_stream, &req, connection_result_builder)
-                    .await
-            }
-        };
+        drop(req);
+        let res = Box::pin(self.splice(source_stream, connected, &connection_stats)).await;
+        connection_stats.record(res);
     }
 
-    async fn proxy_to_double_hbone(
+    async fn connect_hbone_double(
         &mut self,
-        stream: TcpStream,
         remote_addr: SocketAddr,
         req: &Request,
-        mut connection_stats_builder: Box<ConnectionResultBuilder>,
-    ) {
-        // async move block allows use of ? operator
-        let res = (async move {
-            // Create the outer HBONE stream. The outer tunnel's revocation signal
-            // is captured here so it can still be attributed downstream.
-            let (upgraded, _, outer_revoked) =
-                Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-            // Wrap upgraded to implement tokio's Async{Write,Read}
-            let upgraded = TokioH2Stream::new(upgraded);
+        connect_timeout: Option<Duration>,
+    ) -> Result<(ConnectedUpstream, Option<DerivedWorkload>), Error> {
+        let cert = self
+            .pi
+            .local_workload_information
+            .fetch_certificate()
+            .await?;
+        let deadline = connect_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
+        // Both HBONE legs share the attempt deadline.
+        let (upgraded, _, outer_revoked) =
+            Box::pin(self.send_hbone_request(remote_addr, req, deadline)).await?;
+        // Wrap upgraded to implement tokio's Async{Write,Read}
+        let upgraded = TokioH2Stream::new(upgraded);
 
-            // For the inner one, we do it manually to avoid connection pooling.
-            // Otherwise, we would only ever reach one workload in the remote cluster.
-            // We also need to abort tasks the right way to get graceful terminations.
-            let wl_key = WorkloadKey {
-                src_id: req.source.identity(),
-                dst_id: req.final_sans.clone(),
-                src: remote_addr.ip(),
-                dst: req.actual_destination,
-            };
+        // For the inner one, we do it manually to avoid connection pooling.
+        // Otherwise, we would only ever reach one workload in the remote cluster.
+        // We also need to abort tasks the right way to get graceful terminations.
+        let wl_key = WorkloadKey {
+            src_id: req.source.identity(),
+            dst_id: req.final_sans.clone(),
+            src: remote_addr.ip(),
+            dst: req.actual_destination,
+        };
 
-            // Fetch certs and establish inner TLS connection.
-            let cert = self
-                .pi
-                .local_workload_information
-                .fetch_certificate()
-                .await?;
-            let connector =
-                cert.outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())?;
-            let tls_stream = connector.connect(upgraded).await.inspect_err(|e| {
+        let connector =
+            cert.outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())?;
+        let tls_stream = super::with_deadline(
+            deadline,
+            super::HBONEHandshakeStage::InnerTls,
+            connector.connect(upgraded).inspect_err(|e| {
                 if crate::tls::io_error_is_cert_revoked(e) {
                     self.pi
                         .metrics
                         .record_crl_rejection(crate::proxy::metrics::Reporter::source);
                 }
-            })?;
-            let (_, ssl) = tls_stream.get_ref();
-            let peer_identity = {
-                let x509_cert = tls::certificate_from_connection(ssl);
-                tls::identity(&x509_cert)
-            };
+            }),
+        )
+        .await?;
+        let (_, ssl) = tls_stream.get_ref();
+        let peer_identity = {
+            let x509_cert = tls::certificate_from_connection(ssl);
+            tls::identity(&x509_cert)
+        };
 
-            // Spawn inner CONNECT tunnel
-            let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
-            // Enforce CRL revocation on this inner tunnel for its lifetime
-            let revocation = self.pi.crl_manager.as_ref().map(|crl_manager| {
-                crl_manager.register(crate::tls::revocation::ConnRegistration::from_conn(
-                    ssl,
-                    peer_identity.clone(),
-                    cert.root_store(),
-                    webpki::KeyUsage::server_auth(),
-                    crate::proxy::metrics::Reporter::source,
-                ))
-            });
-            let mut sender = super::h2::client::spawn_connection(
+        // Spawn inner CONNECT tunnel
+        let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+        // Enforce CRL revocation on this inner tunnel for its lifetime
+        let revocation = self.pi.crl_manager.as_ref().map(|crl_manager| {
+            crl_manager.register(crate::tls::revocation::ConnRegistration::from_conn(
+                ssl,
+                peer_identity.clone(),
+                cert.root_store(),
+                webpki::KeyUsage::server_auth(),
+                crate::proxy::metrics::Reporter::source,
+            ))
+        });
+        let mut sender = super::with_deadline(
+            deadline,
+            super::HBONEHandshakeStage::InnerHttp2,
+            super::h2::client::spawn_connection(
                 self.pi.cfg.clone(),
                 tls_stream,
                 drain_rx,
                 wl_key,
                 revocation,
-            )
-            .await?;
-            // The inner tunnel's revocation signal
-            let inner_revoked = sender.revoked_receiver();
-            let origin_network = &self.pi.cfg.network;
-            let http_request = self.create_hbone_request(remote_addr, req, Some(origin_network));
-            let (inner_upgraded, baggage) = sender.send_request(http_request).await?;
+            ),
+        )
+        .await?;
+        // The inner tunnel's revocation signal
+        let inner_revoked = sender.revoked_receiver();
+        let origin_network = &self.pi.cfg.network;
+        let http_request = self.create_hbone_request(remote_addr, req, Some(origin_network));
+        let (inner_upgraded, baggage) = super::with_deadline(
+            deadline,
+            super::HBONEHandshakeStage::InnerConnect,
+            sender.send_request(http_request),
+        )
+        .await?;
 
-            // Proxy
-            let derived_workload = baggage.map(|baggage| DerivedWorkload {
-                workload_name: baggage.workload_name,
-                app: baggage.service_name,
-                namespace: baggage.namespace,
-                identity: peer_identity,
-                cluster_id: baggage.cluster_id,
-                region: baggage.region,
-                zone: baggage.zone,
-                revision: baggage.revision,
-            });
-            Result::<_, Error>::Ok((
-                derived_workload,
-                drain_tx,
-                inner_upgraded,
-                outer_revoked,
-                inner_revoked,
-            ))
+        let derived_workload = baggage.map(|baggage| DerivedWorkload {
+            workload_name: baggage.workload_name,
+            app: baggage.service_name,
+            namespace: baggage.namespace,
+            identity: peer_identity,
+            cluster_id: baggage.cluster_id,
+            region: baggage.region,
+            zone: baggage.zone,
+            revision: baggage.revision,
+        });
+        Ok((
+            ConnectedUpstream::Hbone {
+                stream: inner_upgraded,
+                revoked: [outer_revoked, inner_revoked],
+                inner_drain: Some(drain_tx),
+            },
+            derived_workload,
+        ))
+    }
+
+    async fn connect_hbone(
+        &mut self,
+        remote_addr: SocketAddr,
+        req: &Request,
+        connect_timeout: Option<Duration>,
+    ) -> Result<ConnectedUpstream, Error> {
+        let deadline = self.deadline_after_cert_fetch(connect_timeout).await?;
+        let (stream, _, revoked) =
+            Box::pin(self.send_hbone_request(remote_addr, req, deadline)).await?;
+        Ok(ConnectedUpstream::Hbone {
+            stream,
+            revoked: [revoked, None],
+            inner_drain: None,
         })
-        .await;
+    }
 
-        match res {
-            Err(e) => {
-                let connection_stats = connection_stats_builder.build();
-                connection_stats.record(Err(e));
-            }
-            Ok((derived_workload, drain_tx, inner_upgraded, outer_revoked, inner_revoked)) => {
-                if let Some(derived_workload) = derived_workload {
-                    *connection_stats_builder =
-                        connection_stats_builder.with_derived_destination(&derived_workload);
-                }
+    /// Fetch the certificate before starting the attempt deadline so CSR latency doesn't consume it.
+    async fn deadline_after_cert_fetch(
+        &self,
+        connect_timeout: Option<Duration>,
+    ) -> Result<Option<tokio::time::Instant>, Error> {
+        let Some(timeout) = connect_timeout else {
+            return Ok(None);
+        };
+        self.pi
+            .local_workload_information
+            .fetch_certificate()
+            .await?;
+        Ok(Some(tokio::time::Instant::now() + timeout))
+    }
 
-                let connection_stats = connection_stats_builder.build();
-                // Race the copy against BOTH tunnels' revocation signals (inner = final dest, outer = e/w gw).
-                // `biased` with the revocation arms first makes attribution deterministic,
-                // so a teardown from either hop surfaces as CERT_REVOKED rather than generic reset.
+    /// Retries must finish before splicing: downstream bytes may be consumed here.
+    async fn splice(
+        &self,
+        source: TcpStream,
+        upstream: ConnectedUpstream,
+        connection_stats: &ConnectionResult,
+    ) -> Result<(), Error> {
+        match upstream {
+            ConnectedUpstream::Hbone {
+                stream: upstream,
+                revoked: [outer_revoked, inner_revoked],
+                inner_drain,
+            } => {
+                // Check revocation first so tunnel teardown is reported as CERT_REVOKED.
                 let res = tokio::select! {
                     biased;
                     _ = await_revocation(outer_revoked) => Err(Error::CertificateRevoked),
                     _ = await_revocation(inner_revoked) => Err(Error::CertificateRevoked),
                     res = copy::copy_bidirectional(
-                        copy::TcpStreamSplitter(stream),
-                        inner_upgraded,
-                        &connection_stats,
+                        copy::TcpStreamSplitter(source),
+                        upstream,
+                        connection_stats,
                     ) => res,
                 };
-                let _ = drain_tx.send(true);
-
-                connection_stats.record(res);
+                if let Some(inner_drain) = inner_drain {
+                    let _ = inner_drain.send(true);
+                }
+                res
+            }
+            ConnectedUpstream::Tcp(upstream) => {
+                copy::copy_bidirectional(
+                    copy::TcpStreamSplitter(source),
+                    copy::TcpStreamSplitter(upstream),
+                    connection_stats,
+                )
+                .await
             }
         }
-    }
-
-    async fn proxy_to_hbone(
-        &mut self,
-        stream: TcpStream,
-        remote_addr: SocketAddr,
-        req: &Request,
-        connection_stats_builder: Box<ConnectionResultBuilder>,
-    ) {
-        let connection_stats = Box::new(connection_stats_builder.build());
-        let res = (async {
-            let (upgraded, _, revoked) =
-                Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-            // Race the data copy against the tunnel's revocation signal. `biased` with the
-            // revocation arm first makes attribution deterministic: the driver sets the signal
-            // before tearing the tunnel down, so whenever a teardown is due to revocation this arm
-            // wins and `record` logs `CERT_REVOKED` rather than the generic reset the copy observed.
-            tokio::select! {
-                biased;
-                _ = await_revocation(revoked) => Err(Error::CertificateRevoked),
-                res = copy::copy_bidirectional(
-                    copy::TcpStreamSplitter(stream),
-                    upgraded,
-                    &connection_stats,
-                ) => res,
-            }
-        })
-        .await;
-        connection_stats.record(res);
     }
 
     fn create_hbone_request(
@@ -437,6 +604,7 @@ impl OutboundConnection {
         &mut self,
         remote_addr: SocketAddr,
         req: &Request,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<(H2Stream, Option<Baggage>, Option<watch::Receiver<bool>>), Error> {
         // This is the single cluster/single-HBONE codepath (and also the outer tunnel
         // for double HBONE). We don't need the x-istio-origin-network header here because:
@@ -450,39 +618,24 @@ impl OutboundConnection {
             src: remote_addr.ip(),
             dst: req.actual_destination,
         });
-        let (upgraded, baggage, revoked) =
-            Box::pin(self.pool.send_request_pooled(&pool_key, request))
-                .instrument(trace_span!("outbound connect"))
-                .await?;
-        Ok((upgraded, baggage, revoked))
+        Box::pin(self.pool.send_request_pooled(&pool_key, request, deadline))
+            .instrument(trace_span!("outbound connect"))
+            .await
     }
 
-    async fn proxy_to_tcp(
-        &mut self,
-        stream: TcpStream,
+    async fn connect_tcp(
+        &self,
         req: &Request,
-        connection_stats_builder: Box<ConnectionResultBuilder>,
-    ) {
-        let connection_stats = Box::new(connection_stats_builder.build());
-
-        let res = (async {
-            let outbound = super::freebind_connect(
-                None, // No need to spoof source IP on outbound
-                req.actual_destination,
-                self.pi.socket_factory.as_ref(),
-            )
-            .await?;
-
-            // Proxying data between downstream and upstream
-            copy::copy_bidirectional(
-                copy::TcpStreamSplitter(stream),
-                copy::TcpStreamSplitter(outbound),
-                &connection_stats,
-            )
-            .await
-        })
-        .await;
-        connection_stats.record(res);
+        connect_timeout: Option<Duration>,
+    ) -> Result<ConnectedUpstream, Error> {
+        let outbound = super::freebind_connect(
+            None, // No need to spoof source IP on outbound
+            req.actual_destination,
+            self.pi.socket_factory.as_ref(),
+            connect_timeout,
+        )
+        .await?;
+        Ok(ConnectedUpstream::Tcp(outbound))
     }
 
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {
@@ -544,12 +697,13 @@ impl OutboundConnection {
         // at the moment, so we should always have a service we could use.
         service: &Service,
         target: SocketAddr,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Result<Request, Error> {
         if let Some(gateway) = &upstream.workload.network_gateway {
             let gateway_upstream = self
                 .pi
                 .state
-                .fetch_network_gateway(gateway, &source, target)
+                .fetch_network_gateway(gateway, &source, target, deprioritized)
                 .await?;
             let hbone_target_destination = Some(HboneAddress::SvcHostname(
                 service.hostname.clone(),
@@ -591,6 +745,7 @@ impl OutboundConnection {
         source_workload: Arc<Workload>,
         downstream: IpAddr,
         target: SocketAddr,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Result<Request, Error> {
         let state = &self.pi.state;
 
@@ -608,7 +763,7 @@ impl OutboundConnection {
         {
             // if we have a waypoint for this svc, use it; otherwise route traffic normally
             if let Some(waypoint) = state
-                .fetch_service_waypoint(&target_service, &source_workload, target)
+                .fetch_service_waypoint(&target_service, &source_workload, target, deprioritized)
                 .await?
             {
                 if waypoint.workload.network != source_workload.network {
@@ -619,6 +774,7 @@ impl OutboundConnection {
                             waypoint,
                             &target_service,
                             target,
+                            deprioritized,
                         )
                         .await;
                 }
@@ -655,6 +811,7 @@ impl OutboundConnection {
                 &source_workload,
                 target,
                 ServiceResolutionMode::Standard,
+                deprioritized,
             )
             .await?
         else {
@@ -702,7 +859,13 @@ impl OutboundConnection {
             debug!("picked a workload on remote network");
             let service = service.as_ref().ok_or(Error::NoService(target))?;
             return self
-                .build_request_through_gateway(source_workload.clone(), us, service, target)
+                .build_request_through_gateway(
+                    source_workload.clone(),
+                    us,
+                    service,
+                    target,
+                    deprioritized,
+                )
                 .await;
         }
 
@@ -721,7 +884,7 @@ impl OutboundConnection {
         if !from_waypoint && service.is_none() {
             // For case upstream server has enabled waypoint
             let waypoint = state
-                .fetch_workload_waypoint(&us.workload, &source_workload, target)
+                .fetch_workload_waypoint(&us.workload, &source_workload, target, deprioritized)
                 .await?;
             if let Some(waypoint) = waypoint {
                 let actual_destination =
@@ -837,6 +1000,7 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
+    use crate::proxy::HBONEHandshakeStage;
     use crate::proxy::connection_manager::ConnectionManager;
     use crate::proxy::{LocalWorkloadInformation, pool::WorkloadHBONEPool};
     use crate::state::WorkloadInfo;
@@ -955,7 +1119,12 @@ mod tests {
             .await
             .unwrap();
         let req = outbound
-            .build_request(local, from.parse().unwrap(), to.parse().unwrap())
+            .build_request(
+                local,
+                from.parse().unwrap(),
+                to.parse().unwrap(),
+                &Default::default(),
+            )
             .await
             .ok();
         if let Some(ref r) = req {
@@ -2154,6 +2323,570 @@ mod tests {
             "test-network",
             "x-istio-origin-network header should contain the network name for double HBONE inner request"
         );
+    }
+
+    async fn test_outbound_connection(
+        workloads: Vec<XdsWorkload>,
+        services: Vec<XdsService>,
+    ) -> OutboundConnection {
+        let cfg = Arc::new(Config {
+            local_node: Some("local-node".to_string()),
+            ..crate::config::parse_config().unwrap()
+        });
+        let source = XdsWorkload {
+            uid: "cluster1//v1/Pod/ns/source-workload".to_string(),
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 1])],
+            node: "local-node".to_string(),
+            ..Default::default()
+        };
+        let mut all_workloads = vec![source];
+        all_workloads.extend(workloads);
+        let state = new_proxy_state(&all_workloads, &services, &[]);
+
+        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory::default());
+        let wi = WorkloadInfo {
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            service_account: "default".to_string(),
+        };
+        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(wi),
+            state.clone(),
+            identity::mock::new_secret_manager(Duration::from_secs(10)),
+        ));
+        OutboundConnection {
+            pi: Arc::new(ProxyInputs {
+                state,
+                cfg: cfg.clone(),
+                metrics: test_proxy_metrics(),
+                socket_factory: sock_fact.clone(),
+                local_workload_information: local_workload_information.clone(),
+                connection_manager: ConnectionManager::default(),
+                resolver: None,
+                disable_inbound_freebind: false,
+                crl_manager: None,
+            }),
+            id: TraceParent::new(),
+            pool: WorkloadHBONEPool::new(
+                cfg.clone(),
+                sock_fact,
+                local_workload_information,
+                None,
+                test_proxy_metrics(),
+            ),
+            hbone_port: cfg.inbound_addr.port(),
+        }
+    }
+
+    fn example_service() -> XdsService {
+        XdsService {
+            hostname: "example.com".to_string(),
+            addresses: vec![XdsNetworkAddress {
+                network: "".to_string(),
+                address: vec![127, 0, 0, 3],
+                length: None,
+            }],
+            ports: vec![Port {
+                service_port: 80,
+                target_port: 8080,
+                app_protocol: 0,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn dest_workload(last_octet: u8, name: &str) -> XdsWorkload {
+        XdsWorkload {
+            uid: format!("cluster1//v1/Pod/ns/{name}"),
+            name: name.to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, last_octet])],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn retry_backoff_is_exponential_and_capped() {
+        let base = Duration::from_millis(50);
+        let max = Duration::from_millis(500);
+        let backoff = |retry| OutboundConnection::retry_backoff(retry, base, max);
+        assert_eq!(backoff(1), Duration::from_millis(50));
+        assert_eq!(backoff(2), Duration::from_millis(100));
+        assert_eq!(backoff(3), Duration::from_millis(200));
+        assert_eq!(backoff(4), Duration::from_millis(400));
+        assert_eq!(backoff(5), max);
+        assert_eq!(backoff(20), max);
+        assert_eq!(backoff(33), max);
+        assert_eq!(backoff(usize::MAX), max);
+        assert_eq!(backoff(0), base);
+
+        for i in 0..40 {
+            assert!(backoff(i) <= backoff(i + 1), "backoff must not shrink");
+            assert!(backoff(i) <= max, "backoff must stay capped");
+        }
+    }
+
+    #[test]
+    fn outbound_connect_defaults() {
+        let cfg = crate::config::parse_config().unwrap();
+        assert_eq!(cfg.outbound_connect_max_retries, 0);
+        assert_eq!(cfg.outbound_connect_base_backoff, Duration::from_millis(10));
+        assert_eq!(cfg.outbound_connect_max_backoff, Duration::from_millis(500));
+    }
+
+    fn started_ago(spent: Duration) -> Instant {
+        Instant::now() - spent
+    }
+
+    #[track_caller]
+    fn assert_budget(actual: Duration, expected: Duration) {
+        // Clock-read overhead can only reduce the remaining budget.
+        let slack = Duration::from_millis(50);
+        assert!(
+            actual <= expected && actual + slack >= expected,
+            "expected a budget of about {expected:?}, got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn connect_budget_splits_the_connect_timeout_across_attempts() {
+        let budget = OutboundConnection::connect_budget;
+        let total = crate::proxy::CONNECTION_TIMEOUT;
+
+        assert_budget(budget(started_ago(Duration::ZERO), 0, 2), total / 3);
+        assert_budget(budget(started_ago(Duration::ZERO), 0, 0), total);
+
+        let half = started_ago(total / 2);
+        assert_budget(budget(half, 1, 2), total / 4);
+        assert_budget(budget(half, 2, 2), total / 2);
+
+        assert_budget(
+            budget(started_ago(Duration::from_millis(1)), 1, 2),
+            total / 2,
+        );
+
+        assert_eq!(
+            budget(started_ago(total * 2), 0, 2),
+            OutboundConnection::MIN_CONNECT_BUDGET
+        );
+    }
+
+    #[test]
+    fn connect_budget_stops_dividing_at_the_floor() {
+        let budget = OutboundConnection::connect_budget;
+        let floor = OutboundConnection::MIN_CONNECT_BUDGET;
+        let total = crate::proxy::CONNECTION_TIMEOUT;
+
+        assert!(budget(started_ago(Duration::ZERO), 0, 2) > floor);
+
+        assert_eq!(budget(started_ago(Duration::ZERO), 0, 399), floor);
+        assert_eq!(budget(started_ago(Duration::ZERO), 0, usize::MAX), floor);
+
+        assert_eq!(
+            budget(started_ago(total - Duration::from_millis(1)), 1, 2),
+            floor
+        );
+    }
+
+    #[test]
+    fn connect_budget_never_exceeds_the_connect_timeout() {
+        // Model attempts that consume their full budgets, excluding backoff.
+        for max_retries in 0..8 {
+            let mut spent = Duration::ZERO;
+            for retries in 0..=max_retries {
+                let budget =
+                    OutboundConnection::connect_budget(started_ago(spent), retries, max_retries);
+                assert!(
+                    budget <= crate::proxy::CONNECTION_TIMEOUT,
+                    "no single attempt may outlast the whole connect"
+                );
+                spent += budget;
+            }
+            assert!(
+                spent <= crate::proxy::CONNECTION_TIMEOUT,
+                "{max_retries} retries spent {spent:?}, over the {:?} budget",
+                crate::proxy::CONNECTION_TIMEOUT
+            );
+        }
+    }
+
+    #[test]
+    fn connect_budget_floor_bounds_its_own_overshoot() {
+        // This tests budget allocation alone; the retry loop also checks the overall deadline.
+        let floor = OutboundConnection::MIN_CONNECT_BUDGET;
+        for max_retries in [8usize, 100, 400] {
+            let attempts = max_retries + 1;
+            let mut spent = Duration::ZERO;
+            for retries in 0..=max_retries {
+                spent +=
+                    OutboundConnection::connect_budget(started_ago(spent), retries, max_retries);
+            }
+            let bound = crate::proxy::CONNECTION_TIMEOUT + floor * attempts as u32;
+            assert!(
+                spent <= bound,
+                "{max_retries} retries spent {spent:?}, over the {bound:?} worst case"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_within_deadline_stops_at_the_connect_timeout() {
+        let within = OutboundConnection::retry_within_deadline;
+        let total = crate::proxy::CONNECTION_TIMEOUT;
+        let backoff = Duration::from_millis(100);
+
+        assert!(within(started_ago(Duration::ZERO), backoff));
+        assert!(!within(started_ago(total - backoff), backoff));
+        assert!(!within(started_ago(total), Duration::ZERO));
+        assert!(!within(started_ago(total * 2), Duration::ZERO));
+        assert!(!within(started_ago(Duration::ZERO), Duration::MAX));
+    }
+
+    #[test]
+    fn deadline_bounds_a_fully_retried_connect() {
+        let floor = OutboundConnection::MIN_CONNECT_BUDGET;
+        let total = crate::proxy::CONNECTION_TIMEOUT;
+        for max_retries in [0usize, 2, 8, 100, 400, 10_000] {
+            let mut spent = Duration::ZERO;
+            let mut retries = 0;
+            loop {
+                spent +=
+                    OutboundConnection::connect_budget(started_ago(spent), retries, max_retries);
+                if retries >= max_retries
+                    || !OutboundConnection::retry_within_deadline(
+                        started_ago(spent),
+                        Duration::ZERO,
+                    )
+                {
+                    break;
+                }
+                retries += 1;
+            }
+            assert!(
+                spent <= total + floor,
+                "{max_retries} retries spent {spent:?}, over {total:?} plus one floor"
+            );
+        }
+    }
+
+    #[test]
+    fn is_retriable_error_classification() {
+        let retriable = OutboundConnection::is_retriable_connection_error;
+        let addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+
+        assert!(retriable(&Error::NoHealthyUpstream(addr)));
+        assert!(retriable(&Error::NoValidDestination(Box::new(
+            crate::test_helpers::test_default_workload()
+        ))));
+        assert!(retriable(&Error::NoService(addr)));
+
+        assert!(retriable(&Error::Io(std::io::Error::from(
+            std::io::ErrorKind::ConnectionRefused
+        ))));
+        assert!(retriable(&Error::Io(std::io::Error::from(
+            std::io::ErrorKind::ConnectionReset
+        ))));
+
+        for stage in [
+            HBONEHandshakeStage::Tls,
+            HBONEHandshakeStage::Http2,
+            HBONEHandshakeStage::Connect,
+            HBONEHandshakeStage::InnerTls,
+            HBONEHandshakeStage::InnerHttp2,
+            HBONEHandshakeStage::InnerConnect,
+        ] {
+            assert!(retriable(&Error::HandshakeTimeout(stage)), "{stage}");
+        }
+        assert!(retriable(&Error::MaybeHBONENetworkPolicyError(
+            std::io::Error::from(std::io::ErrorKind::TimedOut)
+        )));
+
+        assert!(!retriable(&Error::HttpStatus(
+            http::StatusCode::UNAUTHORIZED
+        )));
+        assert!(retriable(&Error::HttpStatus(
+            http::StatusCode::SERVICE_UNAVAILABLE
+        )));
+        assert!(retriable(&Error::HttpStatus(
+            http::StatusCode::INTERNAL_SERVER_ERROR
+        )));
+        assert!(retriable(&Error::HttpStatus(http::StatusCode::BAD_GATEWAY)));
+        assert!(retriable(&Error::HttpStatus(
+            http::StatusCode::GATEWAY_TIMEOUT
+        )));
+        assert!(!retriable(&Error::CertificateRevoked));
+        assert!(!retriable(&Error::WorkloadHBONEPoolDraining));
+
+        assert!(!retriable(&Error::SelfCall));
+        assert!(!retriable(&Error::NoWorkloadEndpoints(
+            "example.com".to_string()
+        )));
+        assert!(!retriable(&Error::NoResolvedAddresses(
+            "example.com".to_string()
+        )));
+        assert!(!retriable(&Error::UnknownWaypoint(
+            "example.com".to_string()
+        )));
+    }
+
+    fn listed_outbound(cm: &ConnectionManager) -> usize {
+        let dump = serde_json::to_value(cm).expect("connection manager serializes");
+        dump["outbound"]
+            .as_array()
+            .expect("dump has an outbound array")
+            .len()
+    }
+
+    #[tokio::test]
+    async fn an_open_connection_stays_listed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        initialize_telemetry();
+        let upstream = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let dest = upstream.local_addr().unwrap();
+        let mut oc =
+            test_outbound_connection(vec![dest_workload(2, "dest-workload")], vec![]).await;
+        let cm = oc.pi.connection_manager.clone();
+
+        let downstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = tokio::net::TcpStream::connect(downstream.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (source_stream, source_addr) = downstream.accept().await.unwrap();
+
+        assert_eq!(listed_outbound(&cm), 0, "nothing is open yet");
+
+        let proxy = tokio::spawn(async move {
+            oc.proxy_to(source_stream, source_addr, dest).await;
+        });
+
+        // Round-trip data to ensure proxy_to has entered the splice before checking the listing.
+        let (mut upstream_side, _) = upstream.accept().await.unwrap();
+        client.write_all(b"x").await.unwrap();
+        let mut buf = [0u8; 1];
+        upstream_side.read_exact(&mut buf).await.unwrap();
+
+        assert_eq!(listed_outbound(&cm), 1, "an open connection must be listed");
+
+        drop(client);
+        drop(upstream_side);
+        tokio::time::timeout(Duration::from_secs(5), proxy)
+            .await
+            .expect("the splice ends once both ends close")
+            .unwrap();
+        assert_eq!(
+            listed_outbound(&cm),
+            0,
+            "a closed connection must be unlisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_with_retries_succeeds_without_backoff() {
+        initialize_telemetry();
+        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let dest = listener.local_addr().unwrap();
+
+        let mut oc =
+            test_outbound_connection(vec![dest_workload(2, "dest-workload")], vec![]).await;
+
+        let start = Instant::now();
+        let (connected, derived_workload, _builder, req, _conn_guard) = oc
+            .connect_with_retries("127.0.0.1:1234".parse().unwrap(), dest, 2, start)
+            .await
+            .expect("connect to a live listener should succeed");
+
+        assert!(matches!(connected, ConnectedUpstream::Tcp(_)));
+        assert!(derived_workload.is_none());
+        assert_eq!(req.protocol, OutboundProtocol::TCP);
+        assert_eq!(req.actual_destination, dest);
+        assert!(
+            start.elapsed() < oc.configured_retry_backoff(1),
+            "a first-try success must not sleep"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_with_retries_retries_a_refused_connect() {
+        initialize_telemetry();
+        // Bind to grab a free port, then drop the listener so the connect is refused.
+        let dest = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+
+        let mut oc =
+            test_outbound_connection(vec![dest_workload(2, "dest-workload")], vec![]).await;
+
+        let start = Instant::now();
+        let res = oc
+            .connect_with_retries("127.0.0.1:1234".parse().unwrap(), dest, 2, start)
+            .await;
+
+        assert!(
+            res.is_none(),
+            "a refused connect must not yield an upstream"
+        );
+        let backoffs: Duration = (1..=2).map(|r| oc.configured_retry_backoff(r)).sum();
+        assert!(
+            start.elapsed() >= backoffs,
+            "a refused connect is retriable, so both backoffs must have been paid"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_with_retries_retries_build_failures() {
+        initialize_telemetry();
+        let target: SocketAddr = "127.0.0.3:80".parse().unwrap();
+        let mut oc = test_outbound_connection(vec![], vec![example_service()]).await;
+
+        let local = oc
+            .pi
+            .local_workload_information
+            .get_workload()
+            .await
+            .unwrap();
+        let err = oc
+            .build_request(
+                local,
+                "127.0.0.1".parse().unwrap(),
+                target,
+                &Default::default(),
+            )
+            .await
+            .expect_err("a service with no endpoints has no upstream");
+        assert!(matches!(err, Error::NoHealthyUpstream(_)));
+        assert!(OutboundConnection::is_retriable_connection_error(&err));
+
+        let start = Instant::now();
+        let res = oc
+            .connect_with_retries("127.0.0.1:1234".parse().unwrap(), target, 2, start)
+            .await;
+
+        assert!(res.is_none());
+        let backoffs: Duration = (1..=2).map(|r| oc.configured_retry_backoff(r)).sum();
+        assert!(
+            start.elapsed() >= backoffs,
+            "a retriable build failure must pay both backoffs"
+        );
+        crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
+            ("error", "no healthy upstream: 127.0.0.3:80"),
+            ("message", "connection failed"),
+        ]));
+    }
+
+    #[tokio::test]
+    async fn connect_with_retries_stops_at_the_deadline() {
+        initialize_telemetry();
+        let dest = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        let mut oc =
+            test_outbound_connection(vec![dest_workload(2, "dest-workload")], vec![]).await;
+
+        let start = started_ago(crate::proxy::CONNECTION_TIMEOUT);
+        let before = Instant::now();
+        let res = oc
+            .connect_with_retries("127.0.0.1:1234".parse().unwrap(), dest, 1000, start)
+            .await;
+
+        assert!(res.is_none());
+        assert!(
+            before.elapsed() < oc.configured_retry_backoff(1),
+            "a connect past its deadline must not sleep for a retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_with_retries_stops_build_retries_at_the_deadline() {
+        initialize_telemetry();
+        let target: SocketAddr = "127.0.0.3:80".parse().unwrap();
+        let mut oc = test_outbound_connection(vec![], vec![example_service()]).await;
+
+        let start = started_ago(crate::proxy::CONNECTION_TIMEOUT);
+        let before = Instant::now();
+        let res = oc
+            .connect_with_retries("127.0.0.1:1234".parse().unwrap(), target, 1000, start)
+            .await;
+
+        assert!(res.is_none());
+        assert!(
+            before.elapsed() < oc.configured_retry_backoff(1),
+            "a build failure past the deadline must not sleep for a retry"
+        );
+        crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
+            ("error", "no healthy upstream: 127.0.0.3:80"),
+            ("message", "connection failed"),
+        ]));
+    }
+
+    #[tokio::test]
+    async fn build_request_skips_deprioritized_endpoint() {
+        initialize_telemetry();
+        let svc_addr: SocketAddr = "127.0.0.3:80".parse().unwrap();
+        let backend = |name: &str, last_octet: u8| XdsWorkload {
+            uid: format!("cluster1//v1/Pod/ns/{name}"),
+            name: name.to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, last_octet])],
+            services: std::collections::HashMap::from([(
+                "/example.com".to_string(),
+                PortList {
+                    ports: vec![Port {
+                        service_port: 80,
+                        target_port: 8080,
+                        app_protocol: 0,
+                    }],
+                },
+            )]),
+            ..Default::default()
+        };
+        let (backend_a, backend_b) = (backend("backend-a", 10), backend("backend-b", 11));
+        let addr_a: SocketAddr = "127.0.0.10:8080".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.11:8080".parse().unwrap();
+
+        let oc = test_outbound_connection(
+            vec![backend_a.clone(), backend_b.clone()],
+            vec![example_service()],
+        )
+        .await;
+        let local = oc
+            .pi
+            .local_workload_information
+            .get_workload()
+            .await
+            .unwrap();
+        let downstream: IpAddr = "127.0.0.1".parse().unwrap();
+
+        let build = async |deprioritized: &DeprioritizedEndpoints| {
+            oc.build_request(local.clone(), downstream, svc_addr, deprioritized)
+                .await
+                .expect("service has healthy endpoints")
+                .actual_destination
+        };
+
+        // Sample randomized selection before applying endpoint deprioritization.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            seen.insert(build(&Default::default()).await);
+        }
+        assert_eq!(
+            seen,
+            std::collections::HashSet::from_iter([addr_a, addr_b]),
+            "both endpoints must be reachable without a deprioritized list"
+        );
+
+        let mut deprioritized = DeprioritizedEndpoints::default();
+        deprioritized.push(backend_a.uid.as_str().into());
+        for _ in 0..50 {
+            assert_eq!(
+                build(&deprioritized).await,
+                addr_b,
+                "a deprioritized endpoint must not be re-selected while another remains"
+            );
+        }
     }
 
     #[derive(PartialEq, Debug)]

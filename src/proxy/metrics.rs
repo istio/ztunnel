@@ -720,6 +720,16 @@ impl ConnectionResult {
                     ResponseFlags::Http2HandshakeFailure
                 }
                 proxy::Error::MaybeHBONENetworkPolicyError(_) => ResponseFlags::NetworkPolicyError,
+                proxy::Error::HandshakeTimeout(stage) => match stage {
+                    proxy::HBONEHandshakeStage::Tls | proxy::HBONEHandshakeStage::InnerTls => {
+                        ResponseFlags::TlsFailure
+                    }
+                    proxy::HBONEHandshakeStage::Http2 | proxy::HBONEHandshakeStage::InnerHttp2 => {
+                        ResponseFlags::Http2HandshakeFailure
+                    }
+                    proxy::HBONEHandshakeStage::Connect
+                    | proxy::HBONEHandshakeStage::InnerConnect => ResponseFlags::ConnectionFailure,
+                },
                 proxy::Error::Identity(_) => ResponseFlags::IdentityError,
                 proxy::Error::AuthorizationPolicyRejection(_)
                 | proxy::Error::AuthorizationPolicyLateRejection => {
