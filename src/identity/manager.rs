@@ -378,7 +378,7 @@ impl Worker {
                         }
                         // Remove metric to avoid accumulating series from deleted pods
                         self.metrics
-                            .cert_expiry_seconds
+                            .cert_expiry_timestamp_seconds
                             .remove(&CertExpiryLabels::from_cache_key(&key));
 
                         match processing.get(&key) {
@@ -493,7 +493,7 @@ impl Worker {
                             .as_secs() as i64;
 
                             self.metrics
-                            .cert_expiry_seconds
+                            .cert_expiry_timestamp_seconds
                             .get_or_create(&CertExpiryLabels::from_cache_key(&key))
                             .set(expiry_secs);
 
@@ -1619,7 +1619,7 @@ mod tests {
         let expiry = test
             .secret_manager
             .cert_metrics()
-            .cert_expiry_seconds
+            .cert_expiry_timestamp_seconds
             .get_or_create(&labels)
             .get();
 
@@ -1633,7 +1633,7 @@ mod tests {
         let family = test
             .secret_manager
             .cert_metrics()
-            .cert_expiry_seconds
+            .cert_expiry_timestamp_seconds
             .clone();
 
         test.secret_manager.forget_certificate(&id).await;
@@ -1680,8 +1680,14 @@ mod tests {
 
         let metrics = test.secret_manager.cert_metrics();
 
-        let expiry_a = metrics.cert_expiry_seconds.get_or_create(&labels_a).get();
-        let expiry_b = metrics.cert_expiry_seconds.get_or_create(&labels_b).get();
+        let expiry_a = metrics
+            .cert_expiry_timestamp_seconds
+            .get_or_create(&labels_a)
+            .get();
+        let expiry_b = metrics
+            .cert_expiry_timestamp_seconds
+            .get_or_create(&labels_b)
+            .get();
         assert!(
             expiry_a > 0,
             "{} metric should have a non-zero expiry",
@@ -1719,7 +1725,7 @@ mod tests {
             POD_NAME_B
         );
 
-        let family = metrics.cert_expiry_seconds.clone();
+        let family = metrics.cert_expiry_timestamp_seconds.clone();
 
         // forget one pod cert
         test.secret_manager
@@ -1772,8 +1778,14 @@ mod tests {
 
         let metrics = test.secret_manager.cert_metrics();
 
-        let expiry_id = metrics.cert_expiry_seconds.get_or_create(&labels_id).get();
-        let expiry_wl = metrics.cert_expiry_seconds.get_or_create(&labels_wl).get();
+        let expiry_id = metrics
+            .cert_expiry_timestamp_seconds
+            .get_or_create(&labels_id)
+            .get();
+        let expiry_wl = metrics
+            .cert_expiry_timestamp_seconds
+            .get_or_create(&labels_wl)
+            .get();
         assert!(expiry_id > 0, "identity-keyed metric should exist");
         assert!(expiry_wl > 0, "workload-keyed metric should exist");
 
@@ -1806,7 +1818,7 @@ mod tests {
             "workload key should produce pod uid"
         );
 
-        let family = metrics.cert_expiry_seconds.clone();
+        let family = metrics.cert_expiry_timestamp_seconds.clone();
 
         test.secret_manager.forget_certificate(&id).await;
         tokio::time::sleep(NANOSEC).await;
@@ -1838,7 +1850,7 @@ mod tests {
         let expiry_before = test
             .secret_manager
             .cert_metrics()
-            .cert_expiry_seconds
+            .cert_expiry_timestamp_seconds
             .get_or_create(&labels)
             .get();
         assert!(
@@ -1853,7 +1865,7 @@ mod tests {
         let expiry_after = test
             .secret_manager
             .cert_metrics()
-            .cert_expiry_seconds
+            .cert_expiry_timestamp_seconds
             .get_or_create(&labels)
             .get();
         assert!(

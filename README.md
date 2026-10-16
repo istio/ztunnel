@@ -150,7 +150,7 @@ Metrics for the data plane worker pool Tokio runtime.
 
 #### Identity metrics
 
-- Workload certificate expiry (`istio_cert_expiry_seconds`): Unix timestamp when the workload certificate expires, labeled by `identity` (SPIFFE URI) and `uid` (pod UID; empty for identity-keyed certificates)
+- Workload certificate expiry (`istio_cert_expiry_timestamp_seconds`): Unix timestamp when the workload certificate expires, labeled by `identity` (SPIFFE URI) and `uid` (pod UID; empty for identity-keyed certificates)
 
 ## Logging
 
