@@ -20,6 +20,8 @@ use std::hash::{Hash, RandomState};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::identity::metrics::{CertExpiryLabels, Metrics as IdentityMetrics};
+
 use crate::config::ProxyMode;
 use async_trait::async_trait;
 
@@ -265,6 +267,7 @@ struct Worker {
     certs: Mutex<HashMap<CacheKey, CertChannel>>,
     // How many concurrent fetch_certificate calls can be pending at a time.
     concurrency: u16,
+    metrics: Arc<IdentityMetrics>,
 }
 
 impl Worker {
@@ -281,6 +284,7 @@ impl Worker {
             time_conv: cfg.time_conv,
             concurrency: cfg.concurrency,
             certs: Default::default(),
+            metrics: cfg.metrics,
         });
 
         // Process requests in the background. The task will terminate on its own when the
@@ -372,6 +376,11 @@ impl Worker {
                             // managing the key. Do nothing.
                             continue 'main;
                         }
+                        // Remove metric to avoid accumulating series from deleted pods
+                        self.metrics
+                            .cert_expiry_timestamp_seconds
+                            .remove(&CertExpiryLabels::from_cache_key(&key));
+
                         match processing.get(&key) {
                             None => {
                                 pending.remove(&key);
@@ -474,6 +483,20 @@ impl Worker {
                                 // conversion here, so for now leaving the code as is.
                                 Instant::now()
                             };
+
+                            let expiry_secs = certs
+                            .cert
+                            .expiration()
+                            .not_after
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+
+                            self.metrics
+                            .cert_expiry_timestamp_seconds
+                            .get_or_create(&CertExpiryLabels::from_cache_key(&key))
+                            .set(expiry_secs);
+
                             (CertState::Available(Arc::new(certs)), refresh_at)
                         },
                     };
@@ -566,6 +589,7 @@ enum Request {
 pub struct SecretManagerConfig {
     time_conv: crate::time::Converter,
     concurrency: u16,
+    metrics: Arc<IdentityMetrics>,
 }
 
 // push_increase pushes an item onto the queue if its not present, otherwise updates the priority to the
@@ -619,6 +643,7 @@ impl SecretManager {
             SecretManagerConfig {
                 time_conv: crate::time::Converter::new(),
                 concurrency: 8,
+                metrics: Arc::new(IdentityMetrics::default()),
             },
         )
         .0
@@ -637,6 +662,10 @@ impl SecretManager {
             },
             handle,
         )
+    }
+
+    pub fn cert_metrics(&self) -> &IdentityMetrics {
+        &self.worker.metrics
     }
 
     async fn post(&self, req: Request) {
@@ -814,6 +843,7 @@ pub mod mock {
     use crate::identity::caclient::mock::{self, CaClient as MockCaClient};
 
     use super::SecretManager;
+    use crate::identity::metrics::Metrics as IdentityMetrics;
 
     pub struct Config {
         pub cert_lifetime: Duration,
@@ -844,6 +874,7 @@ pub mod mock {
                 super::SecretManagerConfig {
                     time_conv,
                     concurrency: 2,
+                    metrics: Arc::new(IdentityMetrics::default()),
                 },
             )
             .0,
@@ -859,7 +890,7 @@ pub mod mock {
 
 #[cfg(test)]
 mod tests {
-    use std::time;
+    use std::time::{self, SystemTime, UNIX_EPOCH};
 
     use matches::assert_matches;
 
@@ -1014,6 +1045,7 @@ mod tests {
             SecretManagerConfig {
                 time_conv,
                 concurrency,
+                metrics: Arc::new(IdentityMetrics::default()),
             },
         );
         Test {
@@ -1569,5 +1601,278 @@ mod tests {
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/sa"), Err(_));
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/sa/sa/"), Err(_));
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/foobar/sa/"), Err(_));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_cert_expiry_metric_updated_on_fetch() {
+        let test = setup(1);
+        let id = identity("test-cert-expiry");
+        let key = CacheKey::Identity(id.clone());
+
+        test.secret_manager
+            .fetch_certificate(&id)
+            .await
+            .expect("fetch failed");
+
+        let labels = CertExpiryLabels::from_cache_key(&key);
+
+        let expiry = test
+            .secret_manager
+            .cert_metrics()
+            .cert_expiry_timestamp_seconds
+            .get_or_create(&labels)
+            .get();
+
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(expiry > now_secs, "cert expiry should be in the future");
+
+        // clone family before tear_down
+        let family = test
+            .secret_manager
+            .cert_metrics()
+            .cert_expiry_timestamp_seconds
+            .clone();
+
+        test.secret_manager.forget_certificate(&id).await;
+        // ensure forget has been processed
+        test.tear_down().await;
+
+        let after_forget = family.get_or_create(&labels).get();
+        assert_eq!(after_forget, 0, "metric should be zero after forget");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_cert_expiry_metric_workload_keyed() {
+        const POD_NAME_A: &str = "pod-a";
+        const POD_NAME_B: &str = "pod-b";
+        const POD_UID_A: &str = "uid-a";
+        const POD_UID_B: &str = "uid-b";
+
+        let test = setup(2);
+        let id = identity("metric-wl");
+
+        // Fetch certs for two different pods with the same identity
+        let cert_a = test
+            .secret_manager
+            .fetch_certificate_by_workload(&id, workload_info(POD_NAME_A), POD_UID_A.into())
+            .await
+            .unwrap();
+        let cert_b = test
+            .secret_manager
+            .fetch_certificate_by_workload(&id, workload_info(POD_NAME_B), POD_UID_B.into())
+            .await
+            .unwrap();
+
+        // Build labels for each pod
+        let labels_a = CertExpiryLabels::from_cache_key(&CacheKey::Workload {
+            id: id.clone(),
+            uid: POD_UID_A.into(),
+            workload: workload_info(POD_NAME_A),
+        });
+        let labels_b = CertExpiryLabels::from_cache_key(&CacheKey::Workload {
+            id: id.clone(),
+            uid: POD_UID_B.into(),
+            workload: workload_info(POD_NAME_B),
+        });
+
+        let metrics = test.secret_manager.cert_metrics();
+
+        let expiry_a = metrics
+            .cert_expiry_timestamp_seconds
+            .get_or_create(&labels_a)
+            .get();
+        let expiry_b = metrics
+            .cert_expiry_timestamp_seconds
+            .get_or_create(&labels_b)
+            .get();
+        assert!(
+            expiry_a > 0,
+            "{} metric should have a non-zero expiry",
+            POD_NAME_A
+        );
+        assert!(
+            expiry_b > 0,
+            "{} metric should have a non-zero expiry",
+            POD_NAME_B
+        );
+
+        // Check both expiry values come from each pod's own cert
+        let expected_a = cert_a
+            .cert
+            .expiration()
+            .not_after
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let expected_b = cert_b
+            .cert
+            .expiration()
+            .not_after
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert_eq!(
+            expiry_a, expected_a,
+            "{} metric must match its cert's not_after",
+            POD_NAME_A
+        );
+        assert_eq!(
+            expiry_b, expected_b,
+            "{} metric must match its cert's not_after",
+            POD_NAME_B
+        );
+
+        let family = metrics.cert_expiry_timestamp_seconds.clone();
+
+        // forget one pod cert
+        test.secret_manager
+            .forget_certificate_by_workload(&id, workload_info(POD_NAME_A), POD_UID_A.into())
+            .await;
+
+        // make some time for the forget to actually execute
+        tokio::time::sleep(NANOSEC).await;
+
+        // check the metric is removed
+        let after_a = family.get_or_create(&labels_a).get();
+        assert_eq!(
+            after_a, 0,
+            "{} metric should be zero after forget",
+            POD_NAME_A
+        );
+
+        // and the other pod metric is not affected
+        let after_b = family.get_or_create(&labels_b).get();
+        assert_eq!(
+            after_b, expected_b,
+            "{} metric must survive {}'s forget",
+            POD_NAME_B, POD_NAME_A
+        );
+
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_cert_expiry_metric_mixed_keys() {
+        const POD_NAME: &str = "pod-x";
+        const POD_UID: &str = "uid-x";
+
+        let test = setup(2);
+        let id = identity("metric-mixed");
+
+        let cert_identity = test.secret_manager.fetch_certificate(&id).await.unwrap();
+        let cert_workload = test
+            .secret_manager
+            .fetch_certificate_by_workload(&id, workload_info(POD_NAME), POD_UID.into())
+            .await
+            .unwrap();
+
+        let labels_id = CertExpiryLabels::from_cache_key(&CacheKey::Identity(id.clone()));
+        let labels_wl = CertExpiryLabels::from_cache_key(&CacheKey::Workload {
+            id: id.clone(),
+            uid: POD_UID.into(),
+            workload: workload_info(POD_NAME),
+        });
+
+        let metrics = test.secret_manager.cert_metrics();
+
+        let expiry_id = metrics
+            .cert_expiry_timestamp_seconds
+            .get_or_create(&labels_id)
+            .get();
+        let expiry_wl = metrics
+            .cert_expiry_timestamp_seconds
+            .get_or_create(&labels_wl)
+            .get();
+        assert!(expiry_id > 0, "identity-keyed metric should exist");
+        assert!(expiry_wl > 0, "workload-keyed metric should exist");
+
+        let expected_id = cert_identity
+            .cert
+            .expiration()
+            .not_after
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let expected_wl = cert_workload
+            .cert
+            .expiration()
+            .not_after
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert_eq!(
+            expiry_id, expected_id,
+            "identity metric must match its cert's not_after"
+        );
+        assert_eq!(
+            expiry_wl, expected_wl,
+            "workload metric must match its cert's not_after"
+        );
+
+        assert_eq!(labels_id.uid, "", "identity key should produce empty uid");
+        assert_eq!(
+            labels_wl.uid, POD_UID,
+            "workload key should produce pod uid"
+        );
+
+        let family = metrics.cert_expiry_timestamp_seconds.clone();
+
+        test.secret_manager.forget_certificate(&id).await;
+        tokio::time::sleep(NANOSEC).await;
+
+        let after_id = family.get_or_create(&labels_id).get();
+        let after_wl = family.get_or_create(&labels_wl).get();
+        assert_eq!(after_id, 0, "identity metric should be zero after forget");
+        assert_eq!(
+            after_wl, expiry_wl,
+            "workload metric must survive identity forget"
+        );
+
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_cert_expiry_metric_updates_on_rotation() {
+        let test = setup(1);
+        let id = identity("metric-rotation");
+        let key = CacheKey::Identity(id.clone());
+        let start = Instant::now();
+
+        test.secret_manager
+            .fetch_certificate(&id)
+            .await
+            .expect("initial fetch failed");
+
+        let labels = CertExpiryLabels::from_cache_key(&key);
+        let expiry_before = test
+            .secret_manager
+            .cert_metrics()
+            .cert_expiry_timestamp_seconds
+            .get_or_create(&labels)
+            .get();
+        assert!(
+            expiry_before > 0,
+            "metric should be set after initial fetch"
+        );
+
+        // Wait past the certificate half-life so the background refresh fires,
+        // plus enough time for the CA call to complete (fetch_latency = 1s).
+        tokio::time::sleep_until(start + CERT_HALFLIFE + 3 * SEC).await;
+
+        let expiry_after = test
+            .secret_manager
+            .cert_metrics()
+            .cert_expiry_timestamp_seconds
+            .get_or_create(&labels)
+            .get();
+        assert!(
+            expiry_after > expiry_before,
+            "metric should update after rotation: before={expiry_before}, after={expiry_after}"
+        );
+
+        test.tear_down().await;
     }
 }
