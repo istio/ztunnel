@@ -43,16 +43,16 @@ impl CertExpiryLabels {
 
 #[derive(Default)]
 pub struct Metrics {
-    pub cert_expiry_seconds: Family<CertExpiryLabels, Gauge>,
+    pub cert_expiry_timestamp_seconds: Family<CertExpiryLabels, Gauge>,
 }
 
 impl Metrics {
     pub fn register(&self, registry: &mut Registry) {
         registry.register_with_unit(
-            "cert_expiry",
+            "cert_expiry_timestamp",
             "Unix timestamp when the workload certificate expires",
             Unit::Seconds,
-            self.cert_expiry_seconds.clone(),
+            self.cert_expiry_timestamp_seconds.clone(),
         );
     }
 }
