@@ -728,7 +728,8 @@ impl ConnectionResult {
                         ResponseFlags::Http2HandshakeFailure
                     }
                     proxy::HBONEHandshakeStage::Connect
-                    | proxy::HBONEHandshakeStage::InnerConnect => ResponseFlags::ConnectionFailure,
+                    | proxy::HBONEHandshakeStage::InnerConnect
+                    | proxy::HBONEHandshakeStage::PoolWait => ResponseFlags::ConnectionFailure,
                 },
                 proxy::Error::Identity(_) => ResponseFlags::IdentityError,
                 proxy::Error::AuthorizationPolicyRejection(_)

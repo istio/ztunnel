@@ -2596,6 +2596,7 @@ mod tests {
             HBONEHandshakeStage::InnerTls,
             HBONEHandshakeStage::InnerHttp2,
             HBONEHandshakeStage::InnerConnect,
+            HBONEHandshakeStage::PoolWait,
         ] {
             assert!(retriable(&Error::HandshakeTimeout(stage)), "{stage}");
         }

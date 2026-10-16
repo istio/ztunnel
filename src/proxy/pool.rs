@@ -39,7 +39,6 @@ use flurry;
 use crate::proxy::h2::H2Stream;
 use crate::proxy::h2::client::{H2ConnectClient, WorkloadKey};
 use pingora_pool;
-use tokio::io;
 
 // A relatively nonstandard HTTP/2 connection pool designed to allow multiplexing proxied workload connections
 // over a (smaller) number of HTTP/2 mTLS tunnels.
@@ -425,7 +424,12 @@ impl WorkloadHBONEPool {
         request: http::Request<()>,
         deadline: Option<Instant>,
     ) -> Result<(H2Stream, Option<Baggage>, Option<watch::Receiver<bool>>), Error> {
-        let mut connection = self.connect(workload_key, deadline).await?;
+        let mut connection = super::with_deadline(
+            deadline,
+            super::HBONEHandshakeStage::PoolWait,
+            self.connect(workload_key, deadline),
+        )
+        .await?;
 
         // Surface the tunnel's revocation signal so the caller can attribute a revoked teardown.
         let revoked = connection.revoked_receiver();
@@ -1136,12 +1140,7 @@ mod test {
         pool: &mut WorkloadHBONEPool,
         dst: SocketAddr,
     ) -> (Error, Duration) {
-        let key = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst,
-        };
+        let key = key_to(dst, 2);
         let start = tokio::time::Instant::now();
         let deadline = start + Duration::from_millis(200);
         let res = tokio::time::timeout(
@@ -1159,15 +1158,7 @@ mod test {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn deadline_bounds_a_stalled_tls_handshake() {
         let (mut pool, _srv) = setup_test(3).await;
-        // Accepts TCP connections and then never says anything, so the TLS handshake stalls.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let mut held = Vec::new();
-            while let Ok((stream, _)) = listener.accept().await {
-                held.push(stream);
-            }
-        });
+        let addr = spawn_stalled_tls_server().await;
 
         let (err, took) = send_with_deadline(&mut pool, addr).await;
         assert!(
@@ -1180,7 +1171,34 @@ mod test {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn deadline_bounds_an_unanswered_connect() {
         let (mut pool, _srv) = setup_test(3).await;
-        // Completes TLS and HTTP/2, then never answers the CONNECT.
+        let addr = spawn_connect_server(None).await;
+        let conn = pool.connect(&key_to(addr, 2), None).await.unwrap();
+
+        let (err, took) = send_with_deadline(&mut pool, addr).await;
+        assert!(
+            matches!(err, Error::HandshakeTimeout(HBONEHandshakeStage::Connect)),
+            "got {err:?}"
+        );
+        assert!(took < Duration::from_secs(1), "took {took:?}");
+        // Dropping the timed-out CONNECT must release its stream.
+        assert_eq!(conn.stream_count(), 0);
+    }
+
+    /// Accepts TCP connections and then never says anything, so the TLS handshake stalls.
+    async fn spawn_stalled_tls_server() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        addr
+    }
+
+    /// Completes TLS and HTTP/2, then answers each CONNECT with `status`, or never if `None`.
+    async fn spawn_connect_server(status: Option<hyper::StatusCode>) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let certs = crate::tls::mock::generate_test_certs(
@@ -1194,29 +1212,70 @@ mod test {
             while let Some(stream) = tls_stream.next().await {
                 tokio::spawn(crate::hyper_util::http2_server().serve_connection(
                     hyper_util::rt::TokioIo::new(stream),
-                    service_fn(|_req: Request<Incoming>| {
-                        future::pending::<
-                            Result<Response<http_body_util::Empty<bytes::Bytes>>, Infallible>,
-                        >()
+                    service_fn(move |_req: Request<Incoming>| async move {
+                        match status {
+                            Some(status) => {
+                                let mut resp =
+                                    Response::new(http_body_util::Empty::<bytes::Bytes>::new());
+                                *resp.status_mut() = status;
+                                Ok::<_, Infallible>(resp)
+                            }
+                            None => future::pending().await,
+                        }
                     }),
                 ));
             }
         });
+        addr
+    }
+
+    fn key_to(dst: SocketAddr, ip: u8) -> WorkloadKey {
+        WorkloadKey {
+            src_id: Identity::default(),
+            dst_id: vec![Identity::default()],
+            src: IpAddr::from([127, 0, 0, ip]),
+            dst,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_connect_releases_stream_count() {
+        let (mut pool, _srv) = setup_test(3).await;
+        let addr = spawn_connect_server(Some(hyper::StatusCode::FORBIDDEN)).await;
+        let conn = pool.connect(&key_to(addr, 2), None).await.unwrap();
+
+        let (err, _) = send_with_deadline(&mut pool, addr).await;
+        assert!(
+            matches!(err, Error::HttpStatus(hyper::StatusCode::FORBIDDEN)),
+            "got {err:?}"
+        );
+        assert_eq!(conn.stream_count(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deadline_bounds_waiting_on_another_connect() {
+        let (mut pool, _srv) = setup_test(3).await;
+        let addr = spawn_stalled_tls_server().await;
+
+        // With no deadline, this connect holds the key's lock for as long as the TLS handshake stalls.
+        let mut holder = pool.clone();
+        let key = key_to(addr, 2);
+        tokio::spawn(async move {
+            let _ = holder
+                .send_request_pooled(&key, connect_req(addr), None)
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         let (err, took) = send_with_deadline(&mut pool, addr).await;
         assert!(
-            matches!(err, Error::HandshakeTimeout(HBONEHandshakeStage::Connect)),
+            matches!(err, Error::HandshakeTimeout(HBONEHandshakeStage::PoolWait)),
             "got {err:?}"
         );
         assert!(took < Duration::from_secs(1), "took {took:?}");
     }
 
     fn key(srv: &TestServer, ip: u8) -> WorkloadKey {
-        WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, ip]),
-            dst: srv.addr,
-        }
+        key_to(srv.addr, ip)
     }
 }
