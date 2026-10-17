@@ -36,10 +36,17 @@ pub async fn build_with_cert(
     config: Arc<config::Config>,
     cert_manager: Arc<SecretManager>,
 ) -> anyhow::Result<Bound> {
+    build_with_cert_and_shutdown(config, cert_manager, signal::Shutdown::new()).await
+}
+
+async fn build_with_cert_and_shutdown(
+    config: Arc<config::Config>,
+    cert_manager: Arc<SecretManager>,
+    shutdown: signal::Shutdown,
+) -> anyhow::Result<Bound> {
     // Start the data plane worker pool.
     let (data_plane_pool, data_plane_handle) = new_data_plane_pool(config.num_worker_threads);
 
-    let shutdown = signal::Shutdown::new();
     // Setup a drain channel. drain_tx is used to trigger a drain, which will complete
     // once all drain_rx handlers are dropped.
     // Any component which wants time to gracefully exit should take in a drain_rx clone,
@@ -318,12 +325,20 @@ fn new_data_plane_pool(
 }
 
 pub async fn build(config: Arc<config::Config>) -> anyhow::Result<Bound> {
+    build_with_shutdown(config, signal::Shutdown::new()).await
+}
+
+/// Like build, but with a caller-created Shutdown so signal handlers are registered early.
+pub async fn build_with_shutdown(
+    config: Arc<config::Config>,
+    shutdown: signal::Shutdown,
+) -> anyhow::Result<Bound> {
     let cert_manager = if config.fake_ca {
         mock_secret_manager()
     } else {
         Arc::new(SecretManager::new(config.clone()).await?)
     };
-    build_with_cert(config, cert_manager).await
+    build_with_cert_and_shutdown(config, cert_manager, shutdown).await
 }
 
 #[cfg(feature = "testing")]
