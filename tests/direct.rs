@@ -199,8 +199,7 @@ async fn test_quit_lifecycle() {
 }
 
 fn process_metrics_assertions(metrics: &ParsedMetrics) {
-    for metric in ["process_open_fds", "process_max_fds"] {
-        let metric = &(metric);
+    fn get_gauge(metrics: &ParsedMetrics, metric: &str) -> f64 {
         let m = metrics.query(metric, &Default::default());
         assert!(m.is_some(), "expected metric {metric}");
         assert!(
@@ -209,17 +208,48 @@ fn process_metrics_assertions(metrics: &ParsedMetrics) {
         );
         let value = m.unwrap()[0].value.clone();
         match value {
-            prometheus_parse::Value::Gauge(v) => {
-                assert!(
-                    v > 0.0,
-                    "expected metric {metric} to be positive, was {value:?}",
-                );
-            }
-            _ => {
-                panic!("unexpected metric type");
-            }
+            prometheus_parse::Value::Gauge(v) => v,
+            _ => panic!("unexpected metric type for {metric}: {value:?}"),
         }
     }
+
+    for metric in ["process_open_fds", "process_max_fds"] {
+        let v = get_gauge(metrics, metric);
+        assert!(v > 0.0, "expected metric {metric} to be positive, was {v}");
+    }
+
+    let vmem = get_gauge(metrics, "process_virtual_memory_bytes");
+    assert!(
+        vmem > 0.0,
+        "expected virtual memory to be positive, was {vmem}"
+    );
+
+    let rss = get_gauge(metrics, "process_resident_memory_bytes");
+    assert!(
+        rss > 0.0,
+        "expected resident memory to be positive, was {rss}"
+    );
+    assert!(
+        rss <= vmem,
+        "expected resident memory <= virtual memory, got rss={rss} vmem={vmem}"
+    );
+
+    let start = get_gauge(metrics, "process_start_time_seconds");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    assert!(start > 0.0, "expected start time to be set, was {start}");
+    assert!(
+        start <= now + 5.0,
+        "expected start time to be <= now (+5s skew), got start={start} now={now}"
+    );
+
+    let max_vmem = get_gauge(metrics, "process_virtual_memory_max_bytes");
+    assert!(
+        max_vmem >= vmem,
+        "expected max vmem >= vmem, got max_vmem={max_vmem} vmem={vmem}"
+    );
 }
 
 fn base_metrics_assertions(metrics: ParsedMetrics) {
