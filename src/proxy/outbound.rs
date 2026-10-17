@@ -263,20 +263,18 @@ impl OutboundConnection {
         Box<Request>,
         OutboundConnectionGuard,
     )> {
+        let resolved = match self.resolve_target(source_addr.ip(), dest_addr).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
+                return None;
+            }
+        };
+
         let mut retries = 0;
         let mut deprioritized = DeprioritizedEndpoints::default();
         loop {
-            // First find the source workload of this traffic. If we don't know where the request is from
-            // we will reject it.
-            let build = self
-                .pi
-                .local_workload_information
-                .get_workload()
-                .and_then(|source| {
-                    self.build_request(source, source_addr.ip(), dest_addr, &deprioritized)
-                });
-
-            let req = match Box::pin(build).await {
+            let req = match Box::pin(self.select_next_hop(&resolved, &deprioritized)).await {
                 Ok(req) => Box::new(req),
                 Err(err) => {
                     if let Some(backoff) = self.retry_delay(&err, retries, max_retries, start) {
@@ -683,7 +681,7 @@ impl OutboundConnection {
     // NOTE: when connecting through an E/W gateway, regardless of whether there is
     // a waypoint or not, we always use service hostname and the service port. It's
     // somewhat different from how regular HBONE works, so I'm calling it out here.
-    async fn build_request_through_gateway(
+    async fn select_next_hop_through_gateway(
         &self,
         source: Arc<Workload>,
         // next hop on the remote network that we picked as our destination.
@@ -738,16 +736,29 @@ impl OutboundConnection {
         }
     }
 
-    // build_request computes all information about the request we should send
-    // TODO: Do we want a single lock for source and upstream...?
-    async fn build_request(
+    async fn resolve_target(
         &self,
-        source_workload: Arc<Workload>,
         downstream: IpAddr,
         target: SocketAddr,
+    ) -> Result<ResolvedTarget, Error> {
+        // If we don't know where the request is from we will reject it.
+        let source = self.pi.local_workload_information.get_workload().await?;
+        Ok(ResolvedTarget {
+            source,
+            downstream,
+            target,
+        })
+    }
+
+    async fn select_next_hop(
+        &self,
+        resolved: &ResolvedTarget,
         deprioritized: &DeprioritizedEndpoints,
     ) -> Result<Request, Error> {
         let state = &self.pi.state;
+        let source_workload = resolved.source.clone();
+        let downstream = resolved.downstream;
+        let target = resolved.target;
 
         // If this is to-service traffic check for a service waypoint
         // Capture result of whether this is svc addressed
@@ -769,7 +780,7 @@ impl OutboundConnection {
                 if waypoint.workload.network != source_workload.network {
                     debug!("picked a waypoint on remote network");
                     return self
-                        .build_request_through_gateway(
+                        .select_next_hop_through_gateway(
                             source_workload.clone(),
                             waypoint,
                             &target_service,
@@ -859,7 +870,7 @@ impl OutboundConnection {
             debug!("picked a workload on remote network");
             let service = service.as_ref().ok_or(Error::NoService(target))?;
             return self
-                .build_request_through_gateway(
+                .select_next_hop_through_gateway(
                     source_workload.clone(),
                     us,
                     service,
@@ -962,6 +973,14 @@ fn baggage(r: &Request) -> String {
 }
 
 #[derive(Debug)]
+struct ResolvedTarget {
+    source: Arc<Workload>,
+    downstream: IpAddr,
+    // The original destination address.
+    target: SocketAddr,
+}
+
+#[derive(Debug)]
 struct Request {
     protocol: OutboundProtocol,
     // Source workload sending the request
@@ -1016,16 +1035,16 @@ mod tests {
     use crate::xds::istio::workload::{NetworkMode, Service as XdsService};
     use crate::{identity, xds};
 
-    async fn run_build_request(
+    async fn run_select_next_hop(
         from: &str,
         to: &str,
         xds: XdsAddressType,
         expect: Option<ExpectedRequest<'_>>,
     ) {
-        run_build_request_multi(from, to, vec![xds], expect).await;
+        run_select_next_hop_multi(from, to, vec![xds], expect).await;
     }
 
-    async fn run_build_request_multi(
+    async fn run_select_next_hop_multi(
         from: &str,
         to: &str,
         xds: Vec<XdsAddressType>,
@@ -1112,19 +1131,12 @@ mod tests {
             hbone_port: cfg.inbound_addr.port(),
         };
 
-        let local = outbound
-            .pi
-            .local_workload_information
-            .get_workload()
+        let resolved = outbound
+            .resolve_target(from.parse().unwrap(), to.parse().unwrap())
             .await
             .unwrap();
         let req = outbound
-            .build_request(
-                local,
-                from.parse().unwrap(),
-                to.parse().unwrap(),
-                &Default::default(),
-            )
+            .select_next_hop(&resolved, &Default::default())
             .await
             .ok();
         if let Some(ref r) = req {
@@ -1147,8 +1159,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_unknown_dest() {
-        run_build_request(
+    async fn select_next_hop_unknown_dest() {
+        run_select_next_hop(
             "127.0.0.1",
             "1.2.3.4:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1166,8 +1178,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_wrong_network() {
-        run_build_request_multi(
+    async fn select_next_hop_wrong_network() {
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1208,10 +1220,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_double_hbone() {
+    async fn select_next_hop_double_hbone() {
         // example.com service has a workload on remote network.
         // E/W gateway is addressed by an IP.
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1273,7 +1285,7 @@ mod tests {
         .await;
         // example.com service has a workload on remote network.
         // E/W gateway is addressed by a hostname.
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1358,7 +1370,7 @@ mod tests {
         .await;
         // example.com service has a waypoint and waypoint workload is on remote network.
         // E/W gateway is addressed by an IP.
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1446,7 +1458,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_failover_to_remote() {
+    async fn select_next_hop_failover_to_remote() {
         // Similar to the double HBONE test that we already have, but it sets up a scenario when
         // load balancing logic will pick a workload on a remote cluster when local workloads are
         // unhealthy, thus showing the expected failover behavior.
@@ -1542,7 +1554,7 @@ mod tests {
             ..Default::default()
         });
 
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1559,7 +1571,7 @@ mod tests {
         )
         .await;
 
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1578,8 +1590,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_known_dest_remote_node_tcp() {
-        run_build_request(
+    async fn select_next_hop_known_dest_remote_node_tcp() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.2:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1601,8 +1613,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_known_dest_remote_node_hbone() {
-        run_build_request(
+    async fn select_next_hop_known_dest_remote_node_hbone() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.2:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1624,8 +1636,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_known_dest_local_node_tcp() {
-        run_build_request(
+    async fn select_next_hop_known_dest_local_node_tcp() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.2:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1647,8 +1659,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_known_dest_local_node_hbone() {
-        run_build_request(
+    async fn select_next_hop_known_dest_local_node_hbone() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.2:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1670,8 +1682,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_source_waypoint() {
-        run_build_request(
+    async fn select_next_hop_source_waypoint() {
+        run_select_next_hop(
             "127.0.0.2",
             "127.0.0.1:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1700,8 +1712,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_destination_waypoint() {
-        run_build_request(
+    async fn select_next_hop_destination_waypoint() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.2:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1730,8 +1742,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_destination_waypoint_mismatch_ip() {
-        run_build_request(
+    async fn select_next_hop_destination_waypoint_mismatch_ip() {
+        run_select_next_hop(
             "127.0.0.1",
             "[ff06::c3]:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1765,8 +1777,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_destination_svc_waypoint() {
-        run_build_request(
+    async fn select_next_hop_destination_svc_waypoint() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.3:80",
             XdsAddressType::Service(XdsService {
@@ -1803,8 +1815,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_empty_service() {
-        run_build_request(
+    async fn select_next_hop_empty_service() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.3:80",
             XdsAddressType::Service(XdsService {
@@ -1827,8 +1839,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_target_port() {
-        run_build_request_multi(
+    async fn select_next_hop_target_port() {
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1895,7 +1907,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_host_network() {
+    async fn select_next_hop_host_network() {
         let xds = vec![
             // Normal service
             XdsAddressType::Service(XdsService {
@@ -1938,7 +1950,7 @@ mod tests {
                 ..Default::default()
             }),
         ];
-        let res = run_build_request_multi(
+        let res = run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             xds.clone(),
@@ -1959,7 +1971,7 @@ mod tests {
 
         // Traffic to the node directly. We should forward the request, but as passthrough, rather than
         // associating it with a random pod.
-        let res = run_build_request_multi(
+        let res = run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.2:80",
             xds.clone(),
@@ -1991,7 +2003,7 @@ mod tests {
             ..Default::default()
         });
         // v4 goes go v4
-        run_build_request(
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.2:80",
             workload.clone(),
@@ -2003,7 +2015,7 @@ mod tests {
         )
         .await;
         // v6 goes go v6
-        run_build_request(
+        run_select_next_hop(
             "127.0.0.1",
             "[ff06::c3]:80",
             workload.clone(),
@@ -2058,7 +2070,7 @@ mod tests {
             XdsAddressType::Service(s)
         };
         // V6 only should always use V6 IP
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![svc(IpFamilies::Ipv6Only), workload.clone()],
@@ -2070,7 +2082,7 @@ mod tests {
         )
         .await;
         // V4 only should always use V4 IP
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![svc(IpFamilies::Ipv4Only), workload.clone()],
@@ -2082,7 +2094,7 @@ mod tests {
         )
         .await;
         // Dual stack should always prefer the original family (here ipv4)
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![svc(IpFamilies::Dual), workload.clone()],
@@ -2094,7 +2106,7 @@ mod tests {
         )
         .await;
         // Dual stack should always prefer the original family (here ipv6)
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "::1",
             "[::3]:80",
             vec![svc(IpFamilies::Dual), workload.clone()],
@@ -2108,8 +2120,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_passthrough_svc() {
-        run_build_request(
+    async fn select_next_hop_passthrough_svc() {
+        run_select_next_hop(
             "127.0.0.1",
             "1.2.3.4:80",
             XdsAddressType::Service(XdsService {
@@ -2148,8 +2160,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_passthrough_svc_with_waypoint() {
-        run_build_request(
+    async fn select_next_hop_passthrough_svc_with_waypoint() {
+        run_select_next_hop(
             "127.0.0.1",
             "1.2.3.4:80",
             XdsAddressType::Service(XdsService {
@@ -2742,19 +2754,12 @@ mod tests {
         let target: SocketAddr = "127.0.0.3:80".parse().unwrap();
         let mut oc = test_outbound_connection(vec![], vec![example_service()]).await;
 
-        let local = oc
-            .pi
-            .local_workload_information
-            .get_workload()
+        let resolved = oc
+            .resolve_target("127.0.0.1".parse().unwrap(), target)
             .await
             .unwrap();
         let err = oc
-            .build_request(
-                local,
-                "127.0.0.1".parse().unwrap(),
-                target,
-                &Default::default(),
-            )
+            .select_next_hop(&resolved, &Default::default())
             .await
             .expect_err("a service with no endpoints has no upstream");
         assert!(matches!(err, Error::NoHealthyUpstream(_)));
@@ -2824,7 +2829,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_skips_deprioritized_endpoint() {
+    async fn select_next_hop_skips_deprioritized_endpoint() {
         initialize_telemetry();
         let svc_addr: SocketAddr = "127.0.0.3:80".parse().unwrap();
         let backend = |name: &str, last_octet: u8| XdsWorkload {
@@ -2853,16 +2858,13 @@ mod tests {
             vec![example_service()],
         )
         .await;
-        let local = oc
-            .pi
-            .local_workload_information
-            .get_workload()
+        let resolved = oc
+            .resolve_target("127.0.0.1".parse().unwrap(), svc_addr)
             .await
             .unwrap();
-        let downstream: IpAddr = "127.0.0.1".parse().unwrap();
 
         let build = async |deprioritized: &DeprioritizedEndpoints| {
-            oc.build_request(local.clone(), downstream, svc_addr, deprioritized)
+            oc.select_next_hop(&resolved, deprioritized)
                 .await
                 .expect("service has healthy endpoints")
                 .actual_destination
