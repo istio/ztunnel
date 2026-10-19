@@ -637,8 +637,7 @@ impl ConnectionResultBuilder {
         self
     }
 
-    // Record a failed attempt that will be retried. The connection is only counted as opened and
-    // logged once, by the attempt that ends it.
+    // Record a failed attempt that will be retried.
     pub fn record_retry<E: std::error::Error + 'static>(&self, err: &E) {
         let mut tl = self.tl.clone();
         tl.response_flags = failure_reason(err);

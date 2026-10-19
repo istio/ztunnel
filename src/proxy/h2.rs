@@ -196,9 +196,6 @@ struct DropCounter {
 }
 
 impl DropCounter {
-    /// Counts a new stream and returns the count before it, plus a guard for each half that
-    /// releases it once both drop. Taking both together means the count can't leak if the
-    /// caller fails or is cancelled before the stream is built.
     pub fn acquire(
         active_count: &Arc<AtomicU16>,
     ) -> (u16, Option<DropCounter>, Option<DropCounter>) {

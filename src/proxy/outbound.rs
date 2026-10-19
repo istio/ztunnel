@@ -229,7 +229,6 @@ impl OutboundConnection {
         let mut retries = 0;
         let mut deprioritized = DeprioritizedEndpoints::default();
         loop {
-            // Routing failures come from our own state, so a retry would see the same answer.
             let req = match Box::pin(self.select_next_hop(&resolved, &deprioritized)).await {
                 Ok(req) => Box::new(req),
                 Err(err) => {
@@ -2586,8 +2585,6 @@ mod tests {
             "a refused connect is retriable, so both backoffs must have been paid"
         );
 
-        // The client connection is counted and logged once; the retried attempts are counted
-        // separately.
         let metrics = ParsedMetrics::from_registry(&registry);
         let total = |name: &str| metrics.query_sum(name, &Default::default());
         assert_eq!(total("istio_tcp_connections_opened_total"), 1);

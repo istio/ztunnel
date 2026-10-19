@@ -658,7 +658,6 @@ pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A step of getting an HBONE stream: waiting on the pool, then the handshakes and CONNECT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HBONEHandshakeStage {
     Tls,
