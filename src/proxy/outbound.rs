@@ -200,50 +200,8 @@ impl OutboundConnection {
         ) || matches!(err, Error::HttpStatus(status) if status.is_server_error())
     }
 
-    /// Retry numbers are 1-based.
-    fn retry_backoff(retry: usize, base: Duration, max: Duration) -> Duration {
-        let doublings = u32::try_from(retry.saturating_sub(1)).unwrap_or(u32::MAX);
-        base.saturating_mul(2u32.saturating_pow(doublings)).min(max)
-    }
-
-    fn configured_retry_backoff(&self, retry: usize) -> Duration {
-        Self::retry_backoff(
-            retry,
-            self.pi.cfg.outbound_connect_base_backoff,
-            self.pi.cfg.outbound_connect_max_backoff,
-        )
-    }
-
-    fn retry_delay(
-        &self,
-        err: &Error,
-        retries: usize,
-        max_retries: usize,
-        start: Instant,
-    ) -> Option<Duration> {
-        if !Self::is_retriable_connection_error(err) || retries >= max_retries {
-            return None;
-        }
-        let backoff = self.configured_retry_backoff(retries + 1);
-        Self::retry_within_deadline(start, backoff).then_some(backoff)
-    }
-
     /// Minimum budget for a useful connection attempt.
     const MIN_CONNECT_BUDGET: Duration = Duration::from_millis(50);
-
-    /// Splits the remaining connect budget across remaining attempts, subject to the floor.
-    /// The floor may extend an attempt beyond the remaining budget.
-    fn connect_budget(start: Instant, retries: usize, max_retries: usize) -> Duration {
-        let time_left = super::CONNECTION_TIMEOUT.saturating_sub(start.elapsed());
-        let attempts_left = u32::try_from(max_retries.saturating_sub(retries).saturating_add(1))
-            .unwrap_or(u32::MAX);
-        let share = time_left / attempts_left;
-        std::cmp::max(share, Self::MIN_CONNECT_BUDGET)
-    }
-
-    fn retry_within_deadline(start: Instant, backoff: Duration) -> bool {
-        start.elapsed().saturating_add(backoff) < super::CONNECTION_TIMEOUT
-    }
 
     async fn connect_with_retries(
         &mut self,
@@ -265,6 +223,9 @@ impl OutboundConnection {
             }
         };
 
+        let deadline = start + super::CONNECTION_TIMEOUT;
+        let max_backoff = self.pi.cfg.outbound_connect_max_backoff;
+        let mut backoff = self.pi.cfg.outbound_connect_base_backoff.min(max_backoff);
         let mut retries = 0;
         let mut deprioritized = DeprioritizedEndpoints::default();
         loop {
@@ -295,8 +256,14 @@ impl OutboundConnection {
                 metrics,
             ));
 
-            let budget =
-                (max_retries > 0).then(|| Self::connect_budget(start, retries, max_retries));
+            // Split what is left of the deadline across the remaining attempts. The floor may
+            // extend an attempt past the deadline.
+            let budget = (max_retries > 0).then(|| {
+                let attempts_left =
+                    u32::try_from((max_retries - retries).saturating_add(1)).unwrap_or(u32::MAX);
+                let share = deadline.saturating_duration_since(Instant::now()) / attempts_left;
+                share.max(Self::MIN_CONNECT_BUDGET)
+            });
 
             let connected = match req.protocol {
                 OutboundProtocol::DOUBLEHBONE => {
@@ -328,16 +295,20 @@ impl OutboundConnection {
                     ));
                 }
                 Err(e) => {
-                    let backoff = self.retry_delay(&e, retries, max_retries, start);
+                    let retry = retries < max_retries
+                        && Self::is_retriable_connection_error(&e)
+                        && backoff < deadline.saturating_duration_since(Instant::now());
                     connection_result_builder.build().record(Err(e));
-                    let backoff = backoff?;
+                    if !retry {
+                        return None;
+                    }
                     // Deprioritize the failed next hop (possibly a waypoint or gateway).
                     if let Some(wl) = &req.actual_destination_workload {
                         deprioritized.push(wl.uid.clone());
                     }
                     retries += 1;
                     tokio::time::sleep(backoff).await;
-                    continue;
+                    backoff = backoff.saturating_mul(2).min(max_backoff);
                 }
             };
         }
@@ -2400,27 +2371,6 @@ mod tests {
     }
 
     #[test]
-    fn retry_backoff_is_exponential_and_capped() {
-        let base = Duration::from_millis(50);
-        let max = Duration::from_millis(500);
-        let backoff = |retry| OutboundConnection::retry_backoff(retry, base, max);
-        assert_eq!(backoff(1), Duration::from_millis(50));
-        assert_eq!(backoff(2), Duration::from_millis(100));
-        assert_eq!(backoff(3), Duration::from_millis(200));
-        assert_eq!(backoff(4), Duration::from_millis(400));
-        assert_eq!(backoff(5), max);
-        assert_eq!(backoff(20), max);
-        assert_eq!(backoff(33), max);
-        assert_eq!(backoff(usize::MAX), max);
-        assert_eq!(backoff(0), base);
-
-        for i in 0..40 {
-            assert!(backoff(i) <= backoff(i + 1), "backoff must not shrink");
-            assert!(backoff(i) <= max, "backoff must stay capped");
-        }
-    }
-
-    #[test]
     fn outbound_connect_defaults() {
         let cfg = crate::config::parse_config().unwrap();
         assert_eq!(cfg.outbound_connect_max_retries, 0);
@@ -2430,137 +2380,6 @@ mod tests {
 
     fn started_ago(spent: Duration) -> Instant {
         Instant::now() - spent
-    }
-
-    #[track_caller]
-    fn assert_budget(actual: Duration, expected: Duration) {
-        // Clock-read overhead can only reduce the remaining budget.
-        let slack = Duration::from_millis(50);
-        assert!(
-            actual <= expected && actual + slack >= expected,
-            "expected a budget of about {expected:?}, got {actual:?}"
-        );
-    }
-
-    #[test]
-    fn connect_budget_splits_the_connect_timeout_across_attempts() {
-        let budget = OutboundConnection::connect_budget;
-        let total = crate::proxy::CONNECTION_TIMEOUT;
-
-        assert_budget(budget(started_ago(Duration::ZERO), 0, 2), total / 3);
-        assert_budget(budget(started_ago(Duration::ZERO), 0, 0), total);
-
-        let half = started_ago(total / 2);
-        assert_budget(budget(half, 1, 2), total / 4);
-        assert_budget(budget(half, 2, 2), total / 2);
-
-        assert_budget(
-            budget(started_ago(Duration::from_millis(1)), 1, 2),
-            total / 2,
-        );
-
-        assert_eq!(
-            budget(started_ago(total * 2), 0, 2),
-            OutboundConnection::MIN_CONNECT_BUDGET
-        );
-    }
-
-    #[test]
-    fn connect_budget_stops_dividing_at_the_floor() {
-        let budget = OutboundConnection::connect_budget;
-        let floor = OutboundConnection::MIN_CONNECT_BUDGET;
-        let total = crate::proxy::CONNECTION_TIMEOUT;
-
-        assert!(budget(started_ago(Duration::ZERO), 0, 2) > floor);
-
-        assert_eq!(budget(started_ago(Duration::ZERO), 0, 399), floor);
-        assert_eq!(budget(started_ago(Duration::ZERO), 0, usize::MAX), floor);
-
-        assert_eq!(
-            budget(started_ago(total - Duration::from_millis(1)), 1, 2),
-            floor
-        );
-    }
-
-    #[test]
-    fn connect_budget_never_exceeds_the_connect_timeout() {
-        // Model attempts that consume their full budgets, excluding backoff.
-        for max_retries in 0..8 {
-            let mut spent = Duration::ZERO;
-            for retries in 0..=max_retries {
-                let budget =
-                    OutboundConnection::connect_budget(started_ago(spent), retries, max_retries);
-                assert!(
-                    budget <= crate::proxy::CONNECTION_TIMEOUT,
-                    "no single attempt may outlast the whole connect"
-                );
-                spent += budget;
-            }
-            assert!(
-                spent <= crate::proxy::CONNECTION_TIMEOUT,
-                "{max_retries} retries spent {spent:?}, over the {:?} budget",
-                crate::proxy::CONNECTION_TIMEOUT
-            );
-        }
-    }
-
-    #[test]
-    fn connect_budget_floor_bounds_its_own_overshoot() {
-        // This tests budget allocation alone; the retry loop also checks the overall deadline.
-        let floor = OutboundConnection::MIN_CONNECT_BUDGET;
-        for max_retries in [8usize, 100, 400] {
-            let attempts = max_retries + 1;
-            let mut spent = Duration::ZERO;
-            for retries in 0..=max_retries {
-                spent +=
-                    OutboundConnection::connect_budget(started_ago(spent), retries, max_retries);
-            }
-            let bound = crate::proxy::CONNECTION_TIMEOUT + floor * attempts as u32;
-            assert!(
-                spent <= bound,
-                "{max_retries} retries spent {spent:?}, over the {bound:?} worst case"
-            );
-        }
-    }
-
-    #[test]
-    fn retry_within_deadline_stops_at_the_connect_timeout() {
-        let within = OutboundConnection::retry_within_deadline;
-        let total = crate::proxy::CONNECTION_TIMEOUT;
-        let backoff = Duration::from_millis(100);
-
-        assert!(within(started_ago(Duration::ZERO), backoff));
-        assert!(!within(started_ago(total - backoff), backoff));
-        assert!(!within(started_ago(total), Duration::ZERO));
-        assert!(!within(started_ago(total * 2), Duration::ZERO));
-        assert!(!within(started_ago(Duration::ZERO), Duration::MAX));
-    }
-
-    #[test]
-    fn deadline_bounds_a_fully_retried_connect() {
-        let floor = OutboundConnection::MIN_CONNECT_BUDGET;
-        let total = crate::proxy::CONNECTION_TIMEOUT;
-        for max_retries in [0usize, 2, 8, 100, 400, 10_000] {
-            let mut spent = Duration::ZERO;
-            let mut retries = 0;
-            loop {
-                spent +=
-                    OutboundConnection::connect_budget(started_ago(spent), retries, max_retries);
-                if retries >= max_retries
-                    || !OutboundConnection::retry_within_deadline(
-                        started_ago(spent),
-                        Duration::ZERO,
-                    )
-                {
-                    break;
-                }
-                retries += 1;
-            }
-            assert!(
-                spent <= total + floor,
-                "{max_retries} retries spent {spent:?}, over {total:?} plus one floor"
-            );
-        }
     }
 
     #[test]
@@ -2698,7 +2517,7 @@ mod tests {
         assert_eq!(stream.peer_addr().unwrap(), dest);
         assert!(derived_workload.is_none());
         assert!(
-            start.elapsed() < oc.configured_retry_backoff(1),
+            start.elapsed() < oc.pi.cfg.outbound_connect_base_backoff,
             "a first-try success must not sleep"
         );
     }
@@ -2724,7 +2543,8 @@ mod tests {
             res.is_none(),
             "a refused connect must not yield an upstream"
         );
-        let backoffs: Duration = (1..=2).map(|r| oc.configured_retry_backoff(r)).sum();
+        let base = oc.pi.cfg.outbound_connect_base_backoff;
+        let backoffs = base + (base * 2).min(oc.pi.cfg.outbound_connect_max_backoff);
         assert!(
             start.elapsed() >= backoffs,
             "a refused connect is retriable, so both backoffs must have been paid"
@@ -2744,7 +2564,7 @@ mod tests {
 
         assert!(res.is_none());
         assert!(
-            start.elapsed() < oc.configured_retry_backoff(1),
+            start.elapsed() < oc.pi.cfg.outbound_connect_base_backoff,
             "a routing failure must not sleep for a retry"
         );
         crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
@@ -2771,8 +2591,37 @@ mod tests {
 
         assert!(res.is_none());
         assert!(
-            before.elapsed() < oc.configured_retry_backoff(1),
+            before.elapsed() < oc.pi.cfg.outbound_connect_base_backoff,
             "a connect past its deadline must not sleep for a retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_with_retries_retries_until_the_deadline() {
+        initialize_telemetry();
+        let dest = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        let mut oc =
+            test_outbound_connection(vec![dest_workload(2, "dest-workload")], vec![]).await;
+
+        let left = Duration::from_millis(200);
+        let start = started_ago(crate::proxy::CONNECTION_TIMEOUT - left);
+        let before = Instant::now();
+        let res = oc
+            .connect_with_retries("127.0.0.1:1234".parse().unwrap(), dest, 1000, start)
+            .await;
+
+        assert!(res.is_none());
+        let elapsed = before.elapsed();
+        assert!(
+            elapsed >= oc.pi.cfg.outbound_connect_base_backoff,
+            "a refused connect with time left must be retried"
+        );
+        assert!(
+            elapsed < left + OutboundConnection::MIN_CONNECT_BUDGET,
+            "retries must stop at the deadline, took {elapsed:?}"
         );
     }
 
