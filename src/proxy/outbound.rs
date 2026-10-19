@@ -193,10 +193,7 @@ impl OutboundConnection {
     fn is_retriable_connection_error(err: &Error) -> bool {
         matches!(
             err,
-            Error::NoHealthyUpstream(_)
-                | Error::NoValidDestination(_)
-                | Error::NoService(_)
-                | Error::Io(_)
+            Error::Io(_)
                 | Error::Tls(_)
                 | Error::Http2Handshake(_)
                 | Error::H2(_)
@@ -260,7 +257,6 @@ impl OutboundConnection {
         ConnectedUpstream,
         Option<DerivedWorkload>,
         Box<ConnectionResultBuilder>,
-        Box<Request>,
         OutboundConnectionGuard,
     )> {
         let resolved = match self.resolve_target(source_addr.ip(), dest_addr).await {
@@ -274,14 +270,10 @@ impl OutboundConnection {
         let mut retries = 0;
         let mut deprioritized = DeprioritizedEndpoints::default();
         loop {
+            // Routing failures come from our own state, so a retry would see the same answer.
             let req = match Box::pin(self.select_next_hop(&resolved, &deprioritized)).await {
                 Ok(req) => Box::new(req),
                 Err(err) => {
-                    if let Some(backoff) = self.retry_delay(&err, retries, max_retries, start) {
-                        retries += 1;
-                        tokio::time::sleep(backoff).await;
-                        continue;
-                    }
                     metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
                     return None;
                 }
@@ -325,11 +317,15 @@ impl OutboundConnection {
 
             match connected {
                 Ok((connected, derived_workload)) => {
+                    debug!(
+                        dst=%req.actual_destination,
+                        target=?req.hbone_target_destination,
+                        "starting copy",
+                    );
                     return Some((
                         connected,
                         derived_workload,
                         connection_result_builder,
-                        req,
                         conn_guard,
                     ));
                 }
@@ -364,7 +360,7 @@ impl OutboundConnection {
             return;
         }
         // Keep the tracking guard alive through the splice.
-        let (connected, derived_workload, mut connection_result_builder, req, _conn_guard) =
+        let (connected, derived_workload, mut connection_result_builder, _conn_guard) =
             match Box::pin(self.connect_with_retries(
                 source_addr,
                 dest_addr,
@@ -381,12 +377,6 @@ impl OutboundConnection {
                 connection_result_builder.with_derived_destination(&derived_workload);
         }
         let connection_stats = Box::new(connection_result_builder.build());
-        debug!(
-            dst=%req.actual_destination,
-            target=?req.hbone_target_destination,
-            "starting copy",
-        );
-        drop(req);
         let res = Box::pin(self.splice(source_stream, connected, &connection_stats)).await;
         connection_stats.record(res);
     }
@@ -2588,11 +2578,11 @@ mod tests {
         let retriable = OutboundConnection::is_retriable_connection_error;
         let addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
 
-        assert!(retriable(&Error::NoHealthyUpstream(addr)));
-        assert!(retriable(&Error::NoValidDestination(Box::new(
+        assert!(!retriable(&Error::NoHealthyUpstream(addr)));
+        assert!(!retriable(&Error::NoValidDestination(Box::new(
             crate::test_helpers::test_default_workload()
         ))));
-        assert!(retriable(&Error::NoService(addr)));
+        assert!(!retriable(&Error::NoService(addr)));
 
         assert!(retriable(&Error::Io(std::io::Error::from(
             std::io::ErrorKind::ConnectionRefused
@@ -2705,15 +2695,16 @@ mod tests {
             test_outbound_connection(vec![dest_workload(2, "dest-workload")], vec![]).await;
 
         let start = Instant::now();
-        let (connected, derived_workload, _builder, req, _conn_guard) = oc
+        let (connected, derived_workload, _builder, _conn_guard) = oc
             .connect_with_retries("127.0.0.1:1234".parse().unwrap(), dest, 2, start)
             .await
             .expect("connect to a live listener should succeed");
 
-        assert!(matches!(connected, ConnectedUpstream::Tcp(_)));
+        let ConnectedUpstream::Tcp(stream) = connected else {
+            panic!("expected a TCP upstream");
+        };
+        assert_eq!(stream.peer_addr().unwrap(), dest);
         assert!(derived_workload.is_none());
-        assert_eq!(req.protocol, OutboundProtocol::TCP);
-        assert_eq!(req.actual_destination, dest);
         assert!(
             start.elapsed() < oc.configured_retry_backoff(1),
             "a first-try success must not sleep"
@@ -2749,21 +2740,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_with_retries_retries_build_failures() {
+    async fn connect_with_retries_does_not_retry_routing_failures() {
         initialize_telemetry();
         let target: SocketAddr = "127.0.0.3:80".parse().unwrap();
         let mut oc = test_outbound_connection(vec![], vec![example_service()]).await;
-
-        let resolved = oc
-            .resolve_target("127.0.0.1".parse().unwrap(), target)
-            .await
-            .unwrap();
-        let err = oc
-            .select_next_hop(&resolved, &Default::default())
-            .await
-            .expect_err("a service with no endpoints has no upstream");
-        assert!(matches!(err, Error::NoHealthyUpstream(_)));
-        assert!(OutboundConnection::is_retriable_connection_error(&err));
 
         let start = Instant::now();
         let res = oc
@@ -2771,10 +2751,9 @@ mod tests {
             .await;
 
         assert!(res.is_none());
-        let backoffs: Duration = (1..=2).map(|r| oc.configured_retry_backoff(r)).sum();
         assert!(
-            start.elapsed() >= backoffs,
-            "a retriable build failure must pay both backoffs"
+            start.elapsed() < oc.configured_retry_backoff(1),
+            "a routing failure must not sleep for a retry"
         );
         crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
             ("error", "no healthy upstream: 127.0.0.3:80"),
@@ -2803,29 +2782,6 @@ mod tests {
             before.elapsed() < oc.configured_retry_backoff(1),
             "a connect past its deadline must not sleep for a retry"
         );
-    }
-
-    #[tokio::test]
-    async fn connect_with_retries_stops_build_retries_at_the_deadline() {
-        initialize_telemetry();
-        let target: SocketAddr = "127.0.0.3:80".parse().unwrap();
-        let mut oc = test_outbound_connection(vec![], vec![example_service()]).await;
-
-        let start = started_ago(crate::proxy::CONNECTION_TIMEOUT);
-        let before = Instant::now();
-        let res = oc
-            .connect_with_retries("127.0.0.1:1234".parse().unwrap(), target, 1000, start)
-            .await;
-
-        assert!(res.is_none());
-        assert!(
-            before.elapsed() < oc.configured_retry_backoff(1),
-            "a build failure past the deadline must not sleep for a retry"
-        );
-        crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
-            ("error", "no healthy upstream: 127.0.0.3:80"),
-            ("message", "connection failed"),
-        ]));
     }
 
     #[tokio::test]
