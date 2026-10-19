@@ -385,11 +385,14 @@ impl OutboundConnection {
         let tls_stream = super::with_deadline(
             deadline,
             super::HBONEHandshakeStage::InnerTls,
-            connector.connect(upgraded).inspect_err(|e| {
-                if crate::tls::io_error_is_cert_revoked(e) {
+            connector.connect(upgraded).map_err(|e| {
+                if crate::tls::io_error_is_cert_revoked(&e) {
                     self.pi
                         .metrics
                         .record_crl_rejection(crate::proxy::metrics::Reporter::source);
+                    Error::Teardown(super::h2::Teardown::CertificateRevoked)
+                } else {
+                    e.into()
                 }
             }),
         )
