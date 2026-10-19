@@ -247,14 +247,17 @@ impl OutboundConnection {
 
             let metrics = self.pi.metrics.clone();
             let hbone_target = req.hbone_target_destination.clone();
-            let connection_result_builder = Box::new(ConnectionResultBuilder::new(
-                source_addr,
-                req.actual_destination,
-                hbone_target,
-                start,
-                Self::conn_metrics_from_request(&req),
-                metrics,
-            ));
+            let connection_result_builder = Box::new(
+                ConnectionResultBuilder::new(
+                    source_addr,
+                    req.actual_destination,
+                    hbone_target,
+                    start,
+                    Self::conn_metrics_from_request(&req),
+                    metrics,
+                )
+                .with_retries(u32::try_from(retries).unwrap_or(u32::MAX)),
+            );
 
             // Split what is left of the deadline across the remaining attempts. The floor may
             // extend an attempt past the deadline.
@@ -298,10 +301,11 @@ impl OutboundConnection {
                     let retry = retries < max_retries
                         && Self::is_retriable_connection_error(&e)
                         && backoff < deadline.saturating_duration_since(Instant::now());
-                    connection_result_builder.build().record(Err(e));
                     if !retry {
+                        connection_result_builder.build().record(Err(e));
                         return None;
                     }
+                    connection_result_builder.record_retry(&e);
                     // Deprioritize the failed next hop (possibly a waypoint or gateway).
                     if let Some(wl) = &req.actual_destination_workload {
                         deprioritized.push(wl.uid.clone());
@@ -973,10 +977,12 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
+    use crate::metrics::sub_registry;
     use crate::proxy::HBONEHandshakeStage;
     use crate::proxy::connection_manager::ConnectionManager;
     use crate::proxy::{LocalWorkloadInformation, pool::WorkloadHBONEPool};
     use crate::state::WorkloadInfo;
+    use crate::test_helpers::app::ParsedMetrics;
     use crate::test_helpers::helpers::{initialize_telemetry, test_proxy_metrics};
     use crate::test_helpers::new_proxy_state;
     use crate::xds::istio::workload::Workload as XdsWorkload;
@@ -988,6 +994,8 @@ mod tests {
     };
     use crate::xds::istio::workload::{NetworkMode, Service as XdsService};
     use crate::{identity, xds};
+    use prometheus_client::registry::Registry;
+    use std::collections::HashMap;
 
     async fn run_select_next_hop(
         from: &str,
@@ -2295,6 +2303,14 @@ mod tests {
         workloads: Vec<XdsWorkload>,
         services: Vec<XdsService>,
     ) -> OutboundConnection {
+        test_outbound_connection_with_metrics(workloads, services, test_proxy_metrics()).await
+    }
+
+    async fn test_outbound_connection_with_metrics(
+        workloads: Vec<XdsWorkload>,
+        services: Vec<XdsService>,
+        metrics: Arc<crate::proxy::Metrics>,
+    ) -> OutboundConnection {
         let cfg = Arc::new(Config {
             local_node: Some("local-node".to_string()),
             ..crate::config::parse_config().unwrap()
@@ -2326,7 +2342,7 @@ mod tests {
             pi: Arc::new(ProxyInputs {
                 state,
                 cfg: cfg.clone(),
-                metrics: test_proxy_metrics(),
+                metrics,
                 socket_factory: sock_fact.clone(),
                 local_workload_information: local_workload_information.clone(),
                 connection_manager: ConnectionManager::default(),
@@ -2505,8 +2521,14 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
         let dest = listener.local_addr().unwrap();
 
-        let mut oc =
-            test_outbound_connection(vec![dest_workload(2, "dest-workload")], vec![]).await;
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(sub_registry(&mut registry)));
+        let mut oc = test_outbound_connection_with_metrics(
+            vec![dest_workload(2, "dest-workload")],
+            vec![],
+            metrics,
+        )
+        .await;
 
         let start = Instant::now();
         let (connected, derived_workload, _builder, _conn_guard) = oc
@@ -2523,6 +2545,11 @@ mod tests {
             start.elapsed() < oc.pi.cfg.outbound_connect_base_backoff,
             "a first-try success must not sleep"
         );
+        let metrics = ParsedMetrics::from_registry(&registry);
+        assert_eq!(
+            metrics.query_sum("istio_tcp_connection_retries_total", &Default::default()),
+            0
+        );
     }
 
     #[tokio::test]
@@ -2534,8 +2561,14 @@ mod tests {
             listener.local_addr().unwrap()
         };
 
-        let mut oc =
-            test_outbound_connection(vec![dest_workload(2, "dest-workload")], vec![]).await;
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(sub_registry(&mut registry)));
+        let mut oc = test_outbound_connection_with_metrics(
+            vec![dest_workload(2, "dest-workload")],
+            vec![],
+            metrics,
+        )
+        .await;
 
         let start = Instant::now();
         let res = oc
@@ -2552,6 +2585,25 @@ mod tests {
             start.elapsed() >= backoffs,
             "a refused connect is retriable, so both backoffs must have been paid"
         );
+
+        // The client connection is counted and logged once; the retried attempts are counted
+        // separately.
+        let metrics = ParsedMetrics::from_registry(&registry);
+        let total = |name: &str| metrics.query_sum(name, &Default::default());
+        assert_eq!(total("istio_tcp_connections_opened_total"), 1);
+        assert_eq!(total("istio_tcp_connections_closed_total"), 1);
+        assert_eq!(total("istio_tcp_connections_failed_total"), 1);
+        let flags = HashMap::from([("response_flags".to_string(), "CONNECT".to_string())]);
+        assert_eq!(
+            metrics.query_sum("istio_tcp_connection_retries_total", &flags),
+            2
+        );
+        let dest = dest.to_string();
+        crate::telemetry::testing::assert_contains(HashMap::from([
+            ("message", "connection complete"),
+            ("dst.addr", dest.as_str()),
+            ("retries", "2"),
+        ]));
     }
 
     #[tokio::test]
