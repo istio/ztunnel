@@ -103,7 +103,7 @@ impl ConnSpawner {
                 if crate::tls::io_error_is_cert_revoked(&e) {
                     self.metrics
                         .record_crl_rejection(crate::proxy::metrics::Reporter::source);
-                    Error::CertificateRevoked
+                    Error::Teardown(super::h2::Teardown::CertificateRevoked)
                 } else {
                     e.into()
                 }
@@ -135,6 +135,7 @@ impl ConnSpawner {
                 self.timeout_rx.clone(),
                 key,
                 revocation,
+                Default::default(),
             ),
         )
         .await?;
@@ -423,7 +424,7 @@ impl WorkloadHBONEPool {
         workload_key: &WorkloadKey,
         request: http::Request<()>,
         deadline: Option<Instant>,
-    ) -> Result<(H2Stream, Option<Baggage>, Option<watch::Receiver<bool>>), Error> {
+    ) -> Result<(H2Stream, Option<Baggage>), Error> {
         let mut connection = super::with_deadline(
             deadline,
             super::HBONEHandshakeStage::PoolWait,
@@ -431,15 +432,12 @@ impl WorkloadHBONEPool {
         )
         .await?;
 
-        // Surface the tunnel's revocation signal so the caller can attribute a revoked teardown.
-        let revoked = connection.revoked_receiver();
-        let (stream, baggage) = super::with_deadline(
+        super::with_deadline(
             deadline,
             super::HBONEHandshakeStage::Connect,
             connection.send_request(request),
         )
-        .await?;
-        Ok((stream, baggage, revoked))
+        .await
     }
 
     // Obtain a pooled connection. Will prefer to retrieve an existing conn from the pool, but
@@ -681,7 +679,7 @@ mod test {
                 .unwrap()
         };
 
-        let (c, _baggage, _) = pool
+        let (c, _baggage) = pool
             .send_request_pooled(&key.clone(), req(), None)
             .await
             .unwrap();

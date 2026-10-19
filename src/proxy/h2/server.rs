@@ -15,6 +15,7 @@
 use crate::config;
 use crate::drain::DrainWatcher;
 use crate::proxy::Error;
+use crate::proxy::h2::{Teardown, TeardownCause};
 use crate::tls::revocation::{self, RevocationHandle};
 use bytes::Bytes;
 use futures_util::FutureExt;
@@ -24,7 +25,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{oneshot, watch};
 use tracing::{Instrument, debug};
 
@@ -32,6 +33,7 @@ pub struct H2Request {
     request: Parts,
     recv: h2::RecvStream,
     send: h2::server::SendResponse<Bytes>,
+    teardown: TeardownCause,
 }
 
 impl Debug for H2Request {
@@ -52,15 +54,24 @@ impl H2Request {
         self,
         resp: Response<()>,
     ) -> Result<crate::proxy::h2::H2Stream, Error> {
-        let H2Request { recv, mut send, .. } = self;
-        let send = send.send_response(resp, false)?;
+        let H2Request {
+            recv,
+            mut send,
+            teardown,
+            ..
+        } = self;
+        let send = send
+            .send_response(resp, false)
+            .map_err(|e| teardown.attribute(e))?;
         let read = crate::proxy::h2::H2StreamReadHalf {
             recv_stream: recv,
             _dropped: None, // We do not need to track on the server
+            teardown: teardown.clone(),
         };
         let write = crate::proxy::h2::H2StreamWriteHalf {
             send_stream: send,
             _dropped: None, // We do not need to track on the server
+            teardown,
         };
         let h2 = crate::proxy::h2::H2Stream { read, write };
         Ok(h2)
@@ -97,7 +108,7 @@ impl RequestParts for Parts {
 
 pub async fn serve_connection<F, Fut>(
     cfg: Arc<config::Config>,
-    s: tokio_rustls::server::TlsStream<TcpStream>,
+    s: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
     drain: DrainWatcher,
     mut force_shutdown: watch::Receiver<()>,
     mut revocation: Option<RevocationHandle>,
@@ -119,6 +130,7 @@ where
         .max_send_buffer_size(1024 * 400)
         // default from hyper
         .max_concurrent_streams(200)
+        .data_frame_budget(usize::MAX)
         .handshake(s)
         .await?;
 
@@ -126,7 +138,7 @@ where
         .ping_pong()
         .expect("new connection should have ping_pong");
     // for ping to inform this fn to drop the connection
-    let (ping_drop_tx, mut ping_drop_rx) = oneshot::channel::<()>();
+    let (ping_drop_tx, mut ping_drop_rx) = oneshot::channel::<Teardown>();
     // for this fn to inform ping to give up when it is already dropped
     let dropped = Arc::new(AtomicBool::new(false));
     tokio::task::spawn(crate::proxy::h2::do_ping_pong(
@@ -135,6 +147,9 @@ where
         dropped.clone(),
     ));
 
+    // Each teardown arm records its cause before shutting down, so the streams report it rather
+    // than the GOAWAY, which they would otherwise read as a clean close.
+    let teardown = TeardownCause::default();
     let handler = |req| handler(req).map(|_| ());
     loop {
         let drain = drain.clone();
@@ -146,23 +161,30 @@ where
                     dropped.store(true, Ordering::Relaxed);
                     return Ok(());
                 };
-                let (request, send) = request?;
+                let (request, send) = request.inspect_err(|e| {
+                    if let Some(reason) = Teardown::from_transport(e) {
+                        teardown.set(reason);
+                    }
+                })?;
                 let (request, recv) = request.into_parts();
                 let req = H2Request {
                     request,
                     recv,
                     send,
+                    teardown: teardown.clone(),
                 };
                 let handle = handler(req);
                 // Serve the stream in a new task
                 tokio::task::spawn(handle.in_current_span());
             }
-            _ = &mut ping_drop_rx => {
+            reason = &mut ping_drop_rx => {
                 // Ideally this would be a warning/error message. However, due to an issue during shutdown,
                 // by the time pods with in-pod know to shut down, the network namespace is destroyed.
                 // This blocks the ability to send a GOAWAY and gracefully shutdown.
                 // See https://github.com/istio/ztunnel/issues/1191.
-                debug!("HBONE ping timeout/error, peer may have shutdown");
+                let reason = reason.unwrap_or_else(|_| Teardown::PingError("ping task ended".to_string()));
+                debug!("{reason}, peer may have shutdown");
+                teardown.set(reason);
                 conn.abrupt_shutdown(h2::Reason::NO_ERROR);
                 break
             }
@@ -178,6 +200,7 @@ where
                         peer = %rev.peer(),
                         "terminating inbound connection: peer certificate revoked by CRL update"
                     );
+                    teardown.set(Teardown::CertificateRevoked);
                     conn.abrupt_shutdown(h2::Reason::NO_ERROR);
                     break;
                 }
@@ -191,9 +214,157 @@ where
         _ = force_shutdown.changed() => {
             return Err(Error::DrainTimeOut)
         }
-        _ = poll_closed => {}
+        res = poll_closed => {
+            if let Err(e) = res
+                && let Some(reason) = Teardown::from_transport(&e)
+            {
+                teardown.set(reason);
+            }
+        }
     }
     // Mark we are done with the connection
     drop(drain);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drain;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const DATA: u8 = 0x0;
+    const HEADERS: u8 = 0x1;
+    const SETTINGS: u8 = 0x4;
+    const PING: u8 = 0x6;
+    const GOAWAY: u8 = 0x7;
+    const END_HEADERS: u8 = 0x4;
+    const ACK: u8 = 0x1;
+
+    fn frame(buf: &mut Vec<u8>, typ: u8, flags: u8, stream: u32, payload: &[u8]) {
+        buf.extend_from_slice(&(payload.len() as u32).to_be_bytes()[1..]);
+        buf.push(typ);
+        buf.push(flags);
+        buf.extend_from_slice(&stream.to_be_bytes());
+        buf.extend_from_slice(payload);
+    }
+
+    /// Reads frames from the server until a PING ACK (Ok) or GOAWAY (Err with the error code).
+    async fn read_until_ping_ack(r: &mut (impl AsyncRead + Unpin)) -> Result<(), u32> {
+        loop {
+            let mut hdr = [0u8; 9];
+            r.read_exact(&mut hdr).await.expect("connection closed");
+            let len = u32::from_be_bytes([0, hdr[0], hdr[1], hdr[2]]) as usize;
+            let mut payload = vec![0u8; len];
+            r.read_exact(&mut payload).await.unwrap();
+            match (hdr[3], hdr[4]) {
+                (PING, ACK) => return Ok(()),
+                (GOAWAY, _) => {
+                    return Err(u32::from_be_bytes(payload[4..8].try_into().unwrap()));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // A stream that is not doing I/O still learns of the transport failure.
+    #[tokio::test]
+    async fn transport_failure_is_recorded() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (server_io, fail) = crate::proxy::h2::tests::FailingTransport::new(server_io);
+        let (_drain_trigger, drain) = drain::new();
+        let (_force_tx, force_rx) = watch::channel(());
+        let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve_connection(
+            Arc::new(crate::test_helpers::test_config()),
+            server_io,
+            drain,
+            force_rx,
+            None,
+            move |req: H2Request| {
+                let _ = req_tx.send(req);
+                async {}
+            },
+        ));
+        let (mut send_req, conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(conn);
+        let req = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("http://example.com")
+            .body(())
+            .unwrap();
+        let (_resp, _send) = send_req.send_request(req, false).unwrap();
+        let req = req_rx.recv().await.unwrap();
+
+        crate::proxy::h2::tests::fail_transport(&fail, std::io::ErrorKind::TimedOut);
+
+        let teardown =
+            tokio::time::timeout(std::time::Duration::from_secs(5), req.teardown.torn_down())
+                .await
+                .expect("the transport failure should be recorded");
+        assert!(matches!(teardown, Teardown::Transport(_)), "{teardown:?}");
+    }
+
+    /// A stream sending many small DATA frames that the application has not yet read should
+    /// never the h2 data frame budget. A control flow error will occur first by depleting the
+    /// connection window.
+    #[tokio::test]
+    async fn data_budget_disabled() {
+        const FRAMES: usize = 67000;
+
+        let mut config = crate::test_helpers::test_config();
+        config.connection_window_size = (1 << 31) - 1; // max connection window size
+        let cfg = Arc::new(config);
+        let (client, server) = tokio::io::duplex(1024 * 1024);
+        let (_drain_trigger, drain) = drain::new();
+        let (_force_tx, force_rx) = watch::channel(());
+        // Hold on to requests without reading their bodies, so all DATA frames stay buffered.
+        let (req_tx, _req_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve_connection(
+            cfg,
+            server,
+            drain,
+            force_rx,
+            None,
+            move |req: H2Request| {
+                let _ = req_tx.send(req);
+                async {}
+            },
+        ));
+
+        let mut buf = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+        frame(&mut buf, SETTINGS, 0, 0, &[]);
+        // HPACK literals without indexing: `:method: CONNECT`, `:authority: 127.0.0.1:8080`
+        let mut block = vec![0x02, 7];
+        block.extend_from_slice(b"CONNECT");
+        block.extend_from_slice(&[0x01, 14]);
+        block.extend_from_slice(b"127.0.0.1:8080");
+        frame(&mut buf, HEADERS, END_HEADERS, 1, &block);
+        for _ in 0..FRAMES {
+            frame(&mut buf, DATA, 0, 1, b"x");
+        }
+        // Frames are processed in order, so a PING ACK means every DATA frame was accepted.
+        frame(&mut buf, PING, 0, 0, &[0u8; 8]);
+
+        let (mut r, mut w) = tokio::io::split(client);
+        tokio::spawn(async move {
+            // The server may close the connection before we finish writing.
+            let _ = w.write_all(&buf).await;
+            let _ = w.flush().await;
+            // Keep the write half open so the connection stays up.
+            std::future::pending::<()>().await;
+        });
+
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_until_ping_ack(&mut r),
+        )
+        .await
+        .expect("timed out waiting for server");
+        assert_eq!(
+            res,
+            Err(h2::Reason::FLOW_CONTROL_ERROR.into()),
+            "server did not send GOAWAY (FLOW CONTROL ERROR)",
+        );
+    }
 }

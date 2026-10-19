@@ -27,7 +27,7 @@ use tracing::{Instrument, debug, error, info, info_span, trace_span};
 use crate::identity::Identity;
 use crate::strng::Strng;
 
-use crate::proxy::connection_manager::{OutboundConnectionGuard, await_revocation};
+use crate::proxy::connection_manager::OutboundConnectionGuard;
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{
     BAGGAGE_HEADER, Error, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent,
@@ -40,7 +40,7 @@ use crate::proxy::{
 use crate::baggage::{self, Baggage};
 use crate::drain::DrainWatcher;
 use crate::drain::run_with_drain;
-use crate::proxy::h2::{H2Stream, client::WorkloadKey};
+use crate::proxy::h2::{H2Stream, TeardownCause, client::WorkloadKey};
 use crate::state::service::{LoadBalancerMode, Service, ServiceDescription};
 use crate::state::workload::OutboundProtocol;
 use crate::state::workload::{InboundProtocol, NetworkAddress, Workload, address::Address};
@@ -130,7 +130,7 @@ impl Outbound {
                             debug!(component="outbound", dur=?start.elapsed(), "connection completed");
                         }.instrument(span);
 
-                        assertions::size_between_ref(600, 1200, &serve_outbound_connection);
+                        assertions::size_between_ref(1000, 2100, &serve_outbound_connection);
                         tokio::spawn(serve_outbound_connection);
                     }
                     Err(e) => {
@@ -157,8 +157,6 @@ impl Outbound {
 enum ConnectedUpstream {
     Hbone {
         stream: H2Stream,
-        /// Revocation signals, ordered outer tunnel then inner tunnel.
-        revoked: [Option<watch::Receiver<bool>>; 2],
         /// Drains the unpooled inner tunnel after copying; the pool drains single-hop tunnels.
         inner_drain: Option<watch::Sender<bool>>,
     },
@@ -394,8 +392,10 @@ impl OutboundConnection {
             .await?;
         let deadline = connect_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
         // Both HBONE legs share the attempt deadline.
-        let (upgraded, _, outer_revoked) =
-            Box::pin(self.send_hbone_request(remote_addr, req, deadline)).await?;
+        let (upgraded, _) = Box::pin(self.send_hbone_request(remote_addr, req, deadline)).await?;
+        // The inner tunnel's streams also report the outer tunnel's teardown, which otherwise
+        // only reaches them as an opaque error from the inner TLS stream.
+        let teardown = TeardownCause::nested(upgraded.teardown_cause());
         // Wrap upgraded to implement tokio's Async{Write,Read}
         let upgraded = TokioH2Stream::new(upgraded);
 
@@ -450,11 +450,10 @@ impl OutboundConnection {
                 drain_rx,
                 wl_key,
                 revocation,
+                teardown,
             ),
         )
         .await?;
-        // The inner tunnel's revocation signal
-        let inner_revoked = sender.revoked_receiver();
         let origin_network = &self.pi.cfg.network;
         let http_request = self.create_hbone_request(remote_addr, req, Some(origin_network));
         let (inner_upgraded, baggage) = super::with_deadline(
@@ -477,7 +476,6 @@ impl OutboundConnection {
         Ok((
             ConnectedUpstream::Hbone {
                 stream: inner_upgraded,
-                revoked: [outer_revoked, inner_revoked],
                 inner_drain: Some(drain_tx),
             },
             derived_workload,
@@ -491,11 +489,9 @@ impl OutboundConnection {
         connect_timeout: Option<Duration>,
     ) -> Result<ConnectedUpstream, Error> {
         let deadline = self.deadline_after_cert_fetch(connect_timeout).await?;
-        let (stream, _, revoked) =
-            Box::pin(self.send_hbone_request(remote_addr, req, deadline)).await?;
+        let (stream, _) = Box::pin(self.send_hbone_request(remote_addr, req, deadline)).await?;
         Ok(ConnectedUpstream::Hbone {
             stream,
-            revoked: [revoked, None],
             inner_drain: None,
         })
     }
@@ -525,20 +521,14 @@ impl OutboundConnection {
         match upstream {
             ConnectedUpstream::Hbone {
                 stream: upstream,
-                revoked: [outer_revoked, inner_revoked],
                 inner_drain,
             } => {
-                // Check revocation first so tunnel teardown is reported as CERT_REVOKED.
-                let res = tokio::select! {
-                    biased;
-                    _ = await_revocation(outer_revoked) => Err(Error::CertificateRevoked),
-                    _ = await_revocation(inner_revoked) => Err(Error::CertificateRevoked),
-                    res = copy::copy_bidirectional(
-                        copy::TcpStreamSplitter(source),
-                        upstream,
-                        connection_stats,
-                    ) => res,
-                };
+                let res = copy::copy_bidirectional(
+                    copy::TcpStreamSplitter(source),
+                    upstream,
+                    connection_stats,
+                )
+                .await;
                 if let Some(inner_drain) = inner_drain {
                     let _ = inner_drain.send(true);
                 }
@@ -587,13 +577,13 @@ impl OutboundConnection {
             .expect("builder with known status code should not fail")
     }
 
-    /// returns upgraded stream, peer's baggage, and the tunnel's CRL revocation signal
+    /// returns upgraded stream and peer's baggage
     async fn send_hbone_request(
         &mut self,
         remote_addr: SocketAddr,
         req: &Request,
         deadline: Option<tokio::time::Instant>,
-    ) -> Result<(H2Stream, Option<Baggage>, Option<watch::Receiver<bool>>), Error> {
+    ) -> Result<(H2Stream, Option<Baggage>), Error> {
         // This is the single cluster/single-HBONE codepath (and also the outer tunnel
         // for double HBONE). We don't need the x-istio-origin-network header here because:
         // - For single HBONE: both source and destination are in the same network
@@ -2619,7 +2609,9 @@ mod tests {
         assert!(retriable(&Error::HttpStatus(
             http::StatusCode::GATEWAY_TIMEOUT
         )));
-        assert!(!retriable(&Error::CertificateRevoked));
+        assert!(!retriable(&Error::Teardown(
+            crate::proxy::h2::Teardown::CertificateRevoked
+        )));
         assert!(!retriable(&Error::WorkloadHBONEPoolDraining));
 
         assert!(!retriable(&Error::SelfCall));

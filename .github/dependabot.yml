@@ -26,6 +26,23 @@ updates:
       # Remove once https://github.com/istio/ztunnel/issues/2100 is fixed.
       - dependency-name: "h2"
         versions: [">= 0.4.16"]
+    target-branch: "release-1.32"
+    groups:
+      all-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    rebase-strategy: "disabled"
+    ignore:
+      - dependency-name: "criterion"
+        versions: [">= 0.6"]
+      # Remove once https://github.com/istio/ztunnel/issues/2100 is fixed.
+      - dependency-name: "h2"
+        versions: [">= 0.4.16"]
     target-branch: "release-1.31"
     groups:
       all-dependencies:
