@@ -228,11 +228,21 @@ impl OutboundConnection {
         let mut backoff = self.pi.cfg.outbound_connect_base_backoff.min(max_backoff);
         let mut retries = 0;
         let mut deprioritized = DeprioritizedEndpoints::default();
+        // Holds the last failed attempt so a later routing failure still records a final result.
+        let mut last_attempt: Option<Box<ConnectionResultBuilder>> = None;
         loop {
             let req = match Box::pin(self.select_next_hop(&resolved, &deprioritized)).await {
                 Ok(req) => Box::new(req),
                 Err(err) => {
-                    metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
+                    match last_attempt {
+                        Some(builder) => builder
+                            .with_retries(u32::try_from(retries).unwrap_or(u32::MAX))
+                            .build()
+                            .record(Err(err)),
+                        None => {
+                            metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err)
+                        }
+                    }
                     return None;
                 }
             };
@@ -310,6 +320,7 @@ impl OutboundConnection {
                         deprioritized.push(wl.uid.clone());
                     }
                     retries += 1;
+                    last_attempt = Some(connection_result_builder);
                     tokio::time::sleep(backoff).await;
                     backoff = backoff.saturating_mul(2).min(max_backoff);
                 }
@@ -2511,6 +2522,161 @@ mod tests {
             listed_outbound(&cm),
             0,
             "a closed connection must be unlisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_2142_retries_hbone_503_before_success() {
+        use futures_util::StreamExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut dest = dest_workload(2, "dest-workload");
+        dest.tunnel_protocol = XdsProtocol::Hbone as i32;
+        initialize_telemetry();
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(sub_registry(&mut registry)));
+        let mut oc = test_outbound_connection_with_metrics(vec![dest], vec![], metrics).await;
+        oc.hbone_port = addr.port();
+        let id = Identity::Spiffe {
+            trust_domain: "cluster.local".into(),
+            namespace: "ns".into(),
+            service_account: "default".into(),
+        };
+        let certs = crate::tls::mock::generate_test_certs(
+            &id.into(),
+            Duration::ZERO,
+            Duration::from_secs(100),
+        );
+        let acceptor = crate::tls::mock::MockServerCertProvider::new(certs);
+        let mut tls_stream = crate::hyper_util::tls_server(acceptor, listener);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        tokio::spawn(async move {
+            while let Some(stream) = tls_stream.next().await {
+                let calls = server_calls.clone();
+                tokio::spawn(crate::hyper_util::http2_server().serve_connection(
+                    hyper_util::rt::TokioIo::new(stream),
+                    hyper::service::service_fn(
+                        move |_req: hyper::Request<hyper::body::Incoming>| {
+                            let n = calls.fetch_add(1, Ordering::SeqCst);
+                            async move {
+                                Ok::<_, std::convert::Infallible>(
+                                    hyper::Response::builder()
+                                        .status(if n == 0 { 503 } else { 200 })
+                                        .body(http_body_util::Empty::<Bytes>::new())
+                                        .unwrap(),
+                                )
+                            }
+                        },
+                    ),
+                ));
+            }
+        });
+        let result = oc
+            .connect_with_retries(
+                "127.0.0.1:1234".parse().unwrap(),
+                "127.0.0.2:8080".parse().unwrap(),
+                2,
+                Instant::now(),
+            )
+            .await;
+        assert!(
+            result.is_some(),
+            "transient HBONE 503 ended the connection after {} CONNECT request(s)",
+            calls.load(Ordering::SeqCst)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let (_connected, _derived, builder, _guard) = result.unwrap();
+        builder.build().record(Ok::<(), Error>(()));
+        let metrics = ParsedMetrics::from_registry(&registry);
+        let total = |name: &str| metrics.query_sum(name, &Default::default());
+        assert_eq!(total("istio_tcp_connections_opened_total"), 1);
+        assert_eq!(total("istio_tcp_connections_closed_total"), 1);
+        assert_eq!(total("istio_tcp_connections_failed_total"), 0);
+        assert_eq!(total("istio_tcp_connection_retries_total"), 1);
+    }
+
+    #[tokio::test]
+    async fn review_2142_records_final_failure_when_endpoint_removed_during_retry() {
+        initialize_telemetry();
+        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut dest = dest_workload(2, "dest-workload");
+        dest.services = HashMap::from([(
+            "/example.com".to_string(),
+            PortList {
+                ports: vec![Port {
+                    service_port: 80,
+                    target_port: port.into(),
+                    app_protocol: 0,
+                }],
+            },
+        )]);
+        let uid = crate::strng::new(&dest.uid);
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(sub_registry(&mut registry)));
+        let mut oc = test_outbound_connection_with_metrics(vec![], vec![], metrics.clone()).await;
+        // Retain the backing state so this test can simulate an xDS removal during backoff.
+        let state = Arc::new(std::sync::RwLock::new(crate::state::ProxyState::new(None)));
+        let updater = crate::xds::ProxyStateUpdateMutator::new_no_fetch();
+        {
+            let mut state = state.write().unwrap();
+            updater.insert_workload(&mut state, dest).unwrap();
+            updater
+                .insert_service(&mut state, example_service())
+                .unwrap();
+        }
+        let pi = Arc::make_mut(&mut oc.pi);
+        pi.state = crate::state::DemandProxyState::new(
+            state.clone(),
+            None,
+            pi.cfg.dns_resolver_cfg.clone(),
+            pi.cfg.dns_resolver_opts.clone(),
+            metrics,
+        );
+        let cfg = Arc::make_mut(&mut pi.cfg);
+        cfg.outbound_connect_base_backoff = Duration::from_millis(500);
+        cfg.outbound_connect_max_backoff = Duration::from_millis(500);
+        let proxy = tokio::spawn(async move {
+            oc.connect_with_retries(
+                "127.0.0.1:1234".parse().unwrap(),
+                "127.0.0.3:80".parse().unwrap(),
+                2,
+                Instant::now(),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let metrics = ParsedMetrics::from_registry(&registry);
+                if metrics.query_sum("istio_tcp_connection_retries_total", &Default::default()) == 1
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("first connect must fail and enter backoff");
+        updater.remove(&mut state.write().unwrap(), &uid);
+        assert!(proxy.await.unwrap().is_none());
+        crate::telemetry::testing::assert_contains(HashMap::from([
+            ("error", "no healthy upstream: 127.0.0.3:80"),
+            ("message", "connection complete"),
+        ]));
+        let metrics = ParsedMetrics::from_registry(&registry);
+        let total = |name: &str| metrics.query_sum(name, &Default::default());
+        assert_eq!(total("istio_tcp_connection_retries_total"), 1);
+        assert_eq!(
+            [
+                total("istio_tcp_connections_opened_total"),
+                total("istio_tcp_connections_closed_total"),
+                total("istio_tcp_connections_failed_total")
+            ],
+            [1, 1, 1],
+            "the failed downstream connection must still have one final result",
         );
     }
 
