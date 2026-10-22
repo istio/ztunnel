@@ -15,6 +15,7 @@
 use crate::config;
 use crate::drain::DrainWatcher;
 use crate::proxy::Error;
+use crate::proxy::h2::{Teardown, TeardownCause};
 use crate::tls::revocation::{self, RevocationHandle};
 use bytes::Bytes;
 use futures_util::FutureExt;
@@ -32,6 +33,7 @@ pub struct H2Request {
     request: Parts,
     recv: h2::RecvStream,
     send: h2::server::SendResponse<Bytes>,
+    teardown: TeardownCause,
 }
 
 impl Debug for H2Request {
@@ -52,15 +54,24 @@ impl H2Request {
         self,
         resp: Response<()>,
     ) -> Result<crate::proxy::h2::H2Stream, Error> {
-        let H2Request { recv, mut send, .. } = self;
-        let send = send.send_response(resp, false)?;
+        let H2Request {
+            recv,
+            mut send,
+            teardown,
+            ..
+        } = self;
+        let send = send
+            .send_response(resp, false)
+            .map_err(|e| teardown.attribute(e))?;
         let read = crate::proxy::h2::H2StreamReadHalf {
             recv_stream: recv,
             _dropped: None, // We do not need to track on the server
+            teardown: teardown.clone(),
         };
         let write = crate::proxy::h2::H2StreamWriteHalf {
             send_stream: send,
             _dropped: None, // We do not need to track on the server
+            teardown,
         };
         let h2 = crate::proxy::h2::H2Stream { read, write };
         Ok(h2)
@@ -127,7 +138,7 @@ where
         .ping_pong()
         .expect("new connection should have ping_pong");
     // for ping to inform this fn to drop the connection
-    let (ping_drop_tx, mut ping_drop_rx) = oneshot::channel::<()>();
+    let (ping_drop_tx, mut ping_drop_rx) = oneshot::channel::<Teardown>();
     // for this fn to inform ping to give up when it is already dropped
     let dropped = Arc::new(AtomicBool::new(false));
     tokio::task::spawn(crate::proxy::h2::do_ping_pong(
@@ -136,6 +147,9 @@ where
         dropped.clone(),
     ));
 
+    // Each teardown arm records its cause before shutting down, so the streams report it rather
+    // than the GOAWAY, which they would otherwise read as a clean close.
+    let teardown = TeardownCause::default();
     let handler = |req| handler(req).map(|_| ());
     loop {
         let drain = drain.clone();
@@ -147,23 +161,30 @@ where
                     dropped.store(true, Ordering::Relaxed);
                     return Ok(());
                 };
-                let (request, send) = request?;
+                let (request, send) = request.inspect_err(|e| {
+                    if let Some(reason) = Teardown::from_transport(e) {
+                        teardown.set(reason);
+                    }
+                })?;
                 let (request, recv) = request.into_parts();
                 let req = H2Request {
                     request,
                     recv,
                     send,
+                    teardown: teardown.clone(),
                 };
                 let handle = handler(req);
                 // Serve the stream in a new task
                 tokio::task::spawn(handle.in_current_span());
             }
-            _ = &mut ping_drop_rx => {
+            reason = &mut ping_drop_rx => {
                 // Ideally this would be a warning/error message. However, due to an issue during shutdown,
                 // by the time pods with in-pod know to shut down, the network namespace is destroyed.
                 // This blocks the ability to send a GOAWAY and gracefully shutdown.
                 // See https://github.com/istio/ztunnel/issues/1191.
-                debug!("HBONE ping timeout/error, peer may have shutdown");
+                let reason = reason.unwrap_or_else(|_| Teardown::PingError("ping task ended".to_string()));
+                debug!("{reason}, peer may have shutdown");
+                teardown.set(reason);
                 conn.abrupt_shutdown(h2::Reason::NO_ERROR);
                 break
             }
@@ -179,6 +200,7 @@ where
                         peer = %rev.peer(),
                         "terminating inbound connection: peer certificate revoked by CRL update"
                     );
+                    teardown.set(Teardown::CertificateRevoked);
                     conn.abrupt_shutdown(h2::Reason::NO_ERROR);
                     break;
                 }
@@ -192,7 +214,13 @@ where
         _ = force_shutdown.changed() => {
             return Err(Error::DrainTimeOut)
         }
-        _ = poll_closed => {}
+        res = poll_closed => {
+            if let Err(e) = res
+                && let Some(reason) = Teardown::from_transport(&e)
+            {
+                teardown.set(reason);
+            }
+        }
     }
     // Mark we are done with the connection
     drop(drain);
@@ -237,6 +265,44 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    // A stream that is not doing I/O still learns of the transport failure.
+    #[tokio::test]
+    async fn transport_failure_is_recorded() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (server_io, fail) = crate::proxy::h2::tests::FailingTransport::new(server_io);
+        let (_drain_trigger, drain) = drain::new();
+        let (_force_tx, force_rx) = watch::channel(());
+        let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve_connection(
+            Arc::new(crate::test_helpers::test_config()),
+            server_io,
+            drain,
+            force_rx,
+            None,
+            move |req: H2Request| {
+                let _ = req_tx.send(req);
+                async {}
+            },
+        ));
+        let (mut send_req, conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(conn);
+        let req = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("http://example.com")
+            .body(())
+            .unwrap();
+        let (_resp, _send) = send_req.send_request(req, false).unwrap();
+        let req = req_rx.recv().await.unwrap();
+
+        crate::proxy::h2::tests::fail_transport(&fail, std::io::ErrorKind::TimedOut);
+
+        let teardown =
+            tokio::time::timeout(std::time::Duration::from_secs(5), req.teardown.torn_down())
+                .await
+                .expect("the transport failure should be recorded");
+        assert!(matches!(teardown, Teardown::Transport(_)), "{teardown:?}");
     }
 
     /// A stream sending many small DATA frames that the application has not yet read should

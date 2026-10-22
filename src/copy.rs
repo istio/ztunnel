@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::proxy::Error::{BackendDisconnected, ClientDisconnected, ReceiveError, SendError};
+use crate::proxy::TeardownCause;
 use crate::proxy::{self, ConnectionResult};
 use bytes::{Buf, Bytes, BytesMut};
 use pin_project_lite::pin_project;
@@ -32,6 +33,15 @@ pub trait BufferedSplitter: Unpin {
     type R: ResizeBufRead + Unpin;
     type W: AsyncWriteBuf + Unpin;
     fn split_into_buffered_reader(self) -> (Self::R, Self::W);
+    /// Closes the halves abortively, so the peer sees a reset rather than an orderly close.
+    /// By default the halves are just dropped.
+    fn reset(r: Self::R, w: Self::W) {
+        drop((r, w));
+    }
+    /// The teardown cause of the HBONE connection carrying this side, if it is a tunnel.
+    fn teardown_cause(_r: &Self::R) -> Option<TeardownCause> {
+        None
+    }
 }
 
 // Generic BufferedSplitter for anything that can Read/Write.
@@ -60,6 +70,16 @@ impl BufferedSplitter for TcpStreamSplitter {
         let (rh, wh) = self.0.into_split();
         let rb = BufReader::new(rh);
         (rb, WriteAdapter(wh))
+    }
+
+    fn reset(r: Self::R, w: Self::W) {
+        // Reuniting skips the write half's shutdown on drop, so no FIN precedes the RST that
+        // closing with a zero linger sends.
+        if let Ok(stream) = r.inner.reunite(w.0)
+            && let Err(e) = stream.set_zero_linger()
+        {
+            trace!(err=%e, "failed to set zero linger");
+        }
     }
 }
 
@@ -147,8 +167,29 @@ where
     A: BufferedSplitter,
     B: BufferedSplitter,
 {
-    let (mut rd, mut wd) = downstream.split_into_buffered_reader();
-    let (mut ru, mut wu) = upstream.split_into_buffered_reader();
+    // Dropping the copy before it completes (e.g. on a late policy rejection) aborts it too, so
+    // the sides are reset unless the copy closes them gracefully.
+    let mut sides = ResetOnDrop::<A, B>(Some((
+        downstream.split_into_buffered_reader(),
+        upstream.split_into_buffered_reader(),
+    )));
+    let ((rd, wd), (ru, wu)) = sides
+        .0
+        .as_mut()
+        .expect("sides are only taken once copying ends");
+    // A tunnel's teardown only reaches the copy through h2 I/O, which it may not be doing, e.g.
+    // once the tunnel has finished sending and the copy waits on the other side. So the copy
+    // watches for it too. A copy has at most one tunnel side. The watch is boxed so that it does
+    // not grow every copy future.
+    let torn_down = A::teardown_cause(rd)
+        .or_else(|| B::teardown_cause(ru))
+        .map(|cause| Box::pin(async move { cause.torn_down().await }));
+    // A connection aborted error means a transport failed out from under the copy (e.g. an HBONE
+    // ping timeout), and a connection reset means a peer aborted its connection. Rather than
+    // closing gracefully, which the other peer would take as a clean end of stream, the other
+    // direction is stopped and both sides are reset. So each direction completes with `Ok` and its
+    // own result, or, when it aborts, with `Err` and the result of the whole copy.
+    let is_aborted = |res: &io::Result<u64>| matches!(res, Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset));
     let downstream_to_upstream = async {
         let translate_error = |e: io::Error| {
             SendError(Box::new(match e.kind() {
@@ -158,13 +199,17 @@ where
                 _ => e.into(),
             }))
         };
-        let res = ignore_io_errors(copy_buf(&mut rd, &mut wu, stats, false).await)
-            .map_err(translate_error);
+        let res = copy_buf(rd, wu, stats, false).await;
+        if is_aborted(&res) {
+            trace!(?res, "send aborted");
+            return Err(aborted_result(res, translate_error));
+        }
+        let res = ignore_io_errors(res).map_err(translate_error);
         trace!(?res, "send");
-        ignore_shutdown_errors(shutdown(&mut wu).await)
+        let shutdown = ignore_shutdown_errors(shutdown(wu).await)
             .map_err(translate_error)
-            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)))?;
-        res
+            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)));
+        Ok(shutdown.and(res))
     };
 
     let upstream_to_downstream = async {
@@ -175,23 +220,71 @@ where
                 _ => e.into(),
             }))
         };
-        let res = ignore_io_errors(copy_buf(&mut ru, &mut wd, stats, true).await)
-            .map_err(translate_error);
+        let res = copy_buf(ru, wd, stats, true).await;
+        if is_aborted(&res) {
+            trace!(?res, "receive aborted");
+            return Err(aborted_result(res, translate_error));
+        }
+        let res = ignore_io_errors(res).map_err(translate_error);
         trace!(?res, "receive");
-        ignore_shutdown_errors(shutdown(&mut wd).await)
+        let shutdown = ignore_shutdown_errors(shutdown(wd).await)
             .map_err(translate_error)
-            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)))?;
-        res
+            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)));
+        Ok(shutdown.and(res))
     };
 
-    // join!() them rather than try_join!() so that we keep complete either end once one side is complete.
-    let (sent, received) = tokio::join!(downstream_to_upstream, upstream_to_downstream);
+    // Join the directions so that we keep completing either end once one side is complete; only
+    // an abort stops the other direction. A teardown aborts both. On an abort, dropping the sides
+    // resets them.
+    let (sent, received) = tokio::select! {
+        res = async { tokio::try_join!(downstream_to_upstream, upstream_to_downstream) } => match res {
+            Ok(results) => results,
+            Err(res) => return res,
+        },
+        teardown = async {
+            match torn_down {
+                Some(torn_down) => torn_down.await,
+                None => std::future::pending().await,
+            }
+        } => {
+            trace!(%teardown, "copy aborted");
+            return Err(teardown.into());
+        }
+    };
+    // Copying ended on its own, so the sides close gracefully rather than being reset.
+    drop(sides.0.take());
 
     // Convert some error messages to easier to understand
     let sent = sent?;
     let received = received?;
     trace!(sent, received, "copy complete");
     Ok(())
+}
+
+// The result of a copy that a direction aborted. An abort caused by an HBONE teardown is reported
+// as the teardown itself, whichever direction it surfaced in, while a peer's reset is still not
+// reported as an error (see `ignore_io_errors`).
+fn aborted_result(
+    res: io::Result<u64>,
+    translate_error: impl FnOnce(io::Error) -> proxy::Error,
+) -> Result<(), proxy::Error> {
+    ignore_io_errors(res)
+        .map(drop)
+        .map_err(|e| proxy::Error::from_teardown(&e).unwrap_or_else(|| translate_error(e)))
+}
+
+type Halves<S> = (<S as BufferedSplitter>::R, <S as BufferedSplitter>::W);
+
+// ResetOnDrop holds the sides of a copy and resets them when dropped, unless they were taken.
+struct ResetOnDrop<A: BufferedSplitter, B: BufferedSplitter>(Option<(Halves<A>, Halves<B>)>);
+
+impl<A: BufferedSplitter, B: BufferedSplitter> Drop for ResetOnDrop<A, B> {
+    fn drop(&mut self) {
+        if let Some(((rd, wd), (ru, wu))) = self.0.take() {
+            A::reset(rd, wd);
+            B::reset(ru, wu);
+        }
+    }
 }
 
 // During copying, we may encounter errors from either side closing their connection. Typically, we
@@ -396,7 +489,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::test_helpers::helpers::initialize_telemetry;
     use rand::Rng;
@@ -535,5 +628,96 @@ mod tests {
             // TODO
             Pin::new(&mut self.0).poll_read(cx, buf)
         }
+    }
+
+    pub(crate) fn connection_result() -> ConnectionResult {
+        let mut registry = prometheus_client::registry::Registry::default();
+        let metrics = std::sync::Arc::new(crate::proxy::Metrics::new(
+            crate::metrics::sub_registry(&mut registry),
+        ));
+        crate::proxy::metrics::ConnectionResultBuilder::new(
+            "127.0.0.1:12345".parse().unwrap(),
+            "127.0.0.1:34567".parse().unwrap(),
+            None,
+            std::time::Instant::now(),
+            crate::proxy::metrics::ConnectionOpen {
+                reporter: crate::proxy::Reporter::destination,
+                source: None,
+                derived_source: None,
+                destination: None,
+                connection_security_policy: crate::proxy::metrics::SecurityPolicy::unknown,
+                destination_service: None,
+            },
+            metrics,
+        )
+        .build()
+    }
+
+    // An upstream whose reads fail with `kind`, standing in for a transport torn down underneath it.
+    struct FailingRead(io::ErrorKind);
+    impl AsyncRead for FailingRead {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Err(self.0.into()))
+        }
+    }
+    impl AsyncWrite for FailingRead {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<Result<usize, Error>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    // Copies between an idle TCP client and an upstream whose reads fail with `kind`, returning
+    // what the client observes on its first read and then the copy result once the client closes.
+    async fn copy_with_failing_upstream(
+        kind: io::ErrorKind,
+    ) -> (std::io::Result<usize>, Result<(), proxy::Error>) {
+        initialize_telemetry();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (downstream, _) = listener.accept().await.unwrap();
+        let copy = tokio::spawn(async move {
+            let cr = connection_result();
+            copy_bidirectional(TcpStreamSplitter(downstream), FailingRead(kind), &cr).await
+        });
+        let read = client.read(&mut [0; 16]).await;
+        drop(client);
+        (read, copy.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn aborted_upstream_resets_downstream() {
+        let (read, res) = copy_with_failing_upstream(io::ErrorKind::ConnectionAborted).await;
+        assert_eq!(read.unwrap_err().kind(), io::ErrorKind::ConnectionReset);
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn reset_upstream_resets_downstream_quietly() {
+        let (read, res) = copy_with_failing_upstream(io::ErrorKind::ConnectionReset).await;
+        assert_eq!(read.unwrap_err().kind(), io::ErrorKind::ConnectionReset);
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn broken_upstream_closes_downstream() {
+        let (read, res) = copy_with_failing_upstream(io::ErrorKind::BrokenPipe).await;
+        assert_eq!(read.unwrap(), 0);
+        assert!(res.is_ok());
     }
 }
