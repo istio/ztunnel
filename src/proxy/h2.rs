@@ -391,6 +391,22 @@ impl copy::AsyncWriteBuf for H2StreamWriteHalf {
         Poll::Ready(Ok(()))
     }
 
+    fn poll_aborted(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Error> {
+        let this = self.get_mut();
+        // Only a reset reported as an error aborts the copy, a graceful one is the end of the stream.
+        let err = match ready!(this.send_stream.poll_reset(cx)) {
+            Ok(Reason::NO_ERROR) | Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
+                return Poll::Pending;
+            }
+            Ok(reason) => peer_reset_error(reason),
+            Err(e) => stream_error(e),
+        };
+        Poll::Ready(match this.teardown.get() {
+            Some(teardown) => teardown.clone().into_io(),
+            None => err,
+        })
+    }
+
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         let this = self.get_mut();
         let res = ready!(this.poll_shutdown_inner(cx));
@@ -900,6 +916,17 @@ mod tests {
         tokio::net::TcpStream,
         tokio::task::JoinHandle<Result<(), crate::proxy::Error>>,
     ) {
+        let (app, backend, server_copy, _client_copy) = tunnel_with_client_copy().await;
+        (app, backend, server_copy)
+    }
+
+    // Like `tunnel`, also returning the client side copy.
+    async fn tunnel_with_client_copy() -> (
+        tokio::net::TcpStream,
+        tokio::net::TcpStream,
+        tokio::task::JoinHandle<Result<(), crate::proxy::Error>>,
+        tokio::task::JoinHandle<Result<(), crate::proxy::Error>>,
+    ) {
         use crate::copy::{TcpStreamSplitter, copy_bidirectional, tests::connection_result};
         async fn tcp_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -962,12 +989,12 @@ mod tests {
                 teardown: TeardownCause::default(),
             },
         };
-        tokio::spawn(async move {
+        let client_copy = tokio::spawn(async move {
             let _driver = driver;
             let cr = connection_result();
             copy_bidirectional(TcpStreamSplitter(app_side), client_stream, &cr).await
         });
-        (app, backend, server_rx.await.unwrap())
+        (app, backend, server_rx.await.unwrap(), client_copy)
     }
 
     #[tokio::test]
@@ -985,6 +1012,24 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
         let err = app.read(&mut [0; 16]).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
+    }
+
+    // The backend half-closes, the app stays idle, and then the server side aborts the tunnel. The
+    // client side copy only waits on the app, yet must still see the stream reset and finish.
+    #[tokio::test]
+    async fn reset_after_half_close_ends_client_copy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut app, mut backend, server_copy, client_copy) = tunnel_with_client_copy().await;
+        backend.shutdown().await.unwrap();
+        assert_eq!(app.read(&mut [0; 16]).await.unwrap(), 0);
+
+        server_copy.abort();
+
+        tokio::time::timeout(Duration::from_secs(5), client_copy)
+            .await
+            .expect("the client copy never saw the reset")
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
