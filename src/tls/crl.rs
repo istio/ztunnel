@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tokio::sync::watch;
 use tracing::{debug, warn};
 use webpki::{CertRevocationList, OwnedCertRevocationList};
 
@@ -49,6 +50,10 @@ pub struct CrlManager {
     index: RevocationIndex,
     /// Monotonic counter bumped on every CRL set reload
     generation: Arc<AtomicU64>,
+    /// Notifies subscribers after each successful CRL reload. Sends the generation counter.
+    crl_reload_tx: watch::Sender<u64>,
+    /// Stored for cloning via `subscribe_reloads()`.
+    crl_reload_rx: watch::Receiver<u64>,
 }
 
 impl std::fmt::Debug for CrlManager {
@@ -79,6 +84,7 @@ impl CrlManager {
     pub fn new(crl_path: PathBuf, metrics: Arc<Metrics>) -> Result<Self, CrlError> {
         debug!(path = ?crl_path, "initializing crl manager");
 
+        let (crl_reload_tx, crl_reload_rx) = watch::channel(0u64);
         let manager = Self {
             inner: Arc::new(RwLock::new(CrlManagerInner {
                 crls: None,
@@ -88,6 +94,8 @@ impl CrlManager {
             })),
             index: RevocationIndex::new(metrics),
             generation: Arc::new(AtomicU64::new(0)),
+            crl_reload_tx,
+            crl_reload_rx,
         };
 
         // try to load the CRL, but don't fail if the file doesn't exist yet
@@ -120,6 +128,7 @@ impl CrlManager {
         let res = self.reload_crl_data();
         if res.is_ok() {
             self.index.navigate(self);
+            let _ = self.crl_reload_tx.send(self.generation());
         }
         res
     }
@@ -332,6 +341,12 @@ impl CrlManager {
 
         debug!("crl file watcher started successfully");
         Ok(())
+    }
+
+    /// Returns a receiver that fires after each successful CRL reload.
+    /// The value is the CRL generation counter at the time of reload.
+    pub fn subscribe_reloads(&self) -> watch::Receiver<u64> {
+        self.crl_reload_rx.clone()
     }
 }
 
