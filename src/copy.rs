@@ -95,6 +95,12 @@ pub trait AsyncWriteBuf {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>>;
+    // Resolves with an error if the peer aborted the writer, without a write having to find out.
+    // A copy waiting on its reader would otherwise not notice, e.g. an HBONE stream reset after
+    // the stream's receive side finished. Never resolves for a writer that cannot tell.
+    fn poll_aborted(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Error> {
+        Poll::Pending
+    }
 }
 
 // Allow &T to be AsyncWriteBuf
@@ -105,6 +111,10 @@ impl<T: ?Sized + AsyncWriteBuf + Unpin> AsyncWriteBuf for &mut T {
         buf: Bytes,
     ) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut **self).poll_write_buf(cx, buf)
+    }
+
+    fn poll_aborted(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Error> {
+        Pin::new(&mut **self).poll_aborted(cx)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
@@ -370,7 +380,16 @@ where
             let buffer = if let Some(buffer) = me.buf.take() {
                 buffer
             } else {
-                ready!(Pin::new(&mut *me.reader).poll_bytes(cx))?
+                match Pin::new(&mut *me.reader).poll_bytes(cx) {
+                    Poll::Ready(res) => res?,
+                    Poll::Pending => {
+                        // Waiting on the reader, so a write won't find out if the peer aborted.
+                        if let Poll::Ready(err) = Pin::new(&mut *me.writer).poll_aborted(cx) {
+                            return Poll::Ready(Err(err));
+                        }
+                        return Poll::Pending;
+                    }
+                }
             };
             if buffer.is_empty() {
                 ready!(AsyncWriteBuf::poll_flush(Pin::new(&mut self.writer), cx))?;
