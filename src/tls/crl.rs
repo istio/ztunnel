@@ -16,18 +16,21 @@ use notify::{Config, RecommendedWatcher};
 use notify_debouncer_full::{
     DebounceEventResult, Debouncer, FileIdMap, new_debouncer_opt, notify::RecursiveMode,
 };
-use rustls::pki_types::CertificateRevocationListDer;
 use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateRevocationListDer, UnixTime};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{debug, warn};
-use webpki::{CertRevocationList, OwnedCertRevocationList};
+use webpki::{CertRevocationList, KeyUsage, OwnedCertRevocationList};
 
 use crate::proxy::Metrics;
-use crate::tls::revocation::{ConnRegistration, RevocationHandle, RevocationIndex};
+use crate::tls::WorkloadCertificate;
+use crate::tls::revocation::{
+    ConnRegistration, RevocationHandle, RevocationIndex, verify_cert_chain,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CrlError {
@@ -350,6 +353,59 @@ impl CrlManager {
     }
 }
 
+/// Check whether a workload certificate chain is revoked in the currently loaded CRLs.
+///
+/// This is a diagnostic check: it emits a warning log and increments a metric
+/// If the certificate (leaf or intermediate) appears in the CRL set.
+pub fn check_own_cert_revocation(
+    cert: &WorkloadCertificate,
+    crl_manager: &CrlManager,
+    metrics: &Metrics,
+) {
+    let crls = crl_manager.get_crls();
+    if crls.is_empty() {
+        return;
+    }
+
+    let chain_der = cert.cert_and_intermediates_der();
+    let (end_entity, intermediates) = match chain_der.split_first() {
+        Some((ee, inters)) => (ee, inters),
+        None => return,
+    };
+
+    match verify_cert_chain(
+        end_entity,
+        intermediates,
+        &cert.root_store(),
+        UnixTime::now(),
+        KeyUsage::server_auth(),
+        &crls,
+    ) {
+        Err(webpki::Error::CertRevoked) => {
+            let identity = cert
+                .identity()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+
+            let serial = cert.cert.serial();
+            warn!(
+                %identity,
+                %serial,
+                "own workload certificate is revoked in loaded CRL; \
+                peers with this CRL will reject connections from this identity"
+            );
+            metrics.record_own_cert_revoked();
+        }
+        Err(err) => {
+            debug!(
+                error = %err,
+                "own certificate chain validation failed during CRL self-check \
+                (non-revocation error, likely misconfigured roots or unrelated CRL)"
+            );
+        }
+        Ok(_) => {}
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
