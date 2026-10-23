@@ -324,6 +324,7 @@ fn ignore_shutdown_errors(res: Result<(), io::Error>) -> Result<(), io::Error> {
     match &res {
         Err(e)
             if e.kind() == io::ErrorKind::NotConnected
+                || e.kind() == io::ErrorKind::BrokenPipe
                 || e.kind() == io::ErrorKind::UnexpectedEof =>
         {
             trace!(err=%e, "failed to shutdown peer, they already shutdown");

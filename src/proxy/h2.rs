@@ -1110,10 +1110,13 @@ mod tests {
             .unwrap();
     }
 
-    // Whether shutting down the cancelled stream is reported is up to the copy, only that it ends.
+    // A cancelled stream is a clean close, as it is when a write finds out, so shutting it down is
+    // not an error either.
     #[tokio::test]
     async fn cancel_after_half_close_ends_client_copy() {
-        let _ = graceful_reset_after_half_close(Reason::CANCEL).await;
+        graceful_reset_after_half_close(Reason::CANCEL)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
