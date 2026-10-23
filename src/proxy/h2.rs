@@ -196,7 +196,11 @@ struct DropCounter {
 }
 
 impl DropCounter {
-    pub fn new(active_count: Arc<AtomicU16>) -> (Option<DropCounter>, Option<DropCounter>) {
+    pub fn acquire(
+        active_count: &Arc<AtomicU16>,
+    ) -> (u16, Option<DropCounter>, Option<DropCounter>) {
+        let prev = active_count.fetch_add(1, Ordering::SeqCst);
+        let active_count = active_count.clone();
         let half_dropped = Arc::new(());
         let d1 = DropCounter {
             half_dropped: half_dropped.clone(),
@@ -206,7 +210,7 @@ impl DropCounter {
             half_dropped,
             active_count,
         };
-        (Some(d1), Some(d2))
+        (prev, Some(d1), Some(d2))
     }
 }
 

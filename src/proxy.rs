@@ -394,6 +394,11 @@ pub enum Error {
     #[error("connection timed out, maybe a NetworkPolicy is blocking HBONE port 15008: {0}")]
     MaybeHBONENetworkPolicyError(io::Error),
 
+    /// The peer accepted the TCP connection but did not finish setting up the tunnel on it in
+    /// time.
+    #[error("timed out during {0}")]
+    HandshakeTimeout(HBONEHandshakeStage),
+
     #[error("destination disconnected before all data was written")]
     BackendDisconnected,
     #[error("receive: {0}")]
@@ -653,10 +658,50 @@ pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HBONEHandshakeStage {
+    Tls,
+    Http2,
+    Connect,
+    InnerTls,
+    InnerHttp2,
+    InnerConnect,
+    PoolWait,
+}
+
+impl fmt::Display for HBONEHandshakeStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            HBONEHandshakeStage::Tls => "TLS handshake",
+            HBONEHandshakeStage::Http2 => "HTTP/2 handshake",
+            HBONEHandshakeStage::Connect => "HBONE CONNECT",
+            HBONEHandshakeStage::InnerTls => "inner TLS handshake",
+            HBONEHandshakeStage::InnerHttp2 => "inner HTTP/2 handshake",
+            HBONEHandshakeStage::InnerConnect => "inner HBONE CONNECT",
+            HBONEHandshakeStage::PoolWait => "wait for pooled HBONE connection",
+        })
+    }
+}
+
+pub(crate) async fn with_deadline<T, E: Into<Error>>(
+    deadline: Option<tokio::time::Instant>,
+    stage: HBONEHandshakeStage,
+    fut: impl Future<Output = Result<T, E>>,
+) -> Result<T, Error> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, fut)
+            .await
+            .map_err(|_| Error::HandshakeTimeout(stage))?
+            .map_err(Into::into),
+        None => fut.await.map_err(Into::into),
+    }
+}
+
 pub async fn freebind_connect(
     local: Option<IpAddr>,
     addr: SocketAddr,
     socket_factory: &(dyn SocketFactory + Send + Sync),
+    connect_timeout: Option<Duration>,
 ) -> io::Result<TcpStream> {
     async fn connect(
         local: Option<IpAddr>,
@@ -701,7 +746,8 @@ pub async fn freebind_connect(
         }
     }
     // Wrap the entire connect function in a timeout
-    timeout(CONNECTION_TIMEOUT, connect(local, addr, socket_factory))
+    let timeout_duration = connect_timeout.unwrap_or(CONNECTION_TIMEOUT);
+    timeout(timeout_duration, connect(local, addr, socket_factory))
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e))?
 }
