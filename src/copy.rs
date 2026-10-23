@@ -243,60 +243,38 @@ where
     let torn_down = A::teardown_cause(rd)
         .or_else(|| B::teardown_cause(ru))
         .map(|cause| Box::pin(async move { cause.torn_down().await }));
-    // A connection aborted error means a transport failed out from under the copy (e.g. an HBONE
-    // ping timeout), and a connection reset means a peer aborted its connection. Rather than
-    // closing gracefully, which the other peer would take as a clean end of stream, the other
-    // direction is stopped and both sides are reset. So each direction completes with `Ok` and its
-    // own result, or, when it aborts, with `Err` and the result of the whole copy.
-    let is_aborted = |res: &io::Result<u64>| matches!(res, Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset));
     let (send_done, receive_done) = (AtomicBool::new(false), AtomicBool::new(false));
-    let downstream_to_upstream = async {
-        let translate_error = |e: io::Error| {
+    let downstream_to_upstream = copy_direction(
+        rd,
+        wu,
+        stats,
+        false,
+        &receive_done,
+        &send_done,
+        |e: io::Error| {
             SendError(Box::new(match e.kind() {
                 io::ErrorKind::NotConnected => BackendDisconnected,
                 io::ErrorKind::WriteZero => BackendDisconnected,
                 io::ErrorKind::UnexpectedEof => ClientDisconnected,
                 _ => e.into(),
             }))
-        };
-        let res = copy_buf(rd, wu, stats, false, &receive_done).await;
-        send_done.store(true, Ordering::Relaxed);
-        // Let the other direction know, it may be waiting on its reader
-        tokio::task::yield_now().await;
-        if is_aborted(&res) {
-            trace!(?res, "send aborted");
-            return Err(aborted_result(res, translate_error));
-        }
-        let res = ignore_io_errors(res).map_err(translate_error);
-        trace!(?res, "send");
-        let shutdown = ignore_shutdown_errors(shutdown(wu).await)
-            .map_err(translate_error)
-            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)));
-        Ok(shutdown.and(res))
-    };
-
-    let upstream_to_downstream = async {
-        let translate_error = |e: io::Error| {
+        },
+    );
+    let upstream_to_downstream = copy_direction(
+        ru,
+        wd,
+        stats,
+        true,
+        &send_done,
+        &receive_done,
+        |e: io::Error| {
             ReceiveError(Box::new(match e.kind() {
                 io::ErrorKind::NotConnected => ClientDisconnected,
                 io::ErrorKind::WriteZero => ClientDisconnected,
                 _ => e.into(),
             }))
-        };
-        let res = copy_buf(ru, wd, stats, true, &send_done).await;
-        receive_done.store(true, Ordering::Relaxed);
-        tokio::task::yield_now().await;
-        if is_aborted(&res) {
-            trace!(?res, "receive aborted");
-            return Err(aborted_result(res, translate_error));
-        }
-        let res = ignore_io_errors(res).map_err(translate_error);
-        trace!(?res, "receive");
-        let shutdown = ignore_shutdown_errors(shutdown(wd).await)
-            .map_err(translate_error)
-            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)));
-        Ok(shutdown.and(res))
-    };
+        },
+    );
 
     // Join the directions so that we keep completing either end once one side is complete; only
     // an abort stops the other direction. A teardown aborts both. On an abort, dropping the sides
@@ -324,6 +302,45 @@ where
     let received = received?;
     trace!(sent, received, "copy complete");
     Ok(())
+}
+
+// Copies one direction of a copy (`is_send` is for the upstream to downstream one, which counts as
+// received) and then shuts down its writer. `other_done` and `done` are whether the other direction and
+// this one are done. A connection aborted error means a
+// transport failed out from under the copy (e.g. an HBONE ping timeout), and a connection reset
+// means a peer aborted its connection. Rather than closing gracefully, which the other peer would
+// take as a clean end of stream, the other direction is stopped and both sides are reset. So the
+// direction completes with `Ok` and its own result, or, when it aborts, with `Err` and the result
+// of the whole copy.
+async fn copy_direction<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    stats: &ConnectionResult,
+    is_send: bool,
+    other_done: &AtomicBool,
+    done: &AtomicBool,
+    translate_error: impl Fn(io::Error) -> proxy::Error + Copy,
+) -> Result<Result<u64, proxy::Error>, Result<(), proxy::Error>>
+where
+    R: ResizeBufRead + Unpin,
+    W: AsyncWriteBuf + Unpin,
+{
+    let name = if is_send { "receive" } else { "send" };
+    let res = copy_buf(reader, writer, stats, is_send, other_done).await;
+    done.store(true, Ordering::Relaxed);
+    // Let the other direction know, it may be waiting on its reader
+    tokio::task::yield_now().await;
+    if matches!(&res, Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset))
+    {
+        trace!(?res, "{name} aborted");
+        return Err(aborted_result(res, translate_error));
+    }
+    let res = ignore_io_errors(res).map_err(translate_error);
+    trace!(?res, "{name}");
+    let shutdown = ignore_shutdown_errors(shutdown(writer).await)
+        .map_err(translate_error)
+        .map_err(|e| proxy::Error::ShutdownError(Box::new(e)));
+    Ok(shutdown.and(res))
 }
 
 // The result of a copy that a direction aborted. An abort caused by an HBONE teardown is reported
