@@ -228,7 +228,6 @@ impl OutboundConnection {
         let mut backoff = self.pi.cfg.outbound_connect_base_backoff.min(max_backoff);
         let mut retries = 0;
         let mut deprioritized = DeprioritizedEndpoints::default();
-        // Holds the last failed attempt so a later routing failure still records a final result.
         let mut last_attempt: Option<Box<ConnectionResultBuilder>> = None;
         loop {
             let req = match Box::pin(self.select_next_hop(&resolved, &deprioritized)).await {
@@ -297,7 +296,7 @@ impl OutboundConnection {
                     debug!(
                         dst=%req.actual_destination,
                         target=?req.hbone_target_destination,
-                        "starting copy",
+                        "connected",
                     );
                     return Some((
                         connected,
