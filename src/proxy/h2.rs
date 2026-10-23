@@ -397,14 +397,7 @@ impl copy::AsyncWriteBuf for H2StreamWriteHalf {
 
     fn poll_aborted(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Error> {
         let this = self.get_mut();
-        // A graceful reset ends the stream like a write would find out, as a broken pipe.
-        let err = match ready!(this.send_stream.poll_reset(cx)) {
-            Ok(Reason::NO_ERROR) | Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
-                std::io::ErrorKind::BrokenPipe.into()
-            }
-            Ok(reason) => peer_reset_error(reason),
-            Err(e) => stream_error(e),
-        };
+        let err = reset_error(ready!(this.send_stream.poll_reset(cx)));
         Poll::Ready(match this.teardown.get() {
             Some(teardown) => teardown.clone().into_io(),
             None => err,
@@ -444,13 +437,7 @@ impl H2StreamWriteHalf {
             return Poll::Ready(Ok(cnt));
         }
 
-        Poll::Ready(Err(match ready!(self.send_stream.poll_reset(cx)) {
-            Ok(Reason::NO_ERROR) | Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
-                std::io::ErrorKind::BrokenPipe.into()
-            }
-            Ok(reason) => peer_reset_error(reason),
-            Err(e) => stream_error(e),
-        }))
+        Poll::Ready(Err(reset_error(ready!(self.send_stream.poll_reset(cx)))))
     }
 
     fn poll_shutdown_inner(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
@@ -459,12 +446,21 @@ impl H2StreamWriteHalf {
             return Poll::Ready(Ok(()));
         }
 
-        Poll::Ready(Err(match ready!(self.send_stream.poll_reset(cx)) {
-            Ok(Reason::NO_ERROR) => return Poll::Ready(Ok(())),
-            Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => std::io::ErrorKind::BrokenPipe.into(),
-            Ok(reason) => peer_reset_error(reason),
-            Err(e) => stream_error(e),
-        }))
+        match ready!(self.send_stream.poll_reset(cx)) {
+            Ok(Reason::NO_ERROR) => Poll::Ready(Ok(())),
+            reset => Poll::Ready(Err(reset_error(reset))),
+        }
+    }
+}
+
+// The error of a stream that was reset. A graceful reset is a broken pipe, the stream is just over.
+fn reset_error(reset: Result<Reason, h2::Error>) -> std::io::Error {
+    match reset {
+        Ok(Reason::NO_ERROR) | Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
+            std::io::ErrorKind::BrokenPipe.into()
+        }
+        Ok(reason) => peer_reset_error(reason),
+        Err(e) => stream_error(e),
     }
 }
 
