@@ -393,10 +393,10 @@ impl copy::AsyncWriteBuf for H2StreamWriteHalf {
 
     fn poll_aborted(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Error> {
         let this = self.get_mut();
-        // Only a reset reported as an error aborts the copy, a graceful one is the end of the stream.
+        // A graceful reset ends the stream like a write would find out, as a broken pipe.
         let err = match ready!(this.send_stream.poll_reset(cx)) {
             Ok(Reason::NO_ERROR) | Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
-                return Poll::Pending;
+                std::io::ErrorKind::BrokenPipe.into()
             }
             Ok(reason) => peer_reset_error(reason),
             Err(e) => stream_error(e),
@@ -1030,6 +1030,86 @@ mod tests {
             .expect("the client copy never saw the reset")
             .unwrap()
             .unwrap();
+    }
+
+    // The peer finishes sending and then resets the stream gracefully, as when it drains, while the
+    // app stays idle. Returns the result of the client side copy, which must end.
+    async fn graceful_reset_after_half_close(reason: Reason) -> Result<(), crate::proxy::Error> {
+        use crate::copy::{TcpStreamSplitter, copy_bidirectional, tests::connection_result};
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut app = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let app_side = listener.accept().await.unwrap().0;
+
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (finished_tx, finished_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let mut conn = h2::server::handshake(server_io).await.unwrap();
+            let (_req, mut respond) = conn.accept().await.unwrap().unwrap();
+            let resp = http::Response::builder().status(200).body(()).unwrap();
+            let mut send = respond.send_response(resp, false).unwrap();
+            send.send_data(Bytes::new(), true).unwrap();
+            let mut finished_rx = finished_rx;
+            loop {
+                tokio::select! {
+                    _ = &mut finished_rx => break,
+                    _ = conn.accept() => {}
+                }
+            }
+            send.send_reset(reason);
+            while conn.accept().await.is_some() {}
+        });
+        let (mut send_req, conn) = h2::client::handshake(client_io).await.unwrap();
+        let driver = tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let req = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("http://example.com")
+            .body(())
+            .unwrap();
+        let (resp, send_stream) = send_req.send_request(req, false).unwrap();
+        let client_stream = H2Stream {
+            read: H2StreamReadHalf {
+                recv_stream: resp.await.unwrap().into_body(),
+                _dropped: None,
+                teardown: TeardownCause::default(),
+            },
+            write: H2StreamWriteHalf {
+                send_stream,
+                _dropped: None,
+                teardown: TeardownCause::default(),
+            },
+        };
+        let client_copy = tokio::spawn(async move {
+            let _driver = driver;
+            let cr = connection_result();
+            copy_bidirectional(TcpStreamSplitter(app_side), client_stream, &cr).await
+        });
+        // the stream's end reaches the app, which stays idle
+        assert_eq!(app.read(&mut [0; 16]).await.unwrap(), 0);
+
+        finished_tx.send(()).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), client_copy)
+            .await
+            .expect("the client copy never saw the reset")
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn no_error_reset_after_half_close_ends_client_copy() {
+        graceful_reset_after_half_close(Reason::NO_ERROR)
+            .await
+            .unwrap();
+    }
+
+    // Whether shutting down the cancelled stream is reported is up to the copy, only that it ends.
+    #[tokio::test]
+    async fn cancel_after_half_close_ends_client_copy() {
+        let _ = graceful_reset_after_half_close(Reason::CANCEL).await;
     }
 
     #[tokio::test]
