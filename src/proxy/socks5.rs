@@ -285,7 +285,9 @@ async fn negotiate_socks_connection(
     stream.read_exact(&mut port).await?;
     let port = BigEndian::read_u16(&port);
 
-    let host = SocketAddr::new(ip, port);
+    // Canonicalize so an IPv4-mapped IPv6 target (::ffff:a.b.c.d) is handled like the IPv4
+    // address, matching how redirected destinations are treated.
+    let host = socket::to_canonical(SocketAddr::new(ip, port));
 
     Ok(host)
 }
@@ -420,5 +422,61 @@ impl SocksError {
 impl From<std::io::Error> for SocksError {
     fn from(value: std::io::Error) -> Self {
         SocksError::General(Error::Io(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config;
+    use crate::identity::mock::new_secret_manager;
+    use crate::proxy::connection_manager::ConnectionManager;
+    use crate::proxy::{DefaultSocketFactory, LocalWorkloadInformation};
+    use crate::state::WorkloadInfo;
+    use crate::test_helpers::helpers::test_proxy_metrics;
+    use crate::test_helpers::new_proxy_state;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn negotiate_canonicalizes_ipv4_mapped_target() {
+        let state = new_proxy_state(&[], &[], &[]);
+        let local_workload = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(WorkloadInfo {
+                name: "source-workload".to_string(),
+                namespace: "ns".to_string(),
+                service_account: "default".to_string(),
+            }),
+            state.clone(),
+            new_secret_manager(Duration::from_secs(10)),
+        ));
+        let pi = ProxyInputs::new(
+            Arc::new(config::parse_config().unwrap()),
+            ConnectionManager::default(),
+            state,
+            test_proxy_metrics(),
+            Arc::new(DefaultSocketFactory::default()),
+            None,
+            local_workload,
+            false,
+            None,
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+
+        // ::ffff:127.0.0.3
+        let mapped = Ipv4Addr::new(127, 0, 0, 3).to_ipv6_mapped();
+        let mut req = vec![0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x04];
+        req.extend_from_slice(&mapped.octets());
+        req.extend_from_slice(&15001u16.to_be_bytes());
+        client.write_all(&req).await.unwrap();
+
+        let target = negotiate_socks_connection(&pi, &mut server).await.unwrap();
+        assert_eq!(target, "127.0.0.3:15001".parse::<SocketAddr>().unwrap());
+        assert!(target.ip().is_loopback());
     }
 }
