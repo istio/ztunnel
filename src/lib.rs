@@ -46,9 +46,11 @@ pub mod xds;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
 
+pub(crate) static COMPLIANCE_POLICY: Lazy<String> =
+    Lazy::new(|| env::var("COMPLIANCE_POLICY").unwrap_or_default());
+
 #[allow(dead_code)]
-static PQC_ENABLED: Lazy<bool> =
-    Lazy::new(|| env::var("COMPLIANCE_POLICY").unwrap_or_default() == "pqc");
+static PQC_ENABLED: Lazy<bool> = Lazy::new(|| COMPLIANCE_POLICY.as_str() == "pqc");
 
 #[allow(dead_code)]
 static TLS12_ENABLED: Lazy<bool> =
