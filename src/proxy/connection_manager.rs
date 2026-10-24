@@ -331,7 +331,14 @@ impl PolicyWatcher {
                 _ = policies_changed.changed() => {
                     let connections = self.connection_manager.connections();
                     for conn in connections {
-                        if self.state.assert_rbac(&conn.ctx).await.is_err() {
+                        // The workload captured when the connection was opened may be stale: its
+                        // list of workload-selector policies is updated when such a policy is added.
+                        let mut ctx = conn.ctx.clone();
+                        let current = self.state.read().workloads.find_uid(&ctx.dest_workload.uid);
+                        if let Some(wl) = current {
+                            ctx.dest_workload = wl;
+                        }
+                        if self.state.assert_rbac(&ctx).await.is_err() {
                             self.connection_manager.close(&conn).await;
                             info!("connection {} closed because it's no longer allowed after a policy update", conn.ctx);
                         }
@@ -655,6 +662,84 @@ mod tests {
         } // release lock
 
         // send the signal which stops policy watcher
+        tx.start_drain_and_wait(drain::DrainMode::Immediate).await;
+    }
+
+    #[tokio::test]
+    async fn test_policy_watcher_workload_selector_policy() {
+        let state = Arc::new(RwLock::new(ProxyState::new(None)));
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
+        let dstate = DemandProxyState::new(
+            state.clone(),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+            metrics,
+        );
+        let connection_manager = ConnectionManager::default();
+        let (tx, stop) = drain::new();
+        let state_mutator = ProxyStateUpdateMutator::new_no_fetch();
+
+        let wl = Arc::new(crate::state::workload::Workload {
+            uid: "uid1".into(),
+            namespace: "default".into(),
+            ..test_default_workload()
+        });
+        state.write().unwrap().workloads.insert(wl.clone());
+
+        let pw = PolicyWatcher::new(dstate.clone(), stop, connection_manager.clone());
+        tokio::spawn(pw.run());
+        // let the watcher subscribe to policy updates
+        tokio::task::yield_now().await;
+
+        // The connection is established before any policy selects the workload.
+        let conn = InboundConnection {
+            ctx: crate::state::ProxyRbacContext {
+                conn: Connection {
+                    src_identity: None,
+                    src: std::net::SocketAddr::new(Ipv4Addr::new(192, 168, 0, 1).into(), 80),
+                    dst_network: "".into(),
+                    dst: std::net::SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::new(192, 168, 0, 2),
+                        8080,
+                    )),
+                },
+                dest_workload: wl.clone(),
+            },
+            dest_service: None,
+        };
+        let close = connection_manager
+            .register(&conn)
+            .expect("should not be None");
+
+        // A workload-selector DENY policy is added: istiod updates the workload's policy list,
+        // then pushes the policy itself.
+        {
+            let mut s = state.write().unwrap();
+            s.workloads
+                .insert(Arc::new(crate::state::workload::Workload {
+                    authorization_policies: vec!["default/deny-all".into()],
+                    ..(*wl).clone()
+                }));
+            let auth = Authorization {
+                name: "deny-all".into(),
+                action: Action::Deny as i32,
+                scope: Scope::WorkloadSelector as i32,
+                namespace: "default".into(),
+                rules: vec![Default::default()],
+                dry_run: false,
+                extensions: vec![],
+            };
+            state_mutator
+                .insert_authorization(&mut s, "default/deny-all".into(), auth)
+                .expect("insert authorization");
+            s.policies.send();
+        }
+
+        // the existing connection must be closed by the new policy
+        assert_close(close).await;
+
         tx.start_drain_and_wait(drain::DrainMode::Immediate).await;
     }
 
