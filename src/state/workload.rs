@@ -2266,6 +2266,7 @@ mod tests {
                     &wl,
                     "127.0.1.1:80".parse().unwrap(),
                     ServiceResolutionMode::Standard,
+                    &Default::default(),
                 )
             {
                 let n = &workload.name; // borrow name instead of cloning
@@ -2308,6 +2309,7 @@ mod tests {
             wl.as_ref().unwrap(),
             "127.10.0.1:80".parse().unwrap(),
             ServiceResolutionMode::Standard,
+            &Default::default(),
         ) {
             Some(UpstreamDestination::UpstreamParts(_, port, svc)) => (port, svc),
             _ => panic!("should get"),
@@ -2325,6 +2327,7 @@ mod tests {
             wl.as_ref().unwrap(),
             "127.10.0.2:80".parse().unwrap(),
             ServiceResolutionMode::Standard,
+            &Default::default(),
         ) {
             Some(UpstreamDestination::UpstreamParts(_, port, _)) => port,
             _ => panic!("should get"),

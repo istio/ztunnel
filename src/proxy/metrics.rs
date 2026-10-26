@@ -42,6 +42,7 @@ pub struct Metrics {
     pub connection_opens: Family<CommonTrafficLabels, Counter>,
     pub connection_close: Family<CommonTrafficLabels, Counter>,
     pub connection_failures: Family<CommonTrafficLabels, Counter>,
+    pub connection_retries: Family<CommonTrafficLabels, Counter>,
     pub open_sockets: Family<SocketLabels, Gauge>,
     pub received_bytes: Family<CommonTrafficLabels, Counter>,
     pub sent_bytes: Family<CommonTrafficLabels, Counter>,
@@ -390,6 +391,13 @@ impl Metrics {
             connection_failures.clone(),
         );
 
+        let connection_retries = Family::default();
+        registry.register(
+            "tcp_connection_retries",
+            "The total number of upstream connection attempts that failed and were retried (unstable)",
+            connection_retries.clone(),
+        );
+
         let open_sockets = Family::default();
         registry.register(
             "tcp_sockets_open",
@@ -418,6 +426,7 @@ impl Metrics {
             sent_bytes,
             on_demand_dns,
             connection_failures,
+            connection_retries,
             open_sockets,
             crl_policy_rejections,
             crl_untracked_connections,
@@ -495,6 +504,8 @@ pub struct ConnectionResult {
     pub(crate) recv: AtomicU64,
     // recv_metric records the number of bytes received on this connection to the aggregated metric counter
     pub(crate) recv_metric: Counter,
+    // Number of failed upstream attempts that were retried before this one
+    pub(crate) retries: u32,
     // Have we recorded yet?
     pub(crate) recorded: bool,
 }
@@ -574,6 +585,7 @@ pub struct ConnectionResultBuilder {
     start: Instant,
     tl: CommonTrafficLabels,
     metrics: Arc<Metrics>,
+    retries: u32,
 }
 
 impl ConnectionResultBuilder {
@@ -604,6 +616,7 @@ impl ConnectionResultBuilder {
             start,
             tl,
             metrics,
+            retries: 0,
         }
     }
 
@@ -617,6 +630,40 @@ impl ConnectionResultBuilder {
         self.tl = self.tl.with_derived_destination(Some(w));
         self.dst.1 = w.workload_name.clone().map(RichStrng::from);
         self
+    }
+
+    pub fn with_retries(mut self, retries: u32) -> Self {
+        self.retries = retries;
+        self
+    }
+
+    // Record a failed attempt that will be retried.
+    pub fn record_retry<E: std::error::Error + 'static>(&self, err: &E) {
+        let mut tl = self.tl.clone();
+        tl.response_flags = failure_reason(err);
+        self.metrics.connection_retries.get_or_create(&tl).inc();
+        event!(
+            target: "access",
+            parent: None,
+            tracing::Level::DEBUG,
+
+            src.addr = %self.src.0,
+
+            dst.addr = %self.dst.0,
+            dst.hbone_addr = self.hbone_target.as_ref().map(display),
+            dst.service = tl.destination_service.to_value(),
+            dst.workload = self.dst.1.as_deref().map(to_value),
+
+            direction = if tl.reporter == Reporter::source {
+                "outbound"
+            } else {
+                "inbound"
+            },
+
+            error = format!("{err}"),
+
+            "connection attempt failed"
+        );
     }
 
     pub fn build(self) -> ConnectionResult {
@@ -671,6 +718,7 @@ impl ConnectionResultBuilder {
             sent_metric,
             recv,
             recv_metric,
+            retries: self.retries,
             recorded: false,
         }
     }
@@ -703,38 +751,9 @@ impl ConnectionResult {
         if self.tl.response_flags == ResponseFlags::None
             && let Err(ref err) = res
         {
-            self.tl.response_flags = Self::extract_failure_reason(err);
+            self.tl.response_flags = failure_reason(err);
         }
         self.record_internal(res)
-    }
-
-    // Extract failure reason from error type using downcasting
-    fn extract_failure_reason<E: std::error::Error + 'static>(err: &E) -> ResponseFlags {
-        use std::any::Any;
-
-        // Try to downcast the error itself to proxy::Error
-        if let Some(proxy_err) = (err as &dyn Any).downcast_ref::<proxy::Error>() {
-            return match proxy_err {
-                proxy::Error::Tls(_) => ResponseFlags::TlsFailure,
-                proxy::Error::Http2Handshake(_) | proxy::Error::H2(_) => {
-                    ResponseFlags::Http2HandshakeFailure
-                }
-                proxy::Error::MaybeHBONENetworkPolicyError(_) => ResponseFlags::NetworkPolicyError,
-                proxy::Error::Identity(_) => ResponseFlags::IdentityError,
-                proxy::Error::AuthorizationPolicyRejection(_)
-                | proxy::Error::AuthorizationPolicyLateRejection => {
-                    ResponseFlags::AuthorizationPolicyDenied
-                }
-                proxy::Error::Teardown(proxy::h2::Teardown::CertificateRevoked) => {
-                    ResponseFlags::CertificateRevoked
-                }
-                proxy::Error::ConnectionFailed(_) => ResponseFlags::ConnectionFailure,
-                _ => ResponseFlags::ConnectionFailure,
-            };
-        }
-
-        // Default to generic connection failure if we can't identify the error type
-        ResponseFlags::ConnectionFailure
     }
 
     // Internal-only function that takes `&mut` to facilitate Drop. Public consumers must use consuming functions.
@@ -799,8 +818,49 @@ impl ConnectionResult {
             bytes_sent = if tl.reporter == Reporter::source {bytes.0} else {bytes.1},
             bytes_recv = if tl.reporter == Reporter::source {bytes.1} else {bytes.0},
             duration = dur,
+            retries = (self.retries > 0).then_some(self.retries),
         );
     }
+}
+
+// Extract failure reason from error type using downcasting
+pub(crate) fn failure_reason<E: std::error::Error + 'static>(err: &E) -> ResponseFlags {
+    use std::any::Any;
+
+    // Try to downcast the error itself to proxy::Error
+    if let Some(proxy_err) = (err as &dyn Any).downcast_ref::<proxy::Error>() {
+        return match proxy_err {
+            proxy::Error::Tls(_) => ResponseFlags::TlsFailure,
+            proxy::Error::Http2Handshake(_) | proxy::Error::H2(_) => {
+                ResponseFlags::Http2HandshakeFailure
+            }
+            proxy::Error::MaybeHBONENetworkPolicyError(_) => ResponseFlags::NetworkPolicyError,
+            proxy::Error::HandshakeTimeout(stage) => match stage {
+                proxy::HBONEHandshakeStage::Tls | proxy::HBONEHandshakeStage::InnerTls => {
+                    ResponseFlags::TlsFailure
+                }
+                proxy::HBONEHandshakeStage::Http2 | proxy::HBONEHandshakeStage::InnerHttp2 => {
+                    ResponseFlags::Http2HandshakeFailure
+                }
+                proxy::HBONEHandshakeStage::Connect
+                | proxy::HBONEHandshakeStage::InnerConnect
+                | proxy::HBONEHandshakeStage::PoolWait => ResponseFlags::ConnectionFailure,
+            },
+            proxy::Error::Identity(_) => ResponseFlags::IdentityError,
+            proxy::Error::AuthorizationPolicyRejection(_)
+            | proxy::Error::AuthorizationPolicyLateRejection => {
+                ResponseFlags::AuthorizationPolicyDenied
+            }
+            proxy::Error::Teardown(proxy::h2::Teardown::CertificateRevoked) => {
+                ResponseFlags::CertificateRevoked
+            }
+            proxy::Error::ConnectionFailed(_) => ResponseFlags::ConnectionFailure,
+            _ => ResponseFlags::ConnectionFailure,
+        };
+    }
+
+    // Default to generic connection failure if we can't identify the error type
+    ResponseFlags::ConnectionFailure
 }
 
 impl Drop for ConnectionResult {
@@ -827,7 +887,7 @@ mod tests {
 
     #[test]
     fn teardown_failure_reason() {
-        let reason = |e: proxy::Error| ConnectionResult::extract_failure_reason(&e);
+        let reason = |e: proxy::Error| failure_reason(&e);
         assert_eq!(
             reason(proxy::Error::Teardown(Teardown::CertificateRevoked)),
             ResponseFlags::CertificateRevoked

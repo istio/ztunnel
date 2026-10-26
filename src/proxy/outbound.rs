@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use futures_util::TryFutureExt;
 use hyper::header::FORWARDED;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
 use tokio::sync::watch;
@@ -27,12 +27,15 @@ use tracing::{Instrument, debug, error, info, info_span, trace_span};
 use crate::identity::Identity;
 use crate::strng::Strng;
 
+use crate::proxy::connection_manager::OutboundConnectionGuard;
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{
     BAGGAGE_HEADER, Error, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent,
     X_FORWARDED_NETWORK_HEADER, util,
 };
-use crate::proxy::{ConnectionOpen, ConnectionResultBuilder, DerivedWorkload, metrics};
+use crate::proxy::{
+    ConnectionOpen, ConnectionResult, ConnectionResultBuilder, DerivedWorkload, metrics,
+};
 
 use crate::baggage::{self, Baggage};
 use crate::drain::DrainWatcher;
@@ -41,7 +44,7 @@ use crate::proxy::h2::{H2Stream, TeardownCause, client::WorkloadKey};
 use crate::state::service::{LoadBalancerMode, Service, ServiceDescription};
 use crate::state::workload::OutboundProtocol;
 use crate::state::workload::{InboundProtocol, NetworkAddress, Workload, address::Address};
-use crate::state::{ServiceResolutionMode, Upstream};
+use crate::state::{DeprioritizedEndpoints, ServiceResolutionMode, Upstream};
 use crate::{assertions, copy, proxy, socket, tls};
 
 use super::h2::TokioH2Stream;
@@ -127,7 +130,7 @@ impl Outbound {
                             debug!(component="outbound", dur=?start.elapsed(), "connection completed");
                         }.instrument(span);
 
-                        assertions::size_between_ref(1000, 2100, &serve_outbound_connection);
+                        assertions::size_between_ref(800, 1100, &serve_outbound_connection);
                         tokio::spawn(serve_outbound_connection);
                     }
                     Err(e) => {
@@ -148,6 +151,16 @@ impl Outbound {
         )
         .await
     }
+}
+
+/// An established upstream connection, before any downstream bytes have moved.
+enum ConnectedUpstream {
+    Hbone {
+        stream: H2Stream,
+        /// Drains the unpooled inner tunnel after copying; the pool drains single-hop tunnels.
+        inner_drain: Option<watch::Sender<bool>>,
+    },
+    Tcp(TcpStream),
 }
 
 pub(super) struct OutboundConnection {
@@ -175,6 +188,145 @@ impl OutboundConnection {
         self.proxy_to(source_stream, source_addr, dst_addr).await;
     }
 
+    fn is_retriable_connection_error(err: &Error) -> bool {
+        matches!(
+            err,
+            Error::Io(_)
+                | Error::Tls(_)
+                | Error::Http2Handshake(_)
+                | Error::H2(_)
+                | Error::HandshakeTimeout(_)
+                | Error::MaybeHBONENetworkPolicyError(_)
+        ) || matches!(err, Error::HttpStatus(status) if status.is_server_error())
+    }
+
+    /// Minimum budget for a useful connection attempt.
+    const MIN_CONNECT_BUDGET: Duration = Duration::from_millis(50);
+
+    async fn connect_with_retries(
+        &mut self,
+        source_addr: SocketAddr,
+        dest_addr: SocketAddr,
+        max_retries: usize,
+        start: Instant,
+    ) -> Option<(
+        ConnectedUpstream,
+        Option<DerivedWorkload>,
+        Box<ConnectionResultBuilder>,
+        OutboundConnectionGuard,
+    )> {
+        let resolved = match self.resolve_target(source_addr.ip(), dest_addr).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
+                return None;
+            }
+        };
+
+        let deadline = start + super::CONNECTION_TIMEOUT;
+        let max_backoff = self.pi.cfg.outbound_connect_max_backoff;
+        let mut backoff = self.pi.cfg.outbound_connect_base_backoff.min(max_backoff);
+        let mut retries = 0;
+        let mut deprioritized = DeprioritizedEndpoints::default();
+        let mut last_attempt: Option<Box<ConnectionResultBuilder>> = None;
+        loop {
+            let req = match Box::pin(self.select_next_hop(&resolved, &deprioritized)).await {
+                Ok(req) => Box::new(req),
+                Err(err) => {
+                    match last_attempt {
+                        Some(builder) => builder
+                            .with_retries(u32::try_from(retries).unwrap_or(u32::MAX))
+                            .build()
+                            .record(Err(err)),
+                        None => {
+                            metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err)
+                        }
+                    }
+                    return None;
+                }
+            };
+            // TODO: should we use the original address or the actual address? Both seems nice!
+            let conn_guard = self.pi.connection_manager.track_outbound(
+                source_addr,
+                dest_addr,
+                req.actual_destination,
+                req.protocol,
+            );
+
+            let metrics = self.pi.metrics.clone();
+            let hbone_target = req.hbone_target_destination.clone();
+            let connection_result_builder = Box::new(
+                ConnectionResultBuilder::new(
+                    source_addr,
+                    req.actual_destination,
+                    hbone_target,
+                    start,
+                    Self::conn_metrics_from_request(&req),
+                    metrics,
+                )
+                .with_retries(u32::try_from(retries).unwrap_or(u32::MAX)),
+            );
+
+            // Split what is left of the deadline across the remaining attempts. The floor may
+            // extend an attempt past the deadline.
+            let budget = (max_retries > 0).then(|| {
+                let attempts_left =
+                    u32::try_from((max_retries - retries).saturating_add(1)).unwrap_or(u32::MAX);
+                let share = deadline.saturating_duration_since(Instant::now()) / attempts_left;
+                share.max(Self::MIN_CONNECT_BUDGET)
+            });
+
+            let connected = match req.protocol {
+                OutboundProtocol::DOUBLEHBONE => {
+                    // We box this since its not a common path and it would make the future really big.
+                    Box::pin(self.connect_hbone_double(source_addr, &req, budget)).await
+                }
+                OutboundProtocol::HBONE => self
+                    .connect_hbone(source_addr, &req, budget)
+                    .await
+                    .map(|upstream| (upstream, None)),
+                OutboundProtocol::TCP => self
+                    .connect_tcp(&req, budget)
+                    .await
+                    .map(|upstream| (upstream, None)),
+            };
+
+            match connected {
+                Ok((connected, derived_workload)) => {
+                    debug!(
+                        dst=%req.actual_destination,
+                        target=?req.hbone_target_destination,
+                        "connected",
+                    );
+                    return Some((
+                        connected,
+                        derived_workload,
+                        connection_result_builder,
+                        conn_guard,
+                    ));
+                }
+                Err(e) => {
+                    let retry = retries < max_retries
+                        && Self::is_retriable_connection_error(&e)
+                        && backoff < deadline.saturating_duration_since(Instant::now());
+                    if !retry {
+                        connection_result_builder.build().record(Err(e));
+                        return None;
+                    }
+                    connection_result_builder.record_retry(&e);
+                    // Deprioritize the failed next hop (possibly a waypoint or gateway).
+                    if let Some(wl) = &req.actual_destination_workload {
+                        deprioritized.push(wl.uid.clone());
+                    }
+                    retries += 1;
+                    last_attempt = Some(connection_result_builder);
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2).min(max_backoff);
+                }
+            };
+        }
+    }
+
     pub async fn proxy_to(
         &mut self,
         source_stream: TcpStream,
@@ -189,189 +341,195 @@ impl OutboundConnection {
             metrics::log_early_deny(source_addr, dest_addr, Reporter::source, Error::SelfCall);
             return;
         }
-        // First find the source workload of this traffic. If we don't know where the request is from
-        // we will reject it.
-        let build = self
-            .pi
-            .local_workload_information
-            .get_workload()
-            .and_then(|source| self.build_request(source, source_addr.ip(), dest_addr));
-        let req = match Box::pin(build).await {
-            Ok(req) => Box::new(req),
-            Err(err) => {
-                metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
-                return;
-            }
-        };
-        // TODO: should we use the original address or the actual address? Both seems nice!
-        let _conn_guard = self.pi.connection_manager.track_outbound(
-            source_addr,
-            dest_addr,
-            req.actual_destination,
-            req.protocol,
-        );
-
-        let metrics = self.pi.metrics.clone();
-        let hbone_target = req.hbone_target_destination.clone();
-        let connection_result_builder = Box::new(ConnectionResultBuilder::new(
-            source_addr,
-            req.actual_destination,
-            hbone_target,
-            start,
-            Self::conn_metrics_from_request(&req),
-            metrics,
-        ));
-
-        match req.protocol {
-            OutboundProtocol::DOUBLEHBONE => {
-                // We box this since its not a common path and it would make the future really big.
-                Box::pin(self.proxy_to_double_hbone(
-                    source_stream,
-                    source_addr,
-                    &req,
-                    connection_result_builder,
-                ))
-                .await
-            }
-            OutboundProtocol::HBONE => {
-                self.proxy_to_hbone(source_stream, source_addr, &req, connection_result_builder)
-                    .await
-            }
-            OutboundProtocol::TCP => {
-                self.proxy_to_tcp(source_stream, &req, connection_result_builder)
-                    .await
-            }
-        };
+        // Keep the tracking guard alive through the splice.
+        let (connected, derived_workload, mut connection_result_builder, _conn_guard) =
+            match Box::pin(self.connect_with_retries(
+                source_addr,
+                dest_addr,
+                self.pi.cfg.outbound_connect_max_retries,
+                start,
+            ))
+            .await
+            {
+                Some(result) => result,
+                None => return,
+            };
+        if let Some(derived_workload) = derived_workload {
+            *connection_result_builder =
+                connection_result_builder.with_derived_destination(&derived_workload);
+        }
+        let connection_stats = Box::new(connection_result_builder.build());
+        let res = Box::pin(self.splice(source_stream, connected, &connection_stats)).await;
+        connection_stats.record(res);
     }
 
-    async fn proxy_to_double_hbone(
+    async fn connect_hbone_double(
         &mut self,
-        stream: TcpStream,
         remote_addr: SocketAddr,
         req: &Request,
-        mut connection_stats_builder: Box<ConnectionResultBuilder>,
-    ) {
-        // async move block allows use of ? operator
-        let res = (async move {
-            // Create the outer HBONE stream
-            let (upgraded, _) = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-            // The inner tunnel's streams also report the outer tunnel's teardown, which otherwise
-            // only reaches them as an opaque error from the inner TLS stream.
-            let teardown = TeardownCause::nested(upgraded.teardown_cause());
-            // Wrap upgraded to implement tokio's Async{Write,Read}
-            let upgraded = TokioH2Stream::new(upgraded);
+        connect_timeout: Option<Duration>,
+    ) -> Result<(ConnectedUpstream, Option<DerivedWorkload>), Error> {
+        let cert = self
+            .pi
+            .local_workload_information
+            .fetch_certificate()
+            .await?;
+        let deadline = connect_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
+        // Both HBONE legs share the attempt deadline.
+        let (upgraded, _) = Box::pin(self.send_hbone_request(remote_addr, req, deadline)).await?;
+        // The inner tunnel's streams also report the outer tunnel's teardown, which otherwise
+        // only reaches them as an opaque error from the inner TLS stream.
+        let teardown = TeardownCause::nested(upgraded.teardown_cause());
+        // Wrap upgraded to implement tokio's Async{Write,Read}
+        let upgraded = TokioH2Stream::new(upgraded);
 
-            // For the inner one, we do it manually to avoid connection pooling.
-            // Otherwise, we would only ever reach one workload in the remote cluster.
-            // We also need to abort tasks the right way to get graceful terminations.
-            let wl_key = WorkloadKey {
-                src_id: req.source.identity(),
-                dst_id: req.final_sans.clone(),
-                src: remote_addr.ip(),
-                dst: req.actual_destination,
-            };
+        // For the inner one, we do it manually to avoid connection pooling.
+        // Otherwise, we would only ever reach one workload in the remote cluster.
+        // We also need to abort tasks the right way to get graceful terminations.
+        let wl_key = WorkloadKey {
+            src_id: req.source.identity(),
+            dst_id: req.final_sans.clone(),
+            src: remote_addr.ip(),
+            dst: req.actual_destination,
+        };
 
-            // Fetch certs and establish inner TLS connection.
-            let cert = self
-                .pi
-                .local_workload_information
-                .fetch_certificate()
-                .await?;
-            let connector =
-                cert.outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())?;
-            let tls_stream = connector.connect(upgraded).await.inspect_err(|e| {
-                if crate::tls::io_error_is_cert_revoked(e) {
+        let connector =
+            cert.outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())?;
+        let tls_stream = super::with_deadline(
+            deadline,
+            super::HBONEHandshakeStage::InnerTls,
+            connector.connect(upgraded).map_err(|e| {
+                if crate::tls::io_error_is_cert_revoked(&e) {
                     self.pi
                         .metrics
                         .record_crl_rejection(crate::proxy::metrics::Reporter::source);
+                    Error::Teardown(super::h2::Teardown::CertificateRevoked)
+                } else {
+                    e.into()
                 }
-            })?;
-            let (_, ssl) = tls_stream.get_ref();
-            let peer_identity = {
-                let x509_cert = tls::certificate_from_connection(ssl);
-                tls::identity(&x509_cert)
-            };
+            }),
+        )
+        .await?;
+        let (_, ssl) = tls_stream.get_ref();
+        let peer_identity = {
+            let x509_cert = tls::certificate_from_connection(ssl);
+            tls::identity(&x509_cert)
+        };
 
-            // Spawn inner CONNECT tunnel
-            let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
-            // Enforce CRL revocation on this inner tunnel for its lifetime
-            let revocation = self.pi.crl_manager.as_ref().map(|crl_manager| {
-                crl_manager.register(crate::tls::revocation::ConnRegistration::from_conn(
-                    ssl,
-                    peer_identity.clone(),
-                    cert.root_store(),
-                    webpki::KeyUsage::server_auth(),
-                    crate::proxy::metrics::Reporter::source,
-                ))
-            });
-            let mut sender = super::h2::client::spawn_connection(
+        // Spawn inner CONNECT tunnel
+        let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+        // Enforce CRL revocation on this inner tunnel for its lifetime
+        let revocation = self.pi.crl_manager.as_ref().map(|crl_manager| {
+            crl_manager.register(crate::tls::revocation::ConnRegistration::from_conn(
+                ssl,
+                peer_identity.clone(),
+                cert.root_store(),
+                webpki::KeyUsage::server_auth(),
+                crate::proxy::metrics::Reporter::source,
+            ))
+        });
+        let mut sender = super::with_deadline(
+            deadline,
+            super::HBONEHandshakeStage::InnerHttp2,
+            super::h2::client::spawn_connection(
                 self.pi.cfg.clone(),
                 tls_stream,
                 drain_rx,
                 wl_key,
                 revocation,
                 teardown,
-            )
-            .await?;
-            let origin_network = &self.pi.cfg.network;
-            let http_request = self.create_hbone_request(remote_addr, req, Some(origin_network));
-            let (inner_upgraded, baggage) = sender.send_request(http_request).await?;
+            ),
+        )
+        .await?;
+        let origin_network = &self.pi.cfg.network;
+        let http_request = self.create_hbone_request(remote_addr, req, Some(origin_network));
+        let (inner_upgraded, baggage) = super::with_deadline(
+            deadline,
+            super::HBONEHandshakeStage::InnerConnect,
+            sender.send_request(http_request),
+        )
+        .await?;
 
-            // Proxy
-            let derived_workload = baggage.map(|baggage| DerivedWorkload {
-                workload_name: baggage.workload_name,
-                app: baggage.service_name,
-                namespace: baggage.namespace,
-                identity: peer_identity,
-                cluster_id: baggage.cluster_id,
-                region: baggage.region,
-                zone: baggage.zone,
-                revision: baggage.revision,
-            });
-            Result::<_, Error>::Ok((derived_workload, drain_tx, inner_upgraded))
-        })
-        .await;
-
-        match res {
-            Err(e) => {
-                let connection_stats = connection_stats_builder.build();
-                connection_stats.record(Err(e));
-            }
-            Ok((derived_workload, drain_tx, inner_upgraded)) => {
-                if let Some(derived_workload) = derived_workload {
-                    *connection_stats_builder =
-                        connection_stats_builder.with_derived_destination(&derived_workload);
-                }
-
-                let connection_stats = connection_stats_builder.build();
-                let res = copy::copy_bidirectional(
-                    copy::TcpStreamSplitter(stream),
-                    inner_upgraded,
-                    &connection_stats,
-                )
-                .await;
-                let _ = drain_tx.send(true);
-
-                connection_stats.record(res);
-            }
-        }
+        let derived_workload = baggage.map(|baggage| DerivedWorkload {
+            workload_name: baggage.workload_name,
+            app: baggage.service_name,
+            namespace: baggage.namespace,
+            identity: peer_identity,
+            cluster_id: baggage.cluster_id,
+            region: baggage.region,
+            zone: baggage.zone,
+            revision: baggage.revision,
+        });
+        Ok((
+            ConnectedUpstream::Hbone {
+                stream: inner_upgraded,
+                inner_drain: Some(drain_tx),
+            },
+            derived_workload,
+        ))
     }
 
-    async fn proxy_to_hbone(
+    async fn connect_hbone(
         &mut self,
-        stream: TcpStream,
         remote_addr: SocketAddr,
         req: &Request,
-        connection_stats_builder: Box<ConnectionResultBuilder>,
-    ) {
-        let connection_stats = Box::new(connection_stats_builder.build());
-        let res = (async {
-            let (upgraded, _) = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-            copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, &connection_stats)
-                .await
+        connect_timeout: Option<Duration>,
+    ) -> Result<ConnectedUpstream, Error> {
+        let deadline = self.deadline_after_cert_fetch(connect_timeout).await?;
+        let (stream, _) = Box::pin(self.send_hbone_request(remote_addr, req, deadline)).await?;
+        Ok(ConnectedUpstream::Hbone {
+            stream,
+            inner_drain: None,
         })
-        .await;
-        connection_stats.record(res);
+    }
+
+    /// Fetch the certificate before starting the attempt deadline so CSR latency doesn't consume it.
+    async fn deadline_after_cert_fetch(
+        &self,
+        connect_timeout: Option<Duration>,
+    ) -> Result<Option<tokio::time::Instant>, Error> {
+        let Some(timeout) = connect_timeout else {
+            return Ok(None);
+        };
+        self.pi
+            .local_workload_information
+            .fetch_certificate()
+            .await?;
+        Ok(Some(tokio::time::Instant::now() + timeout))
+    }
+
+    /// Retries must finish before splicing: downstream bytes may be consumed here.
+    async fn splice(
+        &self,
+        source: TcpStream,
+        upstream: ConnectedUpstream,
+        connection_stats: &ConnectionResult,
+    ) -> Result<(), Error> {
+        match upstream {
+            ConnectedUpstream::Hbone {
+                stream: upstream,
+                inner_drain,
+            } => {
+                let res = copy::copy_bidirectional(
+                    copy::TcpStreamSplitter(source),
+                    upstream,
+                    connection_stats,
+                )
+                .await;
+                if let Some(inner_drain) = inner_drain {
+                    let _ = inner_drain.send(true);
+                }
+                res
+            }
+            ConnectedUpstream::Tcp(upstream) => {
+                copy::copy_bidirectional(
+                    copy::TcpStreamSplitter(source),
+                    copy::TcpStreamSplitter(upstream),
+                    connection_stats,
+                )
+                .await
+            }
+        }
     }
 
     fn create_hbone_request(
@@ -411,6 +569,7 @@ impl OutboundConnection {
         &mut self,
         remote_addr: SocketAddr,
         req: &Request,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<(H2Stream, Option<Baggage>), Error> {
         // This is the single cluster/single-HBONE codepath (and also the outer tunnel
         // for double HBONE). We don't need the x-istio-origin-network header here because:
@@ -424,37 +583,24 @@ impl OutboundConnection {
             src: remote_addr.ip(),
             dst: req.actual_destination,
         });
-        Box::pin(self.pool.send_request_pooled(&pool_key, request))
+        Box::pin(self.pool.send_request_pooled(&pool_key, request, deadline))
             .instrument(trace_span!("outbound connect"))
             .await
     }
 
-    async fn proxy_to_tcp(
-        &mut self,
-        stream: TcpStream,
+    async fn connect_tcp(
+        &self,
         req: &Request,
-        connection_stats_builder: Box<ConnectionResultBuilder>,
-    ) {
-        let connection_stats = Box::new(connection_stats_builder.build());
-
-        let res = (async {
-            let outbound = super::freebind_connect(
-                None, // No need to spoof source IP on outbound
-                req.actual_destination,
-                self.pi.socket_factory.as_ref(),
-            )
-            .await?;
-
-            // Proxying data between downstream and upstream
-            copy::copy_bidirectional(
-                copy::TcpStreamSplitter(stream),
-                copy::TcpStreamSplitter(outbound),
-                &connection_stats,
-            )
-            .await
-        })
-        .await;
-        connection_stats.record(res);
+        connect_timeout: Option<Duration>,
+    ) -> Result<ConnectedUpstream, Error> {
+        let outbound = super::freebind_connect(
+            None, // No need to spoof source IP on outbound
+            req.actual_destination,
+            self.pi.socket_factory.as_ref(),
+            connect_timeout,
+        )
+        .await?;
+        Ok(ConnectedUpstream::Tcp(outbound))
     }
 
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {
@@ -502,7 +648,7 @@ impl OutboundConnection {
     // NOTE: when connecting through an E/W gateway, regardless of whether there is
     // a waypoint or not, we always use service hostname and the service port. It's
     // somewhat different from how regular HBONE works, so I'm calling it out here.
-    async fn build_request_through_gateway(
+    async fn select_next_hop_through_gateway(
         &self,
         source: Arc<Workload>,
         // next hop on the remote network that we picked as our destination.
@@ -516,12 +662,13 @@ impl OutboundConnection {
         // at the moment, so we should always have a service we could use.
         service: &Service,
         target: SocketAddr,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Result<Request, Error> {
         if let Some(gateway) = &upstream.workload.network_gateway {
             let gateway_upstream = self
                 .pi
                 .state
-                .fetch_network_gateway(gateway, &source, target)
+                .fetch_network_gateway(gateway, &source, target, deprioritized)
                 .await?;
             let hbone_target_destination = Some(HboneAddress::SvcHostname(
                 service.hostname.clone(),
@@ -556,15 +703,29 @@ impl OutboundConnection {
         }
     }
 
-    // build_request computes all information about the request we should send
-    // TODO: Do we want a single lock for source and upstream...?
-    async fn build_request(
+    async fn resolve_target(
         &self,
-        source_workload: Arc<Workload>,
         downstream: IpAddr,
         target: SocketAddr,
+    ) -> Result<ResolvedTarget, Error> {
+        // If we don't know where the request is from we will reject it.
+        let source = self.pi.local_workload_information.get_workload().await?;
+        Ok(ResolvedTarget {
+            source,
+            downstream,
+            target,
+        })
+    }
+
+    async fn select_next_hop(
+        &self,
+        resolved: &ResolvedTarget,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Result<Request, Error> {
         let state = &self.pi.state;
+        let source_workload = resolved.source.clone();
+        let downstream = resolved.downstream;
+        let target = resolved.target;
 
         // If this is to-service traffic check for a service waypoint
         // Capture result of whether this is svc addressed
@@ -580,17 +741,18 @@ impl OutboundConnection {
         {
             // if we have a waypoint for this svc, use it; otherwise route traffic normally
             if let Some(waypoint) = state
-                .fetch_service_waypoint(&target_service, &source_workload, target)
+                .fetch_service_waypoint(&target_service, &source_workload, target, deprioritized)
                 .await?
             {
                 if waypoint.workload.network != source_workload.network {
                     debug!("picked a waypoint on remote network");
                     return self
-                        .build_request_through_gateway(
+                        .select_next_hop_through_gateway(
                             source_workload.clone(),
                             waypoint,
                             &target_service,
                             target,
+                            deprioritized,
                         )
                         .await;
                 }
@@ -627,6 +789,7 @@ impl OutboundConnection {
                 &source_workload,
                 target,
                 ServiceResolutionMode::Standard,
+                deprioritized,
             )
             .await?
         else {
@@ -674,7 +837,13 @@ impl OutboundConnection {
             debug!("picked a workload on remote network");
             let service = service.as_ref().ok_or(Error::NoService(target))?;
             return self
-                .build_request_through_gateway(source_workload.clone(), us, service, target)
+                .select_next_hop_through_gateway(
+                    source_workload.clone(),
+                    us,
+                    service,
+                    target,
+                    deprioritized,
+                )
                 .await;
         }
 
@@ -693,7 +862,7 @@ impl OutboundConnection {
         if !from_waypoint && service.is_none() {
             // For case upstream server has enabled waypoint
             let waypoint = state
-                .fetch_workload_waypoint(&us.workload, &source_workload, target)
+                .fetch_workload_waypoint(&us.workload, &source_workload, target, deprioritized)
                 .await?;
             if let Some(waypoint) = waypoint {
                 let actual_destination =
@@ -771,6 +940,14 @@ fn baggage(r: &Request) -> String {
 }
 
 #[derive(Debug)]
+struct ResolvedTarget {
+    source: Arc<Workload>,
+    downstream: IpAddr,
+    // The original destination address.
+    target: SocketAddr,
+}
+
+#[derive(Debug)]
 struct Request {
     protocol: OutboundProtocol,
     // Source workload sending the request
@@ -809,9 +986,12 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
+    use crate::metrics::sub_registry;
+    use crate::proxy::HBONEHandshakeStage;
     use crate::proxy::connection_manager::ConnectionManager;
     use crate::proxy::{LocalWorkloadInformation, pool::WorkloadHBONEPool};
     use crate::state::WorkloadInfo;
+    use crate::test_helpers::app::ParsedMetrics;
     use crate::test_helpers::helpers::{initialize_telemetry, test_proxy_metrics};
     use crate::test_helpers::new_proxy_state;
     use crate::xds::istio::workload::Workload as XdsWorkload;
@@ -823,17 +1003,19 @@ mod tests {
     };
     use crate::xds::istio::workload::{NetworkMode, Service as XdsService};
     use crate::{identity, xds};
+    use prometheus_client::registry::Registry;
+    use std::collections::HashMap;
 
-    async fn run_build_request(
+    async fn run_select_next_hop(
         from: &str,
         to: &str,
         xds: XdsAddressType,
         expect: Option<ExpectedRequest<'_>>,
     ) {
-        run_build_request_multi(from, to, vec![xds], expect).await;
+        run_select_next_hop_multi(from, to, vec![xds], expect).await;
     }
 
-    async fn run_build_request_multi(
+    async fn run_select_next_hop_multi(
         from: &str,
         to: &str,
         xds: Vec<XdsAddressType>,
@@ -920,14 +1102,12 @@ mod tests {
             hbone_port: cfg.inbound_addr.port(),
         };
 
-        let local = outbound
-            .pi
-            .local_workload_information
-            .get_workload()
+        let resolved = outbound
+            .resolve_target(from.parse().unwrap(), to.parse().unwrap())
             .await
             .unwrap();
         let req = outbound
-            .build_request(local, from.parse().unwrap(), to.parse().unwrap())
+            .select_next_hop(&resolved, &Default::default())
             .await
             .ok();
         if let Some(ref r) = req {
@@ -950,8 +1130,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_unknown_dest() {
-        run_build_request(
+    async fn select_next_hop_unknown_dest() {
+        run_select_next_hop(
             "127.0.0.1",
             "1.2.3.4:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -969,8 +1149,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_wrong_network() {
-        run_build_request_multi(
+    async fn select_next_hop_wrong_network() {
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1011,10 +1191,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_double_hbone() {
+    async fn select_next_hop_double_hbone() {
         // example.com service has a workload on remote network.
         // E/W gateway is addressed by an IP.
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1076,7 +1256,7 @@ mod tests {
         .await;
         // example.com service has a workload on remote network.
         // E/W gateway is addressed by a hostname.
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1161,7 +1341,7 @@ mod tests {
         .await;
         // example.com service has a waypoint and waypoint workload is on remote network.
         // E/W gateway is addressed by an IP.
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1249,7 +1429,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_failover_to_remote() {
+    async fn select_next_hop_failover_to_remote() {
         // Similar to the double HBONE test that we already have, but it sets up a scenario when
         // load balancing logic will pick a workload on a remote cluster when local workloads are
         // unhealthy, thus showing the expected failover behavior.
@@ -1345,7 +1525,7 @@ mod tests {
             ..Default::default()
         });
 
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1362,7 +1542,7 @@ mod tests {
         )
         .await;
 
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1381,8 +1561,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_known_dest_remote_node_tcp() {
-        run_build_request(
+    async fn select_next_hop_known_dest_remote_node_tcp() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.2:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1404,8 +1584,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_known_dest_remote_node_hbone() {
-        run_build_request(
+    async fn select_next_hop_known_dest_remote_node_hbone() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.2:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1427,8 +1607,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_known_dest_local_node_tcp() {
-        run_build_request(
+    async fn select_next_hop_known_dest_local_node_tcp() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.2:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1450,8 +1630,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_known_dest_local_node_hbone() {
-        run_build_request(
+    async fn select_next_hop_known_dest_local_node_hbone() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.2:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1473,8 +1653,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_source_waypoint() {
-        run_build_request(
+    async fn select_next_hop_source_waypoint() {
+        run_select_next_hop(
             "127.0.0.2",
             "127.0.0.1:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1503,8 +1683,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_destination_waypoint() {
-        run_build_request(
+    async fn select_next_hop_destination_waypoint() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.2:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1533,8 +1713,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_destination_waypoint_mismatch_ip() {
-        run_build_request(
+    async fn select_next_hop_destination_waypoint_mismatch_ip() {
+        run_select_next_hop(
             "127.0.0.1",
             "[ff06::c3]:80",
             XdsAddressType::Workload(XdsWorkload {
@@ -1568,8 +1748,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_destination_svc_waypoint() {
-        run_build_request(
+    async fn select_next_hop_destination_svc_waypoint() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.3:80",
             XdsAddressType::Service(XdsService {
@@ -1606,8 +1786,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_empty_service() {
-        run_build_request(
+    async fn select_next_hop_empty_service() {
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.3:80",
             XdsAddressType::Service(XdsService {
@@ -1630,8 +1810,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_target_port() {
-        run_build_request_multi(
+    async fn select_next_hop_target_port() {
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![
@@ -1698,7 +1878,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_host_network() {
+    async fn select_next_hop_host_network() {
         let xds = vec![
             // Normal service
             XdsAddressType::Service(XdsService {
@@ -1741,7 +1921,7 @@ mod tests {
                 ..Default::default()
             }),
         ];
-        let res = run_build_request_multi(
+        let res = run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             xds.clone(),
@@ -1762,7 +1942,7 @@ mod tests {
 
         // Traffic to the node directly. We should forward the request, but as passthrough, rather than
         // associating it with a random pod.
-        let res = run_build_request_multi(
+        let res = run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.2:80",
             xds.clone(),
@@ -1794,7 +1974,7 @@ mod tests {
             ..Default::default()
         });
         // v4 goes go v4
-        run_build_request(
+        run_select_next_hop(
             "127.0.0.1",
             "127.0.0.2:80",
             workload.clone(),
@@ -1806,7 +1986,7 @@ mod tests {
         )
         .await;
         // v6 goes go v6
-        run_build_request(
+        run_select_next_hop(
             "127.0.0.1",
             "[ff06::c3]:80",
             workload.clone(),
@@ -1861,7 +2041,7 @@ mod tests {
             XdsAddressType::Service(s)
         };
         // V6 only should always use V6 IP
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![svc(IpFamilies::Ipv6Only), workload.clone()],
@@ -1873,7 +2053,7 @@ mod tests {
         )
         .await;
         // V4 only should always use V4 IP
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![svc(IpFamilies::Ipv4Only), workload.clone()],
@@ -1885,7 +2065,7 @@ mod tests {
         )
         .await;
         // Dual stack should always prefer the original family (here ipv4)
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "127.0.0.1",
             "127.0.0.3:80",
             vec![svc(IpFamilies::Dual), workload.clone()],
@@ -1897,7 +2077,7 @@ mod tests {
         )
         .await;
         // Dual stack should always prefer the original family (here ipv6)
-        run_build_request_multi(
+        run_select_next_hop_multi(
             "::1",
             "[::3]:80",
             vec![svc(IpFamilies::Dual), workload.clone()],
@@ -1911,8 +2091,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_passthrough_svc() {
-        run_build_request(
+    async fn select_next_hop_passthrough_svc() {
+        run_select_next_hop(
             "127.0.0.1",
             "1.2.3.4:80",
             XdsAddressType::Service(XdsService {
@@ -1951,8 +2131,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_passthrough_svc_with_waypoint() {
-        run_build_request(
+    async fn select_next_hop_passthrough_svc_with_waypoint() {
+        run_select_next_hop(
             "127.0.0.1",
             "1.2.3.4:80",
             XdsAddressType::Service(XdsService {
@@ -2126,6 +2306,604 @@ mod tests {
             "test-network",
             "x-istio-origin-network header should contain the network name for double HBONE inner request"
         );
+    }
+
+    async fn test_outbound_connection(
+        workloads: Vec<XdsWorkload>,
+        services: Vec<XdsService>,
+    ) -> OutboundConnection {
+        test_outbound_connection_with_metrics(workloads, services, test_proxy_metrics()).await
+    }
+
+    async fn test_outbound_connection_with_metrics(
+        workloads: Vec<XdsWorkload>,
+        services: Vec<XdsService>,
+        metrics: Arc<crate::proxy::Metrics>,
+    ) -> OutboundConnection {
+        let cfg = Arc::new(Config {
+            local_node: Some("local-node".to_string()),
+            ..crate::config::parse_config().unwrap()
+        });
+        let source = XdsWorkload {
+            uid: "cluster1//v1/Pod/ns/source-workload".to_string(),
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 1])],
+            node: "local-node".to_string(),
+            ..Default::default()
+        };
+        let mut all_workloads = vec![source];
+        all_workloads.extend(workloads);
+        let state = new_proxy_state(&all_workloads, &services, &[]);
+
+        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory::default());
+        let wi = WorkloadInfo {
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            service_account: "default".to_string(),
+        };
+        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(wi),
+            state.clone(),
+            identity::mock::new_secret_manager(Duration::from_secs(10)),
+        ));
+        OutboundConnection {
+            pi: Arc::new(ProxyInputs {
+                state,
+                cfg: cfg.clone(),
+                metrics,
+                socket_factory: sock_fact.clone(),
+                local_workload_information: local_workload_information.clone(),
+                connection_manager: ConnectionManager::default(),
+                resolver: None,
+                disable_inbound_freebind: false,
+                crl_manager: None,
+            }),
+            id: TraceParent::new(),
+            pool: WorkloadHBONEPool::new(
+                cfg.clone(),
+                sock_fact,
+                local_workload_information,
+                None,
+                test_proxy_metrics(),
+            ),
+            hbone_port: cfg.inbound_addr.port(),
+        }
+    }
+
+    fn example_service() -> XdsService {
+        XdsService {
+            hostname: "example.com".to_string(),
+            addresses: vec![XdsNetworkAddress {
+                network: "".to_string(),
+                address: vec![127, 0, 0, 3],
+                length: None,
+            }],
+            ports: vec![Port {
+                service_port: 80,
+                target_port: 8080,
+                app_protocol: 0,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn dest_workload(last_octet: u8, name: &str) -> XdsWorkload {
+        XdsWorkload {
+            uid: format!("cluster1//v1/Pod/ns/{name}"),
+            name: name.to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, last_octet])],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn outbound_connect_defaults() {
+        let cfg = crate::config::parse_config().unwrap();
+        assert_eq!(cfg.outbound_connect_max_retries, 0);
+        assert_eq!(cfg.outbound_connect_base_backoff, Duration::from_millis(10));
+        assert_eq!(cfg.outbound_connect_max_backoff, Duration::from_millis(500));
+    }
+
+    fn started_ago(spent: Duration) -> Instant {
+        Instant::now() - spent
+    }
+
+    #[test]
+    fn is_retriable_error_classification() {
+        let retriable = OutboundConnection::is_retriable_connection_error;
+        let addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+
+        assert!(!retriable(&Error::NoHealthyUpstream(addr)));
+        assert!(!retriable(&Error::NoValidDestination(Box::new(
+            crate::test_helpers::test_default_workload()
+        ))));
+        assert!(!retriable(&Error::NoService(addr)));
+
+        assert!(retriable(&Error::Io(std::io::Error::from(
+            std::io::ErrorKind::ConnectionRefused
+        ))));
+        assert!(retriable(&Error::Io(std::io::Error::from(
+            std::io::ErrorKind::ConnectionReset
+        ))));
+
+        for stage in [
+            HBONEHandshakeStage::Tls,
+            HBONEHandshakeStage::Http2,
+            HBONEHandshakeStage::Connect,
+            HBONEHandshakeStage::InnerTls,
+            HBONEHandshakeStage::InnerHttp2,
+            HBONEHandshakeStage::InnerConnect,
+            HBONEHandshakeStage::PoolWait,
+        ] {
+            assert!(retriable(&Error::HandshakeTimeout(stage)), "{stage}");
+        }
+        assert!(retriable(&Error::MaybeHBONENetworkPolicyError(
+            std::io::Error::from(std::io::ErrorKind::TimedOut)
+        )));
+
+        assert!(!retriable(&Error::HttpStatus(
+            http::StatusCode::UNAUTHORIZED
+        )));
+        assert!(retriable(&Error::HttpStatus(
+            http::StatusCode::SERVICE_UNAVAILABLE
+        )));
+        assert!(retriable(&Error::HttpStatus(
+            http::StatusCode::INTERNAL_SERVER_ERROR
+        )));
+        assert!(retriable(&Error::HttpStatus(http::StatusCode::BAD_GATEWAY)));
+        assert!(retriable(&Error::HttpStatus(
+            http::StatusCode::GATEWAY_TIMEOUT
+        )));
+        assert!(!retriable(&Error::Teardown(
+            crate::proxy::h2::Teardown::CertificateRevoked
+        )));
+        assert!(!retriable(&Error::WorkloadHBONEPoolDraining));
+
+        assert!(!retriable(&Error::SelfCall));
+        assert!(!retriable(&Error::NoWorkloadEndpoints(
+            "example.com".to_string()
+        )));
+        assert!(!retriable(&Error::NoResolvedAddresses(
+            "example.com".to_string()
+        )));
+        assert!(!retriable(&Error::UnknownWaypoint(
+            "example.com".to_string()
+        )));
+    }
+
+    fn listed_outbound(cm: &ConnectionManager) -> usize {
+        let dump = serde_json::to_value(cm).expect("connection manager serializes");
+        dump["outbound"]
+            .as_array()
+            .expect("dump has an outbound array")
+            .len()
+    }
+
+    #[tokio::test]
+    async fn an_open_connection_stays_listed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        initialize_telemetry();
+        let upstream = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let dest = upstream.local_addr().unwrap();
+        let mut oc =
+            test_outbound_connection(vec![dest_workload(2, "dest-workload")], vec![]).await;
+        let cm = oc.pi.connection_manager.clone();
+
+        let downstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = tokio::net::TcpStream::connect(downstream.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (source_stream, source_addr) = downstream.accept().await.unwrap();
+
+        assert_eq!(listed_outbound(&cm), 0, "nothing is open yet");
+
+        let proxy = tokio::spawn(async move {
+            oc.proxy_to(source_stream, source_addr, dest).await;
+        });
+
+        // Round-trip data to ensure proxy_to has entered the splice before checking the listing.
+        let (mut upstream_side, _) = upstream.accept().await.unwrap();
+        client.write_all(b"x").await.unwrap();
+        let mut buf = [0u8; 1];
+        upstream_side.read_exact(&mut buf).await.unwrap();
+
+        assert_eq!(listed_outbound(&cm), 1, "an open connection must be listed");
+
+        drop(client);
+        drop(upstream_side);
+        tokio::time::timeout(Duration::from_secs(5), proxy)
+            .await
+            .expect("the splice ends once both ends close")
+            .unwrap();
+        assert_eq!(
+            listed_outbound(&cm),
+            0,
+            "a closed connection must be unlisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_2142_retries_hbone_503_before_success() {
+        use futures_util::StreamExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut dest = dest_workload(2, "dest-workload");
+        dest.tunnel_protocol = XdsProtocol::Hbone as i32;
+        initialize_telemetry();
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(sub_registry(&mut registry)));
+        let mut oc = test_outbound_connection_with_metrics(vec![dest], vec![], metrics).await;
+        oc.hbone_port = addr.port();
+        let id = Identity::Spiffe {
+            trust_domain: "cluster.local".into(),
+            namespace: "ns".into(),
+            service_account: "default".into(),
+        };
+        let certs = crate::tls::mock::generate_test_certs(
+            &id.into(),
+            Duration::ZERO,
+            Duration::from_secs(100),
+        );
+        let acceptor = crate::tls::mock::MockServerCertProvider::new(certs);
+        let mut tls_stream = crate::hyper_util::tls_server(acceptor, listener);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        tokio::spawn(async move {
+            while let Some(stream) = tls_stream.next().await {
+                let calls = server_calls.clone();
+                tokio::spawn(crate::hyper_util::http2_server().serve_connection(
+                    hyper_util::rt::TokioIo::new(stream),
+                    hyper::service::service_fn(
+                        move |_req: hyper::Request<hyper::body::Incoming>| {
+                            let n = calls.fetch_add(1, Ordering::SeqCst);
+                            async move {
+                                Ok::<_, std::convert::Infallible>(
+                                    hyper::Response::builder()
+                                        .status(if n == 0 { 503 } else { 200 })
+                                        .body(http_body_util::Empty::<Bytes>::new())
+                                        .unwrap(),
+                                )
+                            }
+                        },
+                    ),
+                ));
+            }
+        });
+        let result = oc
+            .connect_with_retries(
+                "127.0.0.1:1234".parse().unwrap(),
+                "127.0.0.2:8080".parse().unwrap(),
+                2,
+                Instant::now(),
+            )
+            .await;
+        assert!(
+            result.is_some(),
+            "transient HBONE 503 ended the connection after {} CONNECT request(s)",
+            calls.load(Ordering::SeqCst)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let (_connected, _derived, builder, _guard) = result.unwrap();
+        builder.build().record(Ok::<(), Error>(()));
+        let metrics = ParsedMetrics::from_registry(&registry);
+        let total = |name: &str| metrics.query_sum(name, &Default::default());
+        assert_eq!(total("istio_tcp_connections_opened_total"), 1);
+        assert_eq!(total("istio_tcp_connections_closed_total"), 1);
+        assert_eq!(total("istio_tcp_connections_failed_total"), 0);
+        assert_eq!(total("istio_tcp_connection_retries_total"), 1);
+    }
+
+    #[tokio::test]
+    async fn review_2142_records_final_failure_when_endpoint_removed_during_retry() {
+        initialize_telemetry();
+        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut dest = dest_workload(2, "dest-workload");
+        dest.services = HashMap::from([(
+            "/example.com".to_string(),
+            PortList {
+                ports: vec![Port {
+                    service_port: 80,
+                    target_port: port.into(),
+                    app_protocol: 0,
+                }],
+            },
+        )]);
+        let uid = crate::strng::new(&dest.uid);
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(sub_registry(&mut registry)));
+        let mut oc = test_outbound_connection_with_metrics(vec![], vec![], metrics.clone()).await;
+        // Retain the backing state so this test can simulate an xDS removal during backoff.
+        let state = Arc::new(std::sync::RwLock::new(crate::state::ProxyState::new(None)));
+        let updater = crate::xds::ProxyStateUpdateMutator::new_no_fetch();
+        {
+            let mut state = state.write().unwrap();
+            updater.insert_workload(&mut state, dest).unwrap();
+            updater
+                .insert_service(&mut state, example_service())
+                .unwrap();
+        }
+        let pi = Arc::make_mut(&mut oc.pi);
+        pi.state = crate::state::DemandProxyState::new(
+            state.clone(),
+            None,
+            pi.cfg.dns_resolver_cfg.clone(),
+            pi.cfg.dns_resolver_opts.clone(),
+            metrics,
+        );
+        let cfg = Arc::make_mut(&mut pi.cfg);
+        cfg.outbound_connect_base_backoff = Duration::from_millis(500);
+        cfg.outbound_connect_max_backoff = Duration::from_millis(500);
+        let proxy = tokio::spawn(async move {
+            oc.connect_with_retries(
+                "127.0.0.1:1234".parse().unwrap(),
+                "127.0.0.3:80".parse().unwrap(),
+                2,
+                Instant::now(),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let metrics = ParsedMetrics::from_registry(&registry);
+                if metrics.query_sum("istio_tcp_connection_retries_total", &Default::default()) == 1
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("first connect must fail and enter backoff");
+        updater.remove(&mut state.write().unwrap(), &uid);
+        assert!(proxy.await.unwrap().is_none());
+        crate::telemetry::testing::assert_contains(HashMap::from([
+            ("error", "no healthy upstream: 127.0.0.3:80"),
+            ("message", "connection complete"),
+        ]));
+        let metrics = ParsedMetrics::from_registry(&registry);
+        let total = |name: &str| metrics.query_sum(name, &Default::default());
+        assert_eq!(total("istio_tcp_connection_retries_total"), 1);
+        assert_eq!(
+            [
+                total("istio_tcp_connections_opened_total"),
+                total("istio_tcp_connections_closed_total"),
+                total("istio_tcp_connections_failed_total")
+            ],
+            [1, 1, 1],
+            "the failed downstream connection must still have one final result",
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_with_retries_succeeds_without_backoff() {
+        initialize_telemetry();
+        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let dest = listener.local_addr().unwrap();
+
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(sub_registry(&mut registry)));
+        let mut oc = test_outbound_connection_with_metrics(
+            vec![dest_workload(2, "dest-workload")],
+            vec![],
+            metrics,
+        )
+        .await;
+
+        let start = Instant::now();
+        let (connected, derived_workload, _builder, _conn_guard) = oc
+            .connect_with_retries("127.0.0.1:1234".parse().unwrap(), dest, 2, start)
+            .await
+            .expect("connect to a live listener should succeed");
+
+        let ConnectedUpstream::Tcp(stream) = connected else {
+            panic!("expected a TCP upstream");
+        };
+        assert_eq!(stream.peer_addr().unwrap(), dest);
+        assert!(derived_workload.is_none());
+        assert!(
+            start.elapsed() < oc.pi.cfg.outbound_connect_base_backoff,
+            "a first-try success must not sleep"
+        );
+        let metrics = ParsedMetrics::from_registry(&registry);
+        assert_eq!(
+            metrics.query_sum("istio_tcp_connection_retries_total", &Default::default()),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_with_retries_retries_a_refused_connect() {
+        initialize_telemetry();
+        // Bind to grab a free port, then drop the listener so the connect is refused.
+        let dest = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(sub_registry(&mut registry)));
+        let mut oc = test_outbound_connection_with_metrics(
+            vec![dest_workload(2, "dest-workload")],
+            vec![],
+            metrics,
+        )
+        .await;
+
+        let start = Instant::now();
+        let res = oc
+            .connect_with_retries("127.0.0.1:1234".parse().unwrap(), dest, 2, start)
+            .await;
+
+        assert!(
+            res.is_none(),
+            "a refused connect must not yield an upstream"
+        );
+        let base = oc.pi.cfg.outbound_connect_base_backoff;
+        let backoffs = base + (base * 2).min(oc.pi.cfg.outbound_connect_max_backoff);
+        assert!(
+            start.elapsed() >= backoffs,
+            "a refused connect is retriable, so both backoffs must have been paid"
+        );
+
+        let metrics = ParsedMetrics::from_registry(&registry);
+        let total = |name: &str| metrics.query_sum(name, &Default::default());
+        assert_eq!(total("istio_tcp_connections_opened_total"), 1);
+        assert_eq!(total("istio_tcp_connections_closed_total"), 1);
+        assert_eq!(total("istio_tcp_connections_failed_total"), 1);
+        let flags = HashMap::from([("response_flags".to_string(), "CONNECT".to_string())]);
+        assert_eq!(
+            metrics.query_sum("istio_tcp_connection_retries_total", &flags),
+            2
+        );
+        let dest = dest.to_string();
+        crate::telemetry::testing::assert_contains(HashMap::from([
+            ("message", "connection complete"),
+            ("dst.addr", dest.as_str()),
+            ("retries", "2"),
+        ]));
+    }
+
+    #[tokio::test]
+    async fn connect_with_retries_does_not_retry_routing_failures() {
+        initialize_telemetry();
+        let target: SocketAddr = "127.0.0.3:80".parse().unwrap();
+        let mut oc = test_outbound_connection(vec![], vec![example_service()]).await;
+
+        let start = Instant::now();
+        let res = oc
+            .connect_with_retries("127.0.0.1:1234".parse().unwrap(), target, 2, start)
+            .await;
+
+        assert!(res.is_none());
+        assert!(
+            start.elapsed() < oc.pi.cfg.outbound_connect_base_backoff,
+            "a routing failure must not sleep for a retry"
+        );
+        crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
+            ("error", "no healthy upstream: 127.0.0.3:80"),
+            ("message", "connection failed"),
+        ]));
+    }
+
+    #[tokio::test]
+    async fn connect_with_retries_stops_at_the_deadline() {
+        initialize_telemetry();
+        let dest = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        let mut oc =
+            test_outbound_connection(vec![dest_workload(2, "dest-workload")], vec![]).await;
+
+        let start = started_ago(crate::proxy::CONNECTION_TIMEOUT);
+        let before = Instant::now();
+        let res = oc
+            .connect_with_retries("127.0.0.1:1234".parse().unwrap(), dest, 1000, start)
+            .await;
+
+        assert!(res.is_none());
+        assert!(
+            before.elapsed() < oc.pi.cfg.outbound_connect_base_backoff,
+            "a connect past its deadline must not sleep for a retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_with_retries_retries_until_the_deadline() {
+        initialize_telemetry();
+        let dest = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        let mut oc =
+            test_outbound_connection(vec![dest_workload(2, "dest-workload")], vec![]).await;
+
+        let left = Duration::from_millis(200);
+        let start = started_ago(crate::proxy::CONNECTION_TIMEOUT - left);
+        let before = Instant::now();
+        let res = oc
+            .connect_with_retries("127.0.0.1:1234".parse().unwrap(), dest, 1000, start)
+            .await;
+
+        assert!(res.is_none());
+        let elapsed = before.elapsed();
+        assert!(
+            elapsed >= oc.pi.cfg.outbound_connect_base_backoff,
+            "a refused connect with time left must be retried"
+        );
+        assert!(
+            elapsed < left + OutboundConnection::MIN_CONNECT_BUDGET,
+            "retries must stop at the deadline, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn select_next_hop_skips_deprioritized_endpoint() {
+        initialize_telemetry();
+        let svc_addr: SocketAddr = "127.0.0.3:80".parse().unwrap();
+        let backend = |name: &str, last_octet: u8| XdsWorkload {
+            uid: format!("cluster1//v1/Pod/ns/{name}"),
+            name: name.to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, last_octet])],
+            services: std::collections::HashMap::from([(
+                "/example.com".to_string(),
+                PortList {
+                    ports: vec![Port {
+                        service_port: 80,
+                        target_port: 8080,
+                        app_protocol: 0,
+                    }],
+                },
+            )]),
+            ..Default::default()
+        };
+        let (backend_a, backend_b) = (backend("backend-a", 10), backend("backend-b", 11));
+        let addr_a: SocketAddr = "127.0.0.10:8080".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.11:8080".parse().unwrap();
+
+        let oc = test_outbound_connection(
+            vec![backend_a.clone(), backend_b.clone()],
+            vec![example_service()],
+        )
+        .await;
+        let resolved = oc
+            .resolve_target("127.0.0.1".parse().unwrap(), svc_addr)
+            .await
+            .unwrap();
+
+        let build = async |deprioritized: &DeprioritizedEndpoints| {
+            oc.select_next_hop(&resolved, deprioritized)
+                .await
+                .expect("service has healthy endpoints")
+                .actual_destination
+        };
+
+        // Sample randomized selection before applying endpoint deprioritization.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            seen.insert(build(&Default::default()).await);
+        }
+        assert_eq!(
+            seen,
+            std::collections::HashSet::from_iter([addr_a, addr_b]),
+            "both endpoints must be reachable without a deprioritized list"
+        );
+
+        let mut deprioritized = DeprioritizedEndpoints::default();
+        deprioritized.push(backend_a.uid.as_str().into());
+        for _ in 0..50 {
+            assert_eq!(
+                build(&deprioritized).await,
+                addr_b,
+                "a deprioritized endpoint must not be re-selected while another remains"
+            );
+        }
     }
 
     #[derive(PartialEq, Debug)]
