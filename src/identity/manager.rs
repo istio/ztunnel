@@ -26,6 +26,8 @@ use crate::config::ProxyMode;
 use async_trait::async_trait;
 
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
+use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::gauge::Gauge;
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{Duration, Instant, sleep_until};
 
@@ -233,6 +235,56 @@ struct CertChannel {
     // While this makes the code simpler, do note that it makes it impossible to use sender closure
     // as an indication of the background task failing.
     tx: watch::Sender<CertState>,
+
+    // RAII guard for the cert_expiry_timestamp_seconds metric series.
+    // `None` until the first certificate is fetched from the CA.
+    expiry_metric: Option<MetricGuard>,
+}
+
+impl CertChannel {
+    /// Update the expiry metric for this channel's certificate, creating the guard on first call.
+    fn set_expiry(
+        &mut self,
+        expiry: i64,
+        family: &Family<CertExpiryLabels, Gauge>,
+        key: &CacheKey,
+    ) {
+        match &self.expiry_metric {
+            Some(guard) => guard.set(expiry),
+            None => {
+                let guard = MetricGuard::new(family, CertExpiryLabels::from_cache_key(key));
+                guard.set(expiry);
+                self.expiry_metric = Some(guard);
+            }
+        }
+    }
+}
+
+/// Removes the cert_expiry_timestamp_seconds series from the metric registry on drop.
+/// Ties the metric lifetime to the [`CertChannel`] that owns it: when the channel is
+/// removed from the cache (via `forget_key`), the metric is automatically cleaned up.
+struct MetricGuard {
+    family: Family<CertExpiryLabels, Gauge>,
+    labels: CertExpiryLabels,
+}
+
+impl MetricGuard {
+    fn new(family: &Family<CertExpiryLabels, Gauge>, labels: CertExpiryLabels) -> Self {
+        Self {
+            family: family.clone(),
+            labels,
+        }
+    }
+
+    fn set(&self, value: i64) {
+        self.family.get_or_create(&self.labels).set(value);
+    }
+}
+
+impl Drop for MetricGuard {
+    fn drop(&mut self) {
+        self.family.remove(&self.labels);
+    }
 }
 
 #[derive(Eq, PartialEq)]
@@ -376,10 +428,6 @@ impl Worker {
                             // managing the key. Do nothing.
                             continue 'main;
                         }
-                        // Remove metric to avoid accumulating series from deleted pods
-                        self.metrics
-                            .cert_expiry_timestamp_seconds
-                            .remove(&CertExpiryLabels::from_cache_key(&key));
 
                         match processing.get(&key) {
                             None => {
@@ -484,19 +532,6 @@ impl Worker {
                                 Instant::now()
                             };
 
-                            let expiry_secs = certs
-                            .cert
-                            .expiration()
-                            .not_after
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64;
-
-                            self.metrics
-                            .cert_expiry_timestamp_seconds
-                            .get_or_create(&CertExpiryLabels::from_cache_key(&key))
-                            .set(expiry_secs);
-
                             (CertState::Available(Arc::new(certs)), refresh_at)
                         },
                     };
@@ -525,8 +560,18 @@ impl Worker {
         // (by returning false): either (a) there was no entry in the `certs` map due to a
         // forget_certificate call some time ago or (b) a forget_certificate call was made and
         // finished just after the lock was released (but before certs was sent)
-        match self.certs.lock().await.get(key) {
+        match self.certs.lock().await.get_mut(key) {
             Some(state) => {
+                if let CertState::Available(ref cert) = certs {
+                    let expiry = cert
+                        .cert
+                        .expiration()
+                        .not_after
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    state.set_expiry(expiry, &self.metrics.cert_expiry_timestamp_seconds, key);
+                }
                 state.tx.send(certs).expect("state.rx cannot be gone");
                 true
             }
@@ -705,7 +750,14 @@ impl SecretManager {
             // New key, start managing it and return the newly created channel.
             None => {
                 let (tx, rx) = watch::channel(CertState::Initializing(pri));
-                certs.insert(key.clone(), CertChannel { rx: rx.clone(), tx });
+                certs.insert(
+                    key.clone(),
+                    CertChannel {
+                        rx: rx.clone(),
+                        tx,
+                        expiry_metric: None,
+                    },
+                );
                 drop(certs);
                 // Notify the background worker to start refreshing the certificate.
                 self.post(Request::Fetch(key, pri)).await;
