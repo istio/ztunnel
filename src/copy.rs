@@ -304,11 +304,9 @@ where
     Ok(())
 }
 
-// Copies one direction of a copy (`is_send` is for the upstream to downstream one, which counts as
-// received) and then shuts down its writer. `other_done` and `done` are whether the other direction and
-// this one are done. A connection aborted error means a
-// transport failed out from under the copy (e.g. an HBONE ping timeout), and a connection reset
-// means a peer aborted its connection. Rather than closing gracefully, which the other peer would
+// Copies one direction of a copy and then shuts down its writer. `other_done` and `done` are whether the other direction and
+// this one are done. A connection aborted error means a transport failed out from under the copy (e.g. an HBONE ping timeout),
+// and a connection reset means a peer aborted its connection. Rather than closing gracefully, which the other peer would
 // take as a clean end of stream, the other direction is stopped and both sides are reset. So the
 // direction completes with `Ok` and its own result, or, when it aborts, with `Err` and the result
 // of the whole copy.
@@ -316,7 +314,7 @@ async fn copy_direction<R, W>(
     reader: &mut R,
     writer: &mut W,
     stats: &ConnectionResult,
-    is_send: bool,
+    upstream_to_downstream: bool,
     other_done: &AtomicBool,
     done: &AtomicBool,
     translate_error: impl Fn(io::Error) -> proxy::Error + Copy,
@@ -325,8 +323,12 @@ where
     R: ResizeBufRead + Unpin,
     W: AsyncWriteBuf + Unpin,
 {
-    let name = if is_send { "receive" } else { "send" };
-    let res = copy_buf(reader, writer, stats, is_send, other_done).await;
+    let name = if upstream_to_downstream {
+        "receive"
+    } else {
+        "send"
+    };
+    let res = copy_buf(reader, writer, stats, upstream_to_downstream, other_done).await;
     done.store(true, Ordering::Relaxed);
     // Let the other direction know, it may be waiting on its reader
     tokio::task::yield_now().await;
