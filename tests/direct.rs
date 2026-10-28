@@ -29,6 +29,7 @@ use tokio::time::timeout;
 
 use ztunnel::config;
 use ztunnel::identity::mock::new_secret_manager;
+use ztunnel::signal::Shutdown;
 use ztunnel::test_helpers::app::{self as testapp, ParsedMetrics};
 use ztunnel::test_helpers::app::{DestinationAddr, TestApp};
 use ztunnel::test_helpers::assert_eventually;
@@ -40,7 +41,9 @@ use ztunnel::test_helpers::*;
 async fn test_shutdown_lifecycle() {
     helpers::initialize_telemetry();
 
-    let app = ztunnel::app::build(Arc::new(test_config())).await.unwrap();
+    let app = ztunnel::app::build(Arc::new(test_config()), Shutdown::new())
+        .await
+        .unwrap();
 
     let shutdown = app.shutdown.trigger().clone();
     let (app, _shutdown) = tokio::join!(
@@ -59,7 +62,11 @@ async fn test_bind_conflict<F: FnOnce(&mut ztunnel::config::Config) -> &mut Sock
     let sa = f(&mut cfg);
     *sa = l.local_addr().unwrap();
 
-    assert!(ztunnel::app::build(Arc::new(cfg)).await.is_err());
+    assert!(
+        ztunnel::app::build(Arc::new(cfg), Shutdown::new())
+            .await
+            .is_err()
+    );
 }
 
 // Check that port conflicts on any address results in the app failing instead of silently failing
@@ -74,7 +81,11 @@ async fn test_bind_conflict_address<
     let sa = f(&mut cfg);
     *sa = config::Address::SocketAddr(l.local_addr().unwrap());
 
-    assert!(ztunnel::app::build(Arc::new(cfg)).await.is_err());
+    assert!(
+        ztunnel::app::build(Arc::new(cfg), Shutdown::new())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -102,9 +113,13 @@ async fn test_shutdown_drain() {
     helpers::initialize_telemetry();
 
     let cert_manager = new_secret_manager(Duration::from_secs(10));
-    let app = ztunnel::app::build_with_cert(Arc::new(test_config()), cert_manager.clone())
-        .await
-        .unwrap();
+    let app = ztunnel::app::build_with_cert(
+        Arc::new(test_config()),
+        cert_manager.clone(),
+        Shutdown::new(),
+    )
+    .await
+    .unwrap();
     let ta = TestApp::from((&app, cert_manager));
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
@@ -148,7 +163,7 @@ async fn test_shutdown_forced_drain() {
     let cfg = test_config();
 
     let cert_manager = new_secret_manager(Duration::from_secs(10));
-    let app = ztunnel::app::build_with_cert(Arc::new(cfg), cert_manager.clone())
+    let app = ztunnel::app::build_with_cert(Arc::new(cfg), cert_manager.clone(), Shutdown::new())
         .await
         .unwrap();
     let ta = TestApp::from((&app, cert_manager));
@@ -187,7 +202,9 @@ async fn test_shutdown_forced_drain() {
 async fn test_quit_lifecycle() {
     helpers::initialize_telemetry();
 
-    let app = ztunnel::app::build(Arc::new(test_config())).await.unwrap();
+    let app = ztunnel::app::build(Arc::new(test_config()), Shutdown::new())
+        .await
+        .unwrap();
     let addr = app.admin_address;
 
     let (app, _shutdown) = tokio::join!(

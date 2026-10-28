@@ -38,7 +38,7 @@ use tracing::info;
 
 use crate::app::Bound;
 use crate::identity::SecretManager;
-use crate::signal::ShutdownTrigger;
+use crate::signal::{Shutdown, ShutdownTrigger};
 use crate::test_helpers::localhost_error_message;
 use crate::*;
 
@@ -88,7 +88,7 @@ where
         "running with config: {}",
         serde_yaml::to_string(&cfg).unwrap()
     );
-    let app = app::build_with_cert(Arc::new(cfg), cert_manager.clone())
+    let app = app::build_with_cert(Arc::new(cfg), cert_manager.clone(), Shutdown::new())
         .await
         .unwrap();
     let shutdown = app.shutdown.trigger().clone();

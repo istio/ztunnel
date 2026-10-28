@@ -99,8 +99,5 @@ async fn proxy(cfg: Arc<config::Config>, shutdown: signal::Shutdown) -> anyhow::
     info!("version: {}", version::BuildInfo::new());
     increase_open_files_limit();
     info!("running with config: {}", serde_yaml::to_string(&cfg)?);
-    app::build_with_shutdown(cfg, shutdown)
-        .await?
-        .wait_termination()
-        .await
+    app::build(cfg, shutdown).await?.wait_termination().await
 }

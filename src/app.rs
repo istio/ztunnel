@@ -35,13 +35,6 @@ use crate::{dns, xds};
 pub async fn build_with_cert(
     config: Arc<config::Config>,
     cert_manager: Arc<SecretManager>,
-) -> anyhow::Result<Bound> {
-    build_with_cert_and_shutdown(config, cert_manager, signal::Shutdown::new()).await
-}
-
-async fn build_with_cert_and_shutdown(
-    config: Arc<config::Config>,
-    cert_manager: Arc<SecretManager>,
     shutdown: signal::Shutdown,
 ) -> anyhow::Result<Bound> {
     // Start the data plane worker pool.
@@ -324,12 +317,8 @@ fn new_data_plane_pool(
     (tx, handle)
 }
 
-pub async fn build(config: Arc<config::Config>) -> anyhow::Result<Bound> {
-    build_with_shutdown(config, signal::Shutdown::new()).await
-}
-
-/// Like build, but with a caller-created Shutdown so signal handlers are registered early.
-pub async fn build_with_shutdown(
+/// shutdown should be created as early as possible so signals during startup are not lost.
+pub async fn build(
     config: Arc<config::Config>,
     shutdown: signal::Shutdown,
 ) -> anyhow::Result<Bound> {
@@ -338,7 +327,7 @@ pub async fn build_with_shutdown(
     } else {
         Arc::new(SecretManager::new(config.clone()).await?)
     };
-    build_with_cert_and_shutdown(config, cert_manager, shutdown).await
+    build_with_cert(config, cert_manager, shutdown).await
 }
 
 #[cfg(feature = "testing")]
