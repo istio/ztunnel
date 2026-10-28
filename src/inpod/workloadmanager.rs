@@ -382,8 +382,6 @@ pub(crate) mod tests {
 
     use super::super::protocol::WorkloadStreamProcessor;
 
-    use tokio::io::AsyncWriteExt;
-
     use super::*;
 
     use crate::inpod::test_helpers::{
@@ -476,14 +474,12 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_process_failed_announce() {
         let f = fixture!();
-        let (s1, mut s2) = UnixStream::pair().unwrap();
+        let (s1, s2) = UnixStream::pair().unwrap();
         let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
         let mut state = f.state;
 
-        // fake server that simply slams the socket shut and bails
-        let server = tokio::spawn(async move {
-            let _ = s2.shutdown().await;
-        });
+        // close the peer before process() so the hello write fails
+        drop(s2);
 
         let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new(), None);
         let mut processor_helper = WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
@@ -493,7 +489,6 @@ pub(crate) mod tests {
         assert_announce_error(res);
         assert!(!readiness.ready.pending().is_empty());
         state.drain().await;
-        server.await.unwrap();
     }
 
     #[tokio::test]
