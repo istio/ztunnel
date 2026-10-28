@@ -4,7 +4,7 @@
 
 Ztunnel runs two distinct async runtimes:
 * The "main" thread, runs a single threaded Tokio runtime for admin purposes, such as debug interfaces and XDS. This is isolated to avoid impacting the data plane.
-* The "worker" thread(s) run a multi-thread Tokio runtime to handle users requests. This defaults to 2 threads, but is configurable.
+* The "worker" thread(s) run a multi-thread Tokio runtime to handle users requests. By default, the thread count follows `ZTUNNEL_RESOURCE_CPU_LIMIT` when set (raised to `ZTUNNEL_RESOURCE_CPU_REQUEST` if that is higher); otherwise it is 25% of the available cores (rounded up), but never fewer than `ZTUNNEL_RESOURCE_CPU_REQUEST` or 2. It can be overridden with `ZTUNNEL_WORKER_THREADS` (a fixed number or a percentage of cores).
 
 ## Ports
 
@@ -23,9 +23,9 @@ Ztunnel runs with the following ports:
 
 The three admin ports (Readiness, Admin, and Metrics) are intentionally split.
 
-* The readiness port ought to run on the "main" thread to ensure we are actually checking the path the data plan handles
+* The readiness port ought to run on the "worker" thread(s) to ensure we are actually checking the path the data plane handles
 * The admin port must be only on localhost, and it should be on the admin thread for isolation
-* The metrics port should be on the admin thread to avoid isolation.
+* The metrics port should be on the admin thread for isolation.
   This *could* be on the readiness port, but historically we had found that the stats query can be very expensive and lead to tail latencies in the data plane.
 
 **NOTE** Networking policy must allow inbound and outbound traffic on port 15008 for all application pods, for the ambient mesh to function.
