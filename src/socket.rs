@@ -35,7 +35,7 @@ pub fn set_freebind_and_transparent(socket: &TcpSocket) -> io::Result<()> {
             socket.set_freebind_v4(true)?;
         }
         Domain::IPV6 => {
-            linux::set_ipv6_transparent(&socket)?;
+            socket.set_ip_transparent_v6(true)?;
             socket.set_freebind_v6(true)?
         }
         _ => return Err(Error::new(ErrorKind::Unsupported, "unsupported domain")),
@@ -110,29 +110,9 @@ pub fn set_mark(_socket: &TcpSocket, _mark: u32) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
 mod linux {
-    use std::os::unix::io::AsRawFd;
-
     use socket2::{SockAddr, SockRef};
     use tokio::io;
-
-    pub fn set_ipv6_transparent(sock: &SockRef) -> io::Result<()> {
-        unsafe {
-            let optval: libc::c_int = 1;
-            let ret = libc::setsockopt(
-                sock.as_raw_fd(),
-                libc::IPPROTO_IPV6,
-                libc::IPV6_TRANSPARENT,
-                &optval as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&optval) as libc::socklen_t,
-            );
-            if ret != 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-        Ok(())
-    }
 
     pub fn original_dst(sock: &SockRef) -> io::Result<SockAddr> {
         sock.original_dst_v4()
