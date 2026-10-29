@@ -321,18 +321,31 @@ async fn dns_lookup(
     // TODO: do we need to do the search?
     let name = Name::from_utf8(hostname)?;
 
+    // Note: `client_addr` is the address of the SOCKS5 client's TCP connection to us (typically
+    // 127.0.0.1, since the listener is IPv4-only), which has no relation to the address family of
+    // the hostname we are resolving. So we cannot use it to decide which record type to query;
+    // instead, try A first and fall back to AAAA if there are no IPv4 addresses.
     // TODO: we probably want to race them or something. Is there something higher level that can handle this for us?
-    let req = if client_addr.is_ipv4() {
-        a_request(name, client_addr, Protocol::Udp)
-    } else {
-        aaaa_request(name, client_addr, Protocol::Udp)
-    };
-    let response = resolver.lookup(&req).await?;
-    let addrs = response
+    let a_response = resolver
+        .lookup(&a_request(name.clone(), client_addr, Protocol::Udp))
+        .await?;
+    let addrs = match a_response
         .answers()
         .filter_map(|rec| rec.data.ip_addr())
         .next() // TODO: do not always use the first result
-        .ok_or_else(|| Error::DnsEmpty)?;
+    {
+        Some(addr) => addr,
+        None => {
+            let aaaa_response = resolver
+                .lookup(&aaaa_request(name, client_addr, Protocol::Udp))
+                .await?;
+            aaaa_response
+                .answers()
+                .filter_map(|rec| rec.data.ip_addr())
+                .next() // TODO: do not always use the first result
+                .ok_or_else(|| Error::DnsEmpty)?
+        }
+    };
 
     Ok(addrs)
 }
@@ -420,5 +433,47 @@ impl SocksError {
 impl From<std::io::Error> for SocksError {
     fn from(value: std::io::Error) -> Self {
         SocksError::General(Error::Io(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dns::resolver::Response;
+    use crate::test_helpers::dns::aaaa;
+    use hickory_server::zone_handler::LookupError;
+    use std::net::Ipv6Addr;
+
+    /// A resolver that only ever has AAAA records, standing in for a real DNS server hosting an
+    /// IPv6-only hostname.
+    struct Ipv6OnlyResolver;
+
+    #[async_trait::async_trait]
+    impl Resolver for Ipv6OnlyResolver {
+        async fn lookup(&self, request: &Request) -> Result<Response, LookupError> {
+            let query = request.request_info()?.query;
+            let answers = if query.query_type() == RecordType::AAAA {
+                vec![aaaa(query.name().into(), Ipv6Addr::LOCALHOST)]
+            } else {
+                vec![]
+            };
+            Ok(Response::new(answers, vec![], false))
+        }
+    }
+
+    #[tokio::test]
+    async fn dns_lookup_falls_back_to_aaaa_for_ipv6_only_host() {
+        // The SOCKS5 listener is IPv4-only (see config::socks5_addr), so the peer address of a
+        // SOCKS5 client's TCP connection to us is always IPv4. That must not prevent us from
+        // resolving hostnames that only have AAAA records.
+        let client_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        assert!(client_addr.is_ipv4());
+        let resolver: Arc<dyn Resolver + Send + Sync> = Arc::new(Ipv6OnlyResolver);
+
+        let ip = dns_lookup(resolver, client_addr, "ipv6-only.example.com.")
+            .await
+            .expect("should resolve via AAAA fallback");
+
+        assert_eq!(ip, IpAddr::V6(Ipv6Addr::LOCALHOST));
     }
 }
