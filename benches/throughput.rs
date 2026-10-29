@@ -36,6 +36,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
+use ztunnel::signal::Shutdown;
 use ztunnel::state::workload::{InboundProtocol, Workload};
 use ztunnel::state::{DemandProxyState, ProxyRbacContext, ProxyState};
 use ztunnel::test_helpers::app::{DestinationAddr, TestApp};
@@ -518,7 +519,7 @@ fn hbone_connections(c: &mut Criterion) {
             None,
             config_source,
         );
-        let app = app::build_with_cert(Arc::new(config), cert_manager.clone())
+        let app = app::build_with_cert(Arc::new(config), cert_manager.clone(), Shutdown::new())
             .await
             .unwrap();
         let ta = TestApp::from((&app, cert_manager));

@@ -22,14 +22,17 @@ use tokio::sync::mpsc;
 pub struct Shutdown {
     shutdown_tx: mpsc::Sender<()>,
     shutdown_rx: mpsc::Receiver<()>,
+    signals: imp::Signals,
 }
 
 impl Shutdown {
+    /// Registers signal handlers immediately so signals before `wait` are not lost.
     pub fn new() -> Self {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
         Shutdown {
             shutdown_tx,
             shutdown_rx,
+            signals: imp::Signals::new(),
         }
     }
 
@@ -42,7 +45,7 @@ impl Shutdown {
 
     /// Wait completes when the shutdown as been triggered
     pub async fn wait(mut self) {
-        imp::shutdown(&mut self.shutdown_rx).await
+        imp::shutdown(self.signals, &mut self.shutdown_rx).await
     }
 }
 
@@ -66,51 +69,70 @@ impl ShutdownTrigger {
 #[cfg(unix)]
 mod imp {
     use std::process;
-    use tokio::signal::unix::{SignalKind, signal};
+    use tokio::signal::unix::{Signal, SignalKind, signal};
     use tokio::sync::mpsc::Receiver;
     use tracing::info;
 
-    pub(super) async fn shutdown(receiver: &mut Receiver<()>) {
+    pub(super) struct Signals {
+        sigint: Signal,
+        sigterm: Signal,
+    }
+
+    impl Signals {
+        pub(super) fn new() -> Self {
+            Signals {
+                sigint: signal(SignalKind::interrupt()).expect("Failed to register signal handler"),
+                sigterm: signal(SignalKind::terminate())
+                    .expect("Failed to register signal handler"),
+            }
+        }
+    }
+
+    pub(super) async fn shutdown(signals: Signals, receiver: &mut Receiver<()>) {
+        let Signals {
+            mut sigint,
+            mut sigterm,
+        } = signals;
         tokio::select! {
-            _ = watch_signal(SignalKind::interrupt(), "SIGINT") => {
+            _ = sigint.recv() => {
+                info!("received signal SIGINT, starting shutdown");
                 tokio::spawn(async move{
-                    watch_signal(SignalKind::interrupt(), "SIGINT").await;
+                    sigint.recv().await;
                     info!("Double Ctrl+C, exit immediately");
                     process::exit(0);
                 });
             }
-            _ = watch_signal(SignalKind::terminate(), "SIGTERM") => {}
+            _ = sigterm.recv() => {
+                info!("received signal SIGTERM, starting shutdown");
+            }
             _ = receiver.recv() => { info!("received explicit shutdown signal")}
         };
-    }
-
-    async fn watch_signal(kind: SignalKind, name: &'static str) {
-        signal(kind)
-            .expect("Failed to register signal handler")
-            .recv()
-            .await;
-        info!("received signal {}, starting shutdown", name);
     }
 }
 
 #[cfg(not(unix))]
 mod imp {
+    use tokio::signal::windows::{CtrlC, ctrl_c};
     use tokio::sync::mpsc::Receiver;
     use tracing::info;
 
-    pub(super) async fn shutdown(receiver: &mut Receiver<()>) {
-        tokio::select! {
-            _ = watch_signal() => {}
-            _ = receiver.recv() => { info!("received explicit shutdown signal")}
-        };
+    pub(super) struct Signals {
+        ctrl_c: CtrlC,
+    }
+
+    impl Signals {
+        pub(super) fn new() -> Self {
+            Signals {
+                ctrl_c: ctrl_c().expect("Failed to register signal handler"),
+            }
+        }
     }
 
     // This isn't quite right, but close enough for windows...
-    async fn watch_signal() {
-        tokio::signal::windows::ctrl_c()
-            .expect("Failed to register signal handler")
-            .recv()
-            .await;
-        info!("received signal, starting shutdown");
+    pub(super) async fn shutdown(mut signals: Signals, receiver: &mut Receiver<()>) {
+        tokio::select! {
+            _ = signals.ctrl_c.recv() => { info!("received signal, starting shutdown") }
+            _ = receiver.recv() => { info!("received explicit shutdown signal")}
+        };
     }
 }

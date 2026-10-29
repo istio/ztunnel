@@ -24,7 +24,7 @@ use crate::xds::{LocalConfig, LocalWorkload};
 use crate::{config, identity, proxy, strng};
 
 use crate::inpod::istio::zds::WorkloadInfo;
-use crate::signal::ShutdownTrigger;
+use crate::signal::{Shutdown, ShutdownTrigger};
 use crate::test_helpers::inpod::start_ztunnel_server;
 use crate::test_helpers::linux::TestMode::{Dedicated, Shared};
 use arcstr::ArcStr;
@@ -253,7 +253,12 @@ impl WorkloadManager {
                     helpers::run_command("scripts/ztunnel-redirect.sh")?;
                 }
                 let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
-                let app = crate::app::build_with_cert(Arc::new(cfg), cert_manager.clone()).await?;
+                let app = crate::app::build_with_cert(
+                    Arc::new(cfg),
+                    cert_manager.clone(),
+                    Shutdown::new(),
+                )
+                .await?;
                 let shutdown = app.shutdown.trigger();
 
                 // inpod mode doesn't have ore need these, so just put bogus values.
