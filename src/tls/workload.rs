@@ -80,10 +80,19 @@ impl TrustDomainVerifier {
             "verifying client identities {ids:?} against trust domain {:?}",
             want_trust_domain
         );
-        // Only the first identity is used for authorization (see tls::identity), so that is the
-        // one that must be in our trust domain.
-        ids.first()
-            .filter(|id| match id {
+        // An X509-SVID carries exactly one SPIFFE ID (x509-svid spec, section 2). Reject a
+        // certificate with several outright: authorization only ever sees one of them
+        // (tls::identity), so verifying "any" of them would check a different identity than the
+        // one the connection is authorized as.
+        if ids.len() > 1 {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::Other(rustls::OtherError(Arc::new(
+                    TlsError::SanMultipleIdentitiesError(ids),
+                ))),
+            ));
+        }
+        ids.iter()
+            .find(|id| match id {
                 Identity::Spiffe { trust_domain, .. } => trust_domain == want_trust_domain,
             })
             .ok_or_else(|| {
@@ -381,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_domain_checked_on_first_identity() {
+    fn rejects_multiple_identities() {
         let v = verifier("cluster.local");
         let ok = cert_with_sans(&["spiffe://cluster.local/ns/a/sa/b"]);
         assert!(v.verify_trust_domain(&ok).is_ok());
@@ -389,12 +398,22 @@ mod tests {
         let foreign = cert_with_sans(&["spiffe://other.local/ns/a/sa/b"]);
         assert!(v.verify_trust_domain(&foreign).is_err());
 
-        // The first SAN is the identity used for authorization, so a matching SAN later in the
-        // list must not let a foreign first identity through.
+        // A certificate with more than one SPIFFE ID is not a valid X509-SVID and is rejected
+        // regardless of order, even when one of the IDs is in our trust domain.
         let mixed = cert_with_sans(&[
             "spiffe://other.local/ns/prod/sa/admin",
             "spiffe://cluster.local/ns/a/sa/b",
         ]);
         assert!(v.verify_trust_domain(&mixed).is_err());
+        let mixed = cert_with_sans(&[
+            "spiffe://cluster.local/ns/a/sa/b",
+            "spiffe://other.local/ns/prod/sa/admin",
+        ]);
+        assert!(v.verify_trust_domain(&mixed).is_err());
+        let two_local = cert_with_sans(&[
+            "spiffe://cluster.local/ns/a/sa/b",
+            "spiffe://cluster.local/ns/c/sa/d",
+        ]);
+        assert!(v.verify_trust_domain(&two_local).is_err());
     }
 }
