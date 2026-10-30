@@ -207,10 +207,10 @@ pub enum TlsError {
     )]
     SanTrustDomainError(String, Vec<Identity>),
     #[error(
-        "identity verification error: peer presented multiple identities ({}), expected exactly one",
+        "identity verification error: peer presented multiple URI SANs ({}), expected exactly one",
         display_list(.0)
     )]
-    SanMultipleIdentitiesError(Vec<Identity>),
+    SanMultipleIdentitiesError(Vec<String>),
     #[error("ssl error: {0}")]
     SslError(#[from] Error),
 }

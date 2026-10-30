@@ -80,14 +80,33 @@ impl TrustDomainVerifier {
             "verifying client identities {ids:?} against trust domain {:?}",
             want_trust_domain
         );
-        // An X509-SVID carries exactly one SPIFFE ID (x509-svid spec, section 2). Reject a
-        // certificate with several outright: authorization only ever sees one of them
-        // (tls::identity), so verifying "any" of them would check a different identity than the
-        // one the connection is authorized as.
-        if ids.len() > 1 {
+        // An X509-SVID carries exactly one URI SAN, and by extension exactly one SPIFFE ID
+        // (x509-svid spec, section 2); other SAN types (DNS, IP) are permitted. Reject a
+        // certificate with several URI SANs outright, whether or not they all parse as SPIFFE
+        // IDs: authorization only ever sees one of them (tls::identity), so verifying "any" of
+        // them would check a different identity than the one the connection is authorized as.
+        let uri_sans: Vec<String> = c
+            .subject_alternative_name()
+            .map_err(|_e| {
+                rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::ApplicationVerificationFailure,
+                )
+            })?
+            .map(|ext| {
+                ext.value
+                    .general_names
+                    .iter()
+                    .filter_map(|n| match n {
+                        GeneralName::URI(uri) => Some(uri.to_string()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if uri_sans.len() > 1 {
             return Err(rustls::Error::InvalidCertificate(
                 rustls::CertificateError::Other(rustls::OtherError(Arc::new(
-                    TlsError::SanMultipleIdentitiesError(ids),
+                    TlsError::SanMultipleIdentitiesError(uri_sans),
                 ))),
             ));
         }
@@ -381,9 +400,13 @@ mod tests {
     fn cert_with_sans(sans: &[&str]) -> CertificateDer<'static> {
         use rcgen::{CertificateParams, KeyPair, SanType, string::Ia5String};
         let mut p = CertificateParams::default();
+        // A "dns:" prefix makes a DNS SAN; bare values are URI SANs.
         p.subject_alt_names = sans
             .iter()
-            .map(|s| SanType::URI(Ia5String::try_from(s.to_string()).unwrap()))
+            .map(|s| match s.strip_prefix("dns:") {
+                Some(d) => SanType::DnsName(Ia5String::try_from(d.to_string()).unwrap()),
+                None => SanType::URI(Ia5String::try_from(s.to_string()).unwrap()),
+            })
             .collect();
         let kp = KeyPair::generate().unwrap();
         p.self_signed(&kp).unwrap().der().clone()
@@ -394,6 +417,15 @@ mod tests {
         let v = verifier("cluster.local");
         let ok = cert_with_sans(&["spiffe://cluster.local/ns/a/sa/b"]);
         assert!(v.verify_trust_domain(&ok).is_ok());
+
+        // Other SAN types are allowed alongside the single URI SAN.
+        let with_dns = cert_with_sans(&["spiffe://cluster.local/ns/a/sa/b", "dns:a.example.com"]);
+        assert!(v.verify_trust_domain(&with_dns).is_ok());
+
+        // A second URI SAN is rejected even if it is not a SPIFFE ID; the spec allows exactly one.
+        let extra_uri =
+            cert_with_sans(&["spiffe://cluster.local/ns/a/sa/b", "https://a.example.com"]);
+        assert!(v.verify_trust_domain(&extra_uri).is_err());
 
         let foreign = cert_with_sans(&["spiffe://other.local/ns/a/sa/b"]);
         assert!(v.verify_trust_domain(&foreign).is_err());
