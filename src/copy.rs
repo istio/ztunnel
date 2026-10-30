@@ -855,4 +855,74 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
     }
+
+    struct ReadOnce(Option<Bytes>);
+    impl ResizeBufRead for ReadOnce {
+        fn poll_bytes(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<Bytes>> {
+            match self.0.take() {
+                Some(b) => Poll::Ready(Ok(b)),
+                None => Poll::Pending,
+            }
+        }
+        fn resize(self: Pin<&mut Self>, _: usize) {}
+    }
+
+    // A writer that resets on write if `reset_on_write`, and records whether it was shut down.
+    struct RecordingWriter {
+        reset_on_write: bool,
+        shutdown: std::sync::Arc<AtomicBool>,
+    }
+    impl AsyncWriteBuf for RecordingWriter {
+        fn poll_write_buf(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            b: Bytes,
+        ) -> Poll<io::Result<usize>> {
+            if self.reset_on_write {
+                Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()))
+            } else {
+                Poll::Ready(Ok(b.len()))
+            }
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.shutdown.store(true, Ordering::SeqCst);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct Side(ReadOnce, RecordingWriter);
+    impl BufferedSplitter for Side {
+        type R = ReadOnce;
+        type W = RecordingWriter;
+        fn split_into_buffered_reader(self) -> (Self::R, Self::W) {
+            (self.0, self.1)
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_does_not_shutdown_surviving_peer() {
+        let downstream_shutdown = std::sync::Arc::new(AtomicBool::new(false));
+        let downstream = Side(
+            ReadOnce(Some(Bytes::from_static(b"request"))),
+            RecordingWriter {
+                reset_on_write: false,
+                shutdown: downstream_shutdown.clone(),
+            },
+        );
+        // The upstream has half-closed, so its read is EOF, and its write finds that it was reset.
+        let upstream = Side(
+            ReadOnce(Some(Bytes::new())),
+            RecordingWriter {
+                reset_on_write: true,
+                shutdown: Default::default(),
+            },
+        );
+        copy_bidirectional(downstream, upstream, &connection_result())
+            .await
+            .unwrap();
+        assert!(!downstream_shutdown.load(Ordering::SeqCst));
+    }
 }
