@@ -329,14 +329,14 @@ where
         "send"
     };
     let res = copy_buf(reader, writer, stats, upstream_to_downstream, other_done).await;
-    done.store(true, Ordering::Relaxed);
-    // Let the other direction know, it may be waiting on its reader
-    tokio::task::yield_now().await;
     if matches!(&res, Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset))
     {
         trace!(?res, "{name} aborted");
         return Err(aborted_result(res, translate_error));
     }
+    done.store(true, Ordering::Relaxed);
+    // Let the other direction know, it may be waiting on its reader
+    tokio::task::yield_now().await;
     let res = ignore_io_errors(res).map_err(translate_error);
     trace!(?res, "{name}");
     let shutdown = ignore_shutdown_errors(shutdown(writer).await)
