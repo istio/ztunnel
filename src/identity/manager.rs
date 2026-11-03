@@ -1690,10 +1690,12 @@ mod tests {
 
         test.secret_manager.forget_certificate(&id).await;
         // ensure forget has been processed
-        test.tear_down().await;
+        assert!(
+            family.get(&labels).is_none(),
+            "metric should not exist after forget"
+        );
 
-        let after_forget = family.get_or_create(&labels).get();
-        assert_eq!(after_forget, 0, "metric should be zero after forget");
+        test.tear_down().await;
     }
 
     #[tokio::test(start_paused = true)]
