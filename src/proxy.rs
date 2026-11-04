@@ -602,12 +602,21 @@ impl TryFrom<&str> for TraceParent {
         }
 
         let segs: Vec<&str> = value.split('-').collect();
+        let [version, trace_id, parent_id, flags] = segs[..] else {
+            anyhow::bail!(
+                "traceparent malformed, expected 4 fields, got {}",
+                segs.len()
+            )
+        };
+        if version.len() != 2 || trace_id.len() != 32 || parent_id.len() != 16 || flags.len() != 2 {
+            anyhow::bail!("traceparent malformed field length")
+        }
 
         Ok(Self {
-            version: u8::from_str_radix(segs[0], 16)?,
-            trace_id: u128::from_str_radix(segs[1], 16)?,
-            parent_id: u64::from_str_radix(segs[2], 16)?,
-            flags: u8::from_str_radix(segs[3], 16)?,
+            version: u8::from_str_radix(version, 16)?,
+            trace_id: u128::from_str_radix(trace_id, 16)?,
+            parent_id: u64::from_str_radix(parent_id, 16)?,
+            flags: u8::from_str_radix(flags, 16)?,
         })
     }
 }
@@ -910,5 +919,23 @@ mod tests {
         assert_eq!(parse_forwarded_host(header), None);
         let header = r#"for=for;by=by;host=host;proto="pröto""#;
         assert_eq!(parse_forwarded_host(header), None);
+    }
+
+    #[test]
+    fn test_parse_traceparent() {
+        let header = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let tp = TraceParent::try_from(header).unwrap();
+        assert_eq!(format!("{tp:?}"), header);
+
+        // Malformed values with the expected total length are rejected, not a panic.
+        let zeros = "0".repeat(55);
+        for header in [
+            zeros.as_str(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b701-",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b-7-1",
+            "000-4bf92f3577b34da6a3ce929d0e0e473-00f067aa0ba902b7-01",
+        ] {
+            assert!(TraceParent::try_from(header).is_err(), "{header}");
+        }
     }
 }
