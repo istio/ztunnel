@@ -2080,6 +2080,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assert_rbac_logs_connection_metadata_no_identity() {
+        initialize_telemetry();
+        crate::telemetry::set_level(true, "debug").ok();
+
+        let mut state = ProxyState::new(None);
+        state.workloads.insert(Arc::new(create_workload(1)));
+        let mock_proxy_state = create_state(state);
+
+        let wl = get_workload(&mock_proxy_state, 1);
+        let ctx = ProxyRbacContext {
+            conn: rbac::Connection {
+                src_identity: None,
+                src: "192.168.1.1:1234".parse().unwrap(),
+                dst_network: "".into(),
+                dst: SocketAddr::new(wl.workload_ips[0], 8080),
+            },
+            dest_workload: wl,
+        };
+
+        assert!(mock_proxy_state.assert_rbac(&ctx).await.is_ok());
+
+        crate::telemetry::testing::assert_contains_span(
+            std::collections::HashMap::from([("message", "no allow policies, allow")]),
+            "rbac",
+            std::collections::HashMap::from([
+                ("src.addr", "192.168.1.1:1234"),
+                ("dst.addr", "192.168.0.1:8080"),
+                ("src.identity", "None"),
+                ("dst.workload", "test"),
+                ("dst.namespace", "ns1"),
+                (
+                    "dst.identity",
+                    "spiffe://cluster.local/ns/ns1/sa/defaultacct",
+                ),
+            ]),
+        );
+    }
+
+    #[tokio::test]
     async fn test_load_balance() {
         initialize_telemetry();
         let mut state = ProxyState::new(None);
