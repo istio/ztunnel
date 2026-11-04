@@ -638,6 +638,19 @@ impl DemandProxyState {
     ) -> Result<(), proxy::AuthorizationRejectionError> {
         let wl = &ctx.dest_workload;
         let conn = &ctx.conn;
+
+        // No .await points below -- do not add one without switching to Instrument.
+        let _rbac_span = tracing::info_span!(
+            "rbac",
+            src.addr = %conn.src,
+            dst.addr = %conn.dst,
+            src.identity = conn.src_identity.as_ref().map(|i| i.to_string()).as_deref().unwrap_or("None"),
+            dst.workload = %wl.name,
+            dst.namespace = %wl.namespace,
+            dst.identity = %wl.identity(),
+        )
+        .entered();
+
         let state = self.read();
 
         // We can get policies from namespace, global, and workload...
@@ -1973,6 +1986,89 @@ mod tests {
             ("policy", "ns1/dry-run-allow"),
             ("message", "dry-run: allow policy match"),
         ]));
+    }
+
+    #[tokio::test]
+    async fn assert_rbac_logs_connection_metadata() {
+        initialize_telemetry();
+        crate::telemetry::set_level(true, "debug").ok();
+
+        let mut state = ProxyState::new(None);
+        state.workloads.insert(Arc::new(create_workload(1)));
+        state.policies.insert(
+            "allow".into(),
+            rbac::Authorization {
+                action: rbac::RbacAction::Allow,
+                namespace: "ns1".into(),
+                name: "allow-default".into(),
+                rules: vec![vec![vec![rbac::RbacMatch {
+                    principals: vec![StringMatch::Exact(
+                        "cluster.local/ns/default/sa/defaultacct".into(),
+                    )],
+                    ..Default::default()
+                }]]],
+                scope: rbac::RbacScope::Namespace,
+                dry_run: false,
+            },
+        );
+        let mock_proxy_state = create_state(state);
+
+        let ctx = get_rbac_context(&mock_proxy_state, 1, "defaultacct");
+        assert!(mock_proxy_state.assert_rbac(&ctx).await.is_ok());
+
+        crate::telemetry::testing::assert_contains_span(
+            std::collections::HashMap::from([("message", "allow policy match")]),
+            "rbac",
+            std::collections::HashMap::from([
+                ("src.addr", "192.168.1.1:1234"),
+                ("dst.addr", "192.168.0.1:8080"),
+                (
+                    "src.identity",
+                    "spiffe://cluster.local/ns/default/sa/defaultacct",
+                ),
+                ("dst.workload", "test"),
+                ("dst.namespace", "ns1"),
+                (
+                    "dst.identity",
+                    "spiffe://cluster.local/ns/ns1/sa/defaultacct",
+                ),
+            ]),
+        );
+    }
+
+    #[tokio::test]
+    async fn assert_rbac_logs_connection_metadata_on_deny() {
+        initialize_telemetry();
+        crate::telemetry::set_level(true, "debug").ok();
+
+        let mut state = ProxyState::new(None);
+        state.workloads.insert(Arc::new(create_workload(1)));
+        state.policies.insert(
+            "deny".into(),
+            rbac::Authorization {
+                action: rbac::RbacAction::Deny,
+                namespace: "ns1".into(),
+                name: "deny-all".into(),
+                rules: vec![vec![]],
+                scope: rbac::RbacScope::Namespace,
+                dry_run: false,
+            },
+        );
+        let mock_proxy_state = create_state(state);
+
+        let ctx = get_rbac_context(&mock_proxy_state, 1, "defaultacct");
+        assert!(mock_proxy_state.assert_rbac(&ctx).await.is_err());
+
+        crate::telemetry::testing::assert_contains_span(
+            std::collections::HashMap::from([("message", "deny policy match")]),
+            "rbac",
+            std::collections::HashMap::from([
+                ("src.addr", "192.168.1.1:1234"),
+                ("dst.addr", "192.168.0.1:8080"),
+                ("dst.workload", "test"),
+                ("dst.namespace", "ns1"),
+            ]),
+        );
     }
 
     #[tokio::test]
