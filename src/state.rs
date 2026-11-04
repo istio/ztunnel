@@ -644,7 +644,7 @@ impl DemandProxyState {
             "rbac",
             src.addr = %conn.src,
             dst.addr = %conn.dst,
-            src.identity = conn.src_identity.as_ref().map(|i| i.to_string()).as_deref().unwrap_or("None"),
+            src.identity = %rbac::OptionDisplay(&conn.src_identity),
             dst.workload = %wl.name,
             dst.namespace = %wl.namespace,
             dst.identity = %wl.identity(),
