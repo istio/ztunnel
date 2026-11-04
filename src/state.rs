@@ -2065,8 +2065,16 @@ mod tests {
             std::collections::HashMap::from([
                 ("src.addr", "192.168.1.1:1234"),
                 ("dst.addr", "192.168.0.1:8080"),
+                (
+                    "src.identity",
+                    "spiffe://cluster.local/ns/default/sa/defaultacct",
+                ),
                 ("dst.workload", "test"),
                 ("dst.namespace", "ns1"),
+                (
+                    "dst.identity",
+                    "spiffe://cluster.local/ns/ns1/sa/defaultacct",
+                ),
             ]),
         );
     }
