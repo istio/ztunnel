@@ -424,9 +424,6 @@ pub enum Error {
     #[error("connection closed due to policy rejection: {0}")]
     AuthorizationPolicyRejection(AuthorizationRejectionError),
 
-    #[error("pool draining")]
-    WorkloadHBONEPoolDraining,
-
     #[error("{0}")]
     Generic(Box<dyn std::error::Error + Send + Sync>),
 
