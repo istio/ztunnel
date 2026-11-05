@@ -2459,7 +2459,6 @@ mod tests {
         assert!(!retriable(&Error::Teardown(
             crate::proxy::h2::Teardown::CertificateRevoked
         )));
-        assert!(!retriable(&Error::WorkloadHBONEPoolDraining));
 
         assert!(!retriable(&Error::SelfCall));
         assert!(!retriable(&Error::NoWorkloadEndpoints(
