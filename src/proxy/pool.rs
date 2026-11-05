@@ -267,10 +267,19 @@ impl PoolState {
             Ok(_guard) => {
                 // BEGIN take inner writelock
                 debug!("nothing else is creating a conn and we won the lock, make one");
-                let client = self
+                let client = match self
                     .spawner
                     .new_pool_conn(workload_key.clone(), deadline)
-                    .await?;
+                    .await
+                {
+                    Ok(client) => client,
+                    Err(e) => {
+                        // Connects that lost the race for this lock are waiting on pool_notifier.
+                        // Wake them so they retry, rather than waiting for an unrelated checkin.
+                        let _ = self.pool_notifier.send(true);
+                        return Err(e);
+                    }
+                };
 
                 debug!(
                     "checking in new conn for {} with pk {:?}",
@@ -1248,6 +1257,44 @@ mod test {
             "got {err:?}"
         );
         assert_eq!(conn.stream_count(), 0);
+    }
+
+    // Concurrent connects to a new key race: one creates the connection, the rest wait for it.
+    // If creation fails, the waiters must still be woken rather than wait for an unrelated checkin.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_failed_connects_do_not_hang() {
+        const ITERS: usize = 20;
+        const CONC: usize = 8;
+        let (pool, _srv) = setup_test(3).await;
+        for i in 0..ITERS {
+            // A fresh destination (so a fresh pool key) that fails every TLS handshake.
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let srv = tokio::spawn(async move {
+                loop {
+                    let (s, _) = listener.accept().await.unwrap();
+                    drop(s);
+                }
+            });
+            let key = key_to(addr, 2);
+            let barrier = Arc::new(tokio::sync::Barrier::new(CONC));
+            let tasks = (0..CONC).map(|_| {
+                let mut p = pool.clone();
+                let key = key.clone();
+                let b = barrier.clone();
+                tokio::spawn(async move {
+                    b.wait().await;
+                    p.connect(&key, None).await
+                })
+            });
+            let res =
+                tokio::time::timeout(Duration::from_millis(500), future::join_all(tasks)).await;
+            srv.abort();
+            let res = res.unwrap_or_else(|_| panic!("iteration {i}: a connect hung"));
+            for r in res {
+                assert!(r.unwrap().is_err(), "connect to a failing peer must fail");
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
