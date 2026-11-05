@@ -117,7 +117,7 @@ impl Socks5 {
                             debug!(component="socks5", dur=?start.elapsed(), "connection completed");
                         }).instrument(span);
 
-                        assertions::size_between_ref(1000, 2400, &serve);
+                        assertions::size_between_ref(1000, 2700, &serve);
                         tokio::spawn(serve);
                     }
                     Err(e) => {

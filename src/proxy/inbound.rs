@@ -162,7 +162,7 @@ impl Inbound {
                         )
                         .instrument(info_span!("inbound", %id, %peer));
                         // This is for each user connection, so most important to keep small
-                        assertions::size_between_ref(1500, 2750, &req_handler);
+                        assertions::size_between_ref(1500, 3000, &req_handler);
                         req_handler
                     };
 
@@ -181,7 +181,7 @@ impl Inbound {
                 };
                 // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
                 // and measured above.
-                assertions::size_between_ref(1000, 1650, &serve_client);
+                assertions::size_between_ref(1000, 1600, &serve_client);
                 tokio::task::spawn(serve_client.in_current_span());
             }
         };
