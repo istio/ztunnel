@@ -455,6 +455,7 @@ impl Store {
                         &state.services.get_headless_by_host(
                             &strng::new(service_suffix),
                             &cluster_local_domain,
+                            Some(&client.namespace),
                         ),
                     ),
                     &client.namespace,
@@ -1290,6 +1291,22 @@ mod tests {
                 ..Default::default()
             },
             Case {
+                name: "visibility: pod FQDN of namespace-scoped headless svc in another namespace is forwarded",
+                host: "nslocal-pod-0.nslocal-headless.ns2.svc.cluster.local.",
+                expect_authoritative: false, // Forwarded — not visible to the NS1 client.
+                expect_code: ResponseCode::NXDomain,
+                ..Default::default()
+            },
+            Case {
+                name: "visibility: pod FQDN of namespace-scoped headless svc in the client namespace resolves",
+                host: "nslocalsame-pod-0.nslocalsame-headless.ns1.svc.cluster.local.",
+                expect_answers: vec![a(
+                    n("nslocalsame-pod-0.nslocalsame-headless.ns1.svc.cluster.local."),
+                    ipv4("34.34.34.34"),
+                )],
+                ..Default::default()
+            },
+            Case {
                 name: "success: k8s host - non local namespace - name.namespace.svc",
                 host: "example.ns2.svc.",
                 expect_answers: vec![a(n("example.ns2.svc."), ipv4("10.10.10.10"))],
@@ -1897,6 +1914,15 @@ mod tests {
                 XdsVisibility::Namespace,
                 xds_service("nslocalsame", NS1, &[na(NW1, "10.10.10.241")]),
             ),
+            // Namespace-scoped headless services; their pod FQDNs follow the same visibility rules.
+            with_visibility(
+                XdsVisibility::Namespace,
+                xds_service("nslocal-headless", NS2, &[]),
+            ),
+            with_visibility(
+                XdsVisibility::Namespace,
+                xds_service("nslocalsame-headless", NS1, &[]),
+            ),
             // Service with the same name in another namespace
             // This should not be used if the preferred service namespace is set
             xds_namespaced_external_service("everywhere.io", NS2, &[na(NW1, "10.10.10.110")]),
@@ -1999,6 +2025,23 @@ mod tests {
                 &NW1,
                 &[format!("{}/{}", NS1, kube_fqdn("headless-ipv6", NS1)).as_str()],
                 &[ip("33.33.33.33"), ip("2001:db8::33")],
+            ),
+            // Workloads backing the namespace-scoped headless services.
+            xds_workload(
+                "nslocal-pod-0",
+                NS2,
+                "nslocal-pod-0.nslocal-headless.ns2.svc.cluster.local",
+                &NW1,
+                &[format!("{}/{}", NS2, kube_fqdn("nslocal-headless", NS2)).as_str()],
+                &[ip("35.35.35.35")],
+            ),
+            xds_workload(
+                "nslocalsame-pod-0",
+                NS1,
+                "nslocalsame-pod-0.nslocalsame-headless.ns1.svc.cluster.local",
+                &NW1,
+                &[format!("{}/{}", NS1, kube_fqdn("nslocalsame-headless", NS1)).as_str()],
+                &[ip("34.34.34.34")],
             ),
         ];
 
