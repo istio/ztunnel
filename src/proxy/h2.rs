@@ -40,6 +40,8 @@ pub enum Teardown {
     PingError(String),
     #[error("peer certificate revoked by CRL")]
     CertificateRevoked,
+    #[error("peer trust domain is no longer accepted")]
+    TrustDomainRemoved,
     #[error("HBONE transport error: {0}")]
     Transport(String),
 }

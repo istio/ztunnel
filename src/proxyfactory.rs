@@ -36,6 +36,7 @@ pub struct ProxyFactory {
     dns_metrics: Option<Arc<dns::Metrics>>,
     drain: DrainWatcher,
     crl_manager: Option<Arc<tls::crl::CrlManager>>,
+    trust_domain_manager: Option<tls::trust_domains::TrustDomainManager>,
 }
 
 impl ProxyFactory {
@@ -87,6 +88,21 @@ impl ProxyFactory {
             None
         };
 
+        // Initialize the trust domain manager if trust_domains_path is set. Unlike the CRL, a missing
+        // or unreadable file is not fatal: we then accept only our own trust domain until it appears.
+        let trust_domain_manager = config.trust_domains_path.as_ref().map(|path| {
+            let manager = tls::trust_domains::TrustDomainManager::new(path.clone());
+            if let Err(e) = manager.start_file_watcher() {
+                tracing::warn!(
+                    path = ?path,
+                    error = %e,
+                    "trust domains file watcher could not be started; \
+                    updates will require restarting ztunnel"
+                );
+            }
+            manager
+        });
+
         Ok(ProxyFactory {
             config,
             state,
@@ -95,6 +111,7 @@ impl ProxyFactory {
             dns_metrics,
             drain,
             crl_manager,
+            trust_domain_manager,
         })
     }
 
@@ -166,6 +183,7 @@ impl ProxyFactory {
                 local_workload_information,
                 false,
                 self.crl_manager.clone(),
+                self.trust_domain_manager.clone(),
             );
             result.connection_manager = Some(cm);
             result.proxy = Some(Proxy::from_inputs(pi, drain).await?);
@@ -212,6 +230,7 @@ impl ProxyFactory {
                 local_workload_information,
                 true,
                 self.crl_manager.clone(),
+                self.trust_domain_manager.clone(),
             );
 
             let inbound = Inbound::new(pi, self.drain.clone()).await?;

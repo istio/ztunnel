@@ -1090,6 +1090,7 @@ mod tests {
                 resolver: None,
                 disable_inbound_freebind: false,
                 crl_manager: None,
+                trust_domain_manager: None,
             }),
             id: TraceParent::new(),
             pool: WorkloadHBONEPool::new(
@@ -2248,6 +2249,7 @@ mod tests {
                 resolver: None,
                 disable_inbound_freebind: false,
                 crl_manager: None,
+                trust_domain_manager: None,
             }),
             id: TraceParent::new(),
             pool: WorkloadHBONEPool::new(
@@ -2358,6 +2360,7 @@ mod tests {
                 resolver: None,
                 disable_inbound_freebind: false,
                 crl_manager: None,
+                trust_domain_manager: None,
             }),
             id: TraceParent::new(),
             pool: WorkloadHBONEPool::new(
