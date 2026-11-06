@@ -72,6 +72,8 @@ impl ProxyFactory {
                         );
                     }
 
+                    cert_manager.enable_crl_self_check(manager_arc.clone(), proxy_metrics.clone());
+
                     Some(manager_arc)
                 }
                 Err(e) => {
