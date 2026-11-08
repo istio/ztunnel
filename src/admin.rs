@@ -609,7 +609,7 @@ mod tests {
 
         // Derive root cert expectations dynamically so this test doesn't break when TEST_ROOT is regenerated (mock ca uses this root cert)
         let root_cert_dump =
-            serde_json::to_value(dump_cert(&parse_cert(TEST_ROOT.to_vec()).unwrap())).unwrap();
+            serde_json::to_value(dump_cert(&parse_cert(TEST_ROOT).unwrap())).unwrap();
 
         let manager = identity::mock::new_secret_manager_cfg(identity::mock::SecretManagerConfig {
             cert_lifetime: Duration::from_secs(7 * 60 * 60),
