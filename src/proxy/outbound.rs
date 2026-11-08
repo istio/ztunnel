@@ -682,9 +682,9 @@ impl OutboundConnection {
                 hbone_target_destination,
                 actual_destination_workload: Some(gateway_upstream.workload.clone()),
                 intended_destination_service: Some(ServiceDescription::from(service)),
-                actual_destination: gateway_upstream.workload_socket_addr().ok_or(
-                    Error::NoValidDestination(Box::new((*gateway_upstream.workload).clone())),
-                )?,
+                actual_destination: gateway_upstream.workload_socket_addr().ok_or_else(|| {
+                    Error::NoValidDestination(Box::new((*gateway_upstream.workload).clone()))
+                })?,
                 // The outer tunnel of double HBONE is terminated by the E/W
                 // gateway and so for the credentials of the next hop
                 // (upstream_sans) we use gateway credentials.
@@ -758,12 +758,9 @@ impl OutboundConnection {
                 }
 
                 let upstream_sans = waypoint.workload_and_services_san();
-                let actual_destination =
-                    waypoint
-                        .workload_socket_addr()
-                        .ok_or(Error::NoValidDestination(Box::new(
-                            (*waypoint.workload).clone(),
-                        )))?;
+                let actual_destination = waypoint.workload_socket_addr().ok_or_else(|| {
+                    Error::NoValidDestination(Box::new((*waypoint.workload).clone()))
+                })?;
                 debug!("built request to service waypoint proxy");
                 return Ok(Request {
                     protocol: OutboundProtocol::HBONE,
@@ -865,12 +862,9 @@ impl OutboundConnection {
                 .fetch_workload_waypoint(&us.workload, &source_workload, target, deprioritized)
                 .await?;
             if let Some(waypoint) = waypoint {
-                let actual_destination =
-                    waypoint
-                        .workload_socket_addr()
-                        .ok_or(Error::NoValidDestination(Box::new(
-                            (*waypoint.workload).clone(),
-                        )))?;
+                let actual_destination = waypoint.workload_socket_addr().ok_or_else(|| {
+                    Error::NoValidDestination(Box::new((*waypoint.workload).clone()))
+                })?;
                 let upstream_sans = waypoint.workload_and_services_san();
                 debug!("built request to workload waypoint proxy");
                 return Ok(Request {
@@ -891,19 +885,19 @@ impl OutboundConnection {
 
         let selected_workload_ip = us
             .selected_workload_ip
-            .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?;
+            .ok_or_else(|| Error::NoValidDestination(Box::new((*us.workload).clone())))?;
 
         // only change the port if we're sending HBONE
         let actual_destination = match us.workload.protocol {
             InboundProtocol::HBONE => SocketAddr::from((selected_workload_ip, self.hbone_port)),
             InboundProtocol::TCP => us
                 .workload_socket_addr()
-                .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?,
+                .ok_or_else(|| Error::NoValidDestination(Box::new((*us.workload).clone())))?,
         };
         let hbone_target_destination = match us.workload.protocol {
             InboundProtocol::HBONE => Some(HboneAddress::SocketAddr(
                 us.workload_socket_addr()
-                    .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?,
+                    .ok_or_else(|| Error::NoValidDestination(Box::new((*us.workload).clone())))?,
             )),
             InboundProtocol::TCP => None,
         };

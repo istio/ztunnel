@@ -29,8 +29,8 @@ use crate::state::workload::{
 };
 use crate::state::workload::{HealthStatus, is_default};
 use crate::strng::Strng;
+use crate::xds::istio::workload::IpFamilies;
 use crate::xds::istio::workload::load_balancing::Scope as XdsScope;
-use crate::xds::istio::workload::{IpFamilies, PortList};
 use crate::{strng, xds};
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -423,10 +423,11 @@ impl TryFrom<&XdsService> for Service {
             hostname: Strng::from(&s.hostname),
             vips: nw_addrs,
             cidr_vips,
-            ports: (&PortList {
-                ports: s.ports.clone(),
-            })
-                .into(),
+            ports: s
+                .ports
+                .iter()
+                .map(|p| (p.service_port as u16, p.target_port as u16))
+                .collect(),
             endpoints: Default::default(), // Will be populated once inserted into the store.
             subject_alt_names: s.subject_alt_names.iter().map(strng::new).collect(),
             waypoint,
