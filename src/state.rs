@@ -647,8 +647,7 @@ impl DemandProxyState {
 
         // Aggregate all of them based on type
         let (all_allow, all_deny): (Vec<_>, Vec<_>) = ns
-            .iter()
-            .chain(global.iter())
+            .chain(global)
             .chain(workload)
             .filter_map(|k| {
                 let pol = state.policies.get(k);
