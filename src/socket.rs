@@ -158,6 +158,7 @@ impl Listener {
                 let res = SockRef::from(&stream).set_tcp_keepalive(&ka);
                 tracing::trace!("set keepalive: {:?}", res);
             }
+            #[cfg(target_os = "linux")]
             if cfg.user_timeout_enabled {
                 let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
                 let res = SockRef::from(&stream).set_tcp_user_timeout(Some(ut));
@@ -218,7 +219,10 @@ pub mod socket_tests {
             sock.tcp_keepalive_interval().unwrap(),
             cfg.keepalive_interval
         );
-        let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
-        assert_eq!(sock.tcp_user_timeout().unwrap(), Some(ut));
+        #[cfg(target_os = "linux")]
+        {
+            let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
+            assert_eq!(sock.tcp_user_timeout().unwrap(), Some(ut));
+        }
     }
 }
