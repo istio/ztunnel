@@ -284,11 +284,13 @@ impl OutboundConnection {
                 OutboundProtocol::HBONE => self
                     .connect_hbone(source_addr, &req, budget)
                     .await
-                    .map(|upstream| (upstream, None)),
+                    .map(|upstream| (upstream, None))
+                    .map_err(|e| (e, FailedHop::NextHop)),
                 OutboundProtocol::TCP => self
                     .connect_tcp(&req, budget)
                     .await
-                    .map(|upstream| (upstream, None)),
+                    .map(|upstream| (upstream, None))
+                    .map_err(|e| (e, FailedHop::NextHop)),
             };
 
             match connected {
@@ -305,7 +307,7 @@ impl OutboundConnection {
                         conn_guard,
                     ));
                 }
-                Err(e) => {
+                Err((e, failed_hop)) => {
                     let retry = retries < max_retries
                         && Self::is_retriable_connection_error(&e)
                         && backoff < deadline.saturating_duration_since(Instant::now());
@@ -314,10 +316,7 @@ impl OutboundConnection {
                         return None;
                     }
                     connection_result_builder.record_retry(&e);
-                    // Deprioritize the failed next hop (possibly a waypoint or gateway).
-                    if let Some(wl) = &req.actual_destination_workload {
-                        deprioritized.push(wl.uid.clone());
-                    }
+                    req.deprioritize(failed_hop, &mut deprioritized);
                     retries += 1;
                     last_attempt = Some(connection_result_builder);
                     tokio::time::sleep(backoff).await;
@@ -368,15 +367,19 @@ impl OutboundConnection {
         remote_addr: SocketAddr,
         req: &Request,
         connect_timeout: Option<Duration>,
-    ) -> Result<(ConnectedUpstream, Option<DerivedWorkload>), Error> {
+    ) -> Result<(ConnectedUpstream, Option<DerivedWorkload>), (Error, FailedHop)> {
         let cert = self
             .pi
             .local_workload_information
             .fetch_certificate()
-            .await?;
+            .await
+            .map_err(|e| (e.into(), FailedHop::NextHop))?;
         let deadline = connect_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
         // Both HBONE legs share the attempt deadline.
-        let (upgraded, _) = Box::pin(self.send_hbone_request(remote_addr, req, deadline)).await?;
+        let (upgraded, _) = Box::pin(self.send_hbone_request(remote_addr, req, deadline))
+            .await
+            .map_err(|e| (e, FailedHop::NextHop))?;
+        let destination = |e: Error| (e, FailedHop::Destination);
         // The inner tunnel's streams also report the outer tunnel's teardown, which otherwise
         // only reaches them as an opaque error from the inner TLS stream.
         let teardown = TeardownCause::nested(upgraded.teardown_cause());
@@ -393,8 +396,9 @@ impl OutboundConnection {
             dst: req.actual_destination,
         };
 
-        let connector =
-            cert.outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())?;
+        let connector = cert
+            .outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())
+            .map_err(|e| destination(e.into()))?;
         let tls_stream = super::with_deadline(
             deadline,
             super::HBONEHandshakeStage::InnerTls,
@@ -409,7 +413,8 @@ impl OutboundConnection {
                 }
             }),
         )
-        .await?;
+        .await
+        .map_err(destination)?;
         let (_, ssl) = tls_stream.get_ref();
         let peer_identity = {
             let x509_cert = tls::certificate_from_connection(ssl);
@@ -440,7 +445,8 @@ impl OutboundConnection {
                 teardown,
             ),
         )
-        .await?;
+        .await
+        .map_err(destination)?;
         let origin_network = &self.pi.cfg.network;
         let http_request = self.create_hbone_request(remote_addr, req, Some(origin_network));
         let (inner_upgraded, baggage) = super::with_deadline(
@@ -448,7 +454,8 @@ impl OutboundConnection {
             super::HBONEHandshakeStage::InnerConnect,
             sender.send_request(http_request),
         )
-        .await?;
+        .await
+        .map_err(destination)?;
 
         let derived_workload = baggage.map(|baggage| DerivedWorkload {
             workload_name: baggage.workload_name,
@@ -681,6 +688,7 @@ impl OutboundConnection {
                 source,
                 hbone_target_destination,
                 actual_destination_workload: Some(gateway_upstream.workload.clone()),
+                destination_workload: Some(upstream.workload.clone()),
                 intended_destination_service: Some(ServiceDescription::from(service)),
                 actual_destination: gateway_upstream.workload_socket_addr().ok_or(
                     Error::NoValidDestination(Box::new((*gateway_upstream.workload).clone())),
@@ -770,6 +778,7 @@ impl OutboundConnection {
                     source: source_workload,
                     hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
                     actual_destination_workload: Some(waypoint.workload),
+                    destination_workload: None,
                     intended_destination_service: Some(ServiceDescription::from(&*target_service)),
                     actual_destination,
                     upstream_sans,
@@ -810,6 +819,7 @@ impl OutboundConnection {
                 source: source_workload,
                 hbone_target_destination: None,
                 actual_destination_workload: None,
+                destination_workload: None,
                 intended_destination_service: None,
                 actual_destination: target,
                 upstream_sans: vec![],
@@ -880,6 +890,7 @@ impl OutboundConnection {
                     // Use the original VIP, not translated
                     hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
                     actual_destination_workload: Some(waypoint.workload),
+                    destination_workload: None,
                     intended_destination_service: us.destination_service.clone(),
                     actual_destination,
                     upstream_sans,
@@ -916,6 +927,7 @@ impl OutboundConnection {
             source: source_workload,
             hbone_target_destination,
             actual_destination_workload: Some(us.workload.clone()),
+            destination_workload: None,
             intended_destination_service: us.destination_service.clone(),
             actual_destination,
             upstream_sans,
@@ -947,6 +959,15 @@ struct ResolvedTarget {
     target: SocketAddr,
 }
 
+/// Which hop of a connect attempt failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailedHop {
+    /// The next hop we connected to: a waypoint, a gateway or the destination itself.
+    NextHop,
+    /// The endpoint behind a gateway, reached through the next hop.
+    Destination,
+}
+
 #[derive(Debug)]
 struct Request {
     protocol: OutboundProtocol,
@@ -956,6 +977,9 @@ struct Request {
     // not the original.
     // May be unset in case of passthrough.
     actual_destination_workload: Option<Arc<Workload>>,
+    // The endpoint picked behind the next hop, which the next hop reaches for us. Only set for
+    // double HBONE, where the next hop is a network gateway.
+    destination_workload: Option<Arc<Workload>>,
     // The intended destination service for the request. When proxying through a waypoint, this is *not* the waypoint
     // service, but rather the original intended service.
     // May be unset in case of non-service traffic
@@ -975,6 +999,22 @@ struct Request {
     // This field only matters if we need to know both the identity of the next hop, as well as the
     // final hop (currently, this is only double HBONE).
     final_sans: Vec<Identity>,
+}
+
+impl Request {
+    /// Prefer other endpoints on retry, only for the hop that failed.
+    fn deprioritize(&self, hop: FailedHop, deprioritized: &mut DeprioritizedEndpoints) {
+        let wl = match hop {
+            FailedHop::Destination => self
+                .destination_workload
+                .as_ref()
+                .or(self.actual_destination_workload.as_ref()),
+            FailedHop::NextHop => self.actual_destination_workload.as_ref(),
+        };
+        if let Some(wl) = wl {
+            deprioritized.push(wl.uid.clone());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1020,6 +1060,16 @@ mod tests {
         to: &str,
         xds: Vec<XdsAddressType>,
         expect: Option<ExpectedRequest<'_>>,
+    ) -> Option<Request> {
+        run_select_next_hop_deprioritizing(from, to, xds, expect, &Default::default()).await
+    }
+
+    async fn run_select_next_hop_deprioritizing(
+        from: &str,
+        to: &str,
+        xds: Vec<XdsAddressType>,
+        expect: Option<ExpectedRequest<'_>>,
+        deprioritized: &DeprioritizedEndpoints,
     ) -> Option<Request> {
         let cfg = Arc::new(Config {
             local_node: Some("local-node".to_string()),
@@ -1107,7 +1157,7 @@ mod tests {
             .await
             .unwrap();
         let req = outbound
-            .select_next_hop(&resolved, &Default::default())
+            .select_next_hop(&resolved, deprioritized)
             .await
             .ok();
         if let Some(ref r) = req {
@@ -1188,6 +1238,121 @@ mod tests {
             None,
         )
         .await;
+    }
+
+    /// A service with two remote endpoints, each reached through the same E/W gateway.
+    fn double_hbone_xds() -> Vec<XdsAddressType> {
+        let remote_pod = |name: &str| {
+            XdsAddressType::Workload(XdsWorkload {
+                uid: format!("cluster1//v1/Pod/default/{name}"),
+                addresses: vec![],
+                network: "remote".to_string(),
+                network_gateway: Some(xds::istio::workload::GatewayAddress {
+                    destination: Some(xds::istio::workload::gateway_address::Destination::Address(
+                        XdsNetworkAddress {
+                            network: "remote".to_string(),
+                            address: vec![10, 22, 1, 1],
+                            length: None,
+                        },
+                    )),
+                    hbone_mtls_port: 15009,
+                }),
+                services: std::collections::HashMap::from([(
+                    "/example.com".to_string(),
+                    PortList {
+                        ports: vec![Port {
+                            service_port: 80,
+                            target_port: 8080,
+                            app_protocol: 0,
+                        }],
+                    },
+                )]),
+                ..Default::default()
+            })
+        };
+        vec![
+            XdsAddressType::Service(XdsService {
+                hostname: "example.com".to_string(),
+                addresses: vec![XdsNetworkAddress {
+                    network: "".to_string(),
+                    address: vec![127, 0, 0, 3],
+                    length: None,
+                }],
+                ports: vec![Port {
+                    service_port: 80,
+                    target_port: 8080,
+                    app_protocol: 0,
+                }],
+                ..Default::default()
+            }),
+            remote_pod("remote-a"),
+            remote_pod("remote-b"),
+            XdsAddressType::Workload(XdsWorkload {
+                uid: "cluster1//v1/Pod/default/ew-gtw".to_string(),
+                addresses: vec![Bytes::copy_from_slice(&[10, 22, 1, 1])],
+                network: "remote".to_string(),
+                ..Default::default()
+            }),
+        ]
+    }
+
+    async fn select_double_hbone(deprioritized: &DeprioritizedEndpoints) -> Request {
+        run_select_next_hop_deprioritizing(
+            "127.0.0.1",
+            "127.0.0.3:80",
+            double_hbone_xds(),
+            Some(ExpectedRequest {
+                protocol: OutboundProtocol::DOUBLEHBONE,
+                hbone_destination: "example.com:80",
+                destination: "10.22.1.1:15009",
+            }),
+            deprioritized,
+        )
+        .await
+        .expect("a double HBONE request")
+    }
+
+    #[tokio::test]
+    async fn retry_after_destination_failure_picks_another_destination() {
+        let first = select_double_hbone(&Default::default()).await;
+        let first_dst = first
+            .destination_workload
+            .clone()
+            .expect("behind a gateway");
+
+        let mut deprioritized = DeprioritizedEndpoints::default();
+        first.deprioritize(FailedHop::Destination, &mut deprioritized);
+        for _ in 0..20 {
+            let retry = select_double_hbone(&deprioritized).await;
+            assert_ne!(
+                retry.destination_workload.expect("behind a gateway").uid,
+                first_dst.uid,
+                "a retry must prefer the other endpoint"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_after_gateway_failure_keeps_destinations_eligible() {
+        let first = select_double_hbone(&Default::default()).await;
+        let mut deprioritized = DeprioritizedEndpoints::default();
+        first.deprioritize(FailedHop::NextHop, &mut deprioritized);
+        let mut picked = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let retry = select_double_hbone(&deprioritized).await;
+            picked.insert(
+                retry
+                    .destination_workload
+                    .expect("behind a gateway")
+                    .uid
+                    .clone(),
+            );
+        }
+        assert_eq!(
+            picked.len(),
+            2,
+            "a gateway failure must not steer away from endpoints: {picked:?}"
+        );
     }
 
     #[tokio::test]
@@ -2276,6 +2441,7 @@ mod tests {
                 "10.0.0.1:8080".parse().unwrap(),
             )),
             actual_destination_workload: None,
+            destination_workload: None,
             intended_destination_service: None,
             actual_destination: "10.0.0.1:8080".parse().unwrap(),
             upstream_sans: vec![],
