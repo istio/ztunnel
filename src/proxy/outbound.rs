@@ -203,6 +203,14 @@ impl OutboundConnection {
     /// Minimum budget for a useful connection attempt.
     const MIN_CONNECT_BUDGET: Duration = Duration::from_millis(50);
 
+    /// Split what is left of the deadline across the remaining attempts. The floor may extend an
+    /// attempt past the deadline. Always bounded, since it also covers waiting on the pool.
+    fn adjust_timeout(deadline: Instant, retries_left: usize) -> Duration {
+        let attempts_left = u32::try_from(retries_left.saturating_add(1)).unwrap_or(u32::MAX);
+        let share = deadline.saturating_duration_since(Instant::now()) / attempts_left;
+        share.max(Self::MIN_CONNECT_BUDGET)
+    }
+
     async fn connect_with_retries(
         &mut self,
         source_addr: SocketAddr,
@@ -267,26 +275,19 @@ impl OutboundConnection {
                 .with_retries(u32::try_from(retries).unwrap_or(u32::MAX)),
             );
 
-            // Split what is left of the deadline across the remaining attempts. The floor may
-            // extend an attempt past the deadline.
-            let budget = (max_retries > 0).then(|| {
-                let attempts_left =
-                    u32::try_from((max_retries - retries).saturating_add(1)).unwrap_or(u32::MAX);
-                let share = deadline.saturating_duration_since(Instant::now()) / attempts_left;
-                share.max(Self::MIN_CONNECT_BUDGET)
-            });
+            let connect_timeout = Some(Self::adjust_timeout(deadline, max_retries - retries));
 
             let connected = match req.protocol {
                 OutboundProtocol::DOUBLEHBONE => {
                     // We box this since its not a common path and it would make the future really big.
-                    Box::pin(self.connect_hbone_double(source_addr, &req, budget)).await
+                    Box::pin(self.connect_hbone_double(source_addr, &req, connect_timeout)).await
                 }
                 OutboundProtocol::HBONE => self
-                    .connect_hbone(source_addr, &req, budget)
+                    .connect_hbone(source_addr, &req, connect_timeout)
                     .await
                     .map(|upstream| (upstream, None)),
                 OutboundProtocol::TCP => self
-                    .connect_tcp(&req, budget)
+                    .connect_tcp(&req, connect_timeout)
                     .await
                     .map(|upstream| (upstream, None)),
             };
@@ -2787,6 +2788,19 @@ mod tests {
             ("error", "no healthy upstream: 127.0.0.3:80"),
             ("message", "connection failed"),
         ]));
+    }
+
+    #[tokio::test]
+    async fn adjust_timeout_is_bounded_without_retries() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let no_retries = OutboundConnection::adjust_timeout(deadline, 0);
+        assert!(no_retries > Duration::from_secs(9) && no_retries <= Duration::from_secs(10));
+
+        let split = OutboundConnection::adjust_timeout(deadline, 1);
+        assert!(split <= Duration::from_secs(5));
+
+        let expired = OutboundConnection::adjust_timeout(Instant::now(), 0);
+        assert_eq!(expired, OutboundConnection::MIN_CONNECT_BUDGET);
     }
 
     #[tokio::test]
