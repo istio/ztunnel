@@ -13,9 +13,10 @@
 // limitations under the License.
 
 #![warn(clippy::cast_lossless)]
-use super::{Error, SocketFactory};
+use super::{Error, HBONEHandshakeStage, SocketFactory};
 use super::{LocalWorkloadInformation, h2};
 use futures_util::TryFutureExt;
+use std::io;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -60,12 +61,42 @@ struct PoolState {
     // and has no actual hyper/http/connection logic.
     connected_pool: Arc<pingora_pool::ConnectionPool<H2ConnectClient>>,
     // this must be an atomic/concurrent-safe list-of-locks, so we can lock per-key, not globally, and avoid holding up all conn attempts
-    established_conn_writelock: flurry::HashMap<u64, Arc<Mutex<()>>>,
+    established_conn_writelock: flurry::HashMap<u64, Arc<Mutex<Option<ConnFailure>>>>,
     pool_unused_release_timeout: Duration,
     // This is merely a counter to track the overall number of conns this pool spawns
     // to ensure we get unique poolkeys-per-new-conn, it is not a limit
     pool_global_conn_count: AtomicI32,
     spawner: ConnSpawner,
+}
+
+// The last failed attempt to connect for a key. Callers that queued behind that attempt inherit it
+// instead of each dialing the same unreachable peer in turn.
+struct ConnFailure {
+    at: Instant,
+    err: SharedFailure,
+}
+
+// `Error` isn't `Clone`, so only failures about reaching the peer are kept, rebuilt per waiter.
+enum SharedFailure {
+    Io(io::ErrorKind, String),
+    Timeout(HBONEHandshakeStage),
+}
+
+impl SharedFailure {
+    fn from_error(err: &Error) -> Option<Self> {
+        match err {
+            Error::Io(e) => Some(Self::Io(e.kind(), e.to_string())),
+            Error::HandshakeTimeout(stage) => Some(Self::Timeout(*stage)),
+            _ => None,
+        }
+    }
+
+    fn to_error(&self) -> Error {
+        match self {
+            Self::Io(kind, msg) => Error::Io(io::Error::new(*kind, msg.clone())),
+            Self::Timeout(stage) => Error::HandshakeTimeout(*stage),
+        }
+    }
 }
 
 struct ConnSpawner {
@@ -235,7 +266,7 @@ impl PoolState {
                 Some(lock) => lock.clone(),
                 None => match self.established_conn_writelock.try_insert(
                     pool_key.key,
-                    Arc::new(Mutex::new(())),
+                    Arc::new(Mutex::new(None)),
                     &guard,
                 ) {
                     Ok(lock) => lock.clone(),
@@ -247,7 +278,15 @@ impl PoolState {
             "checkout - found mutex for pool key {:?}, waiting for writelock",
             pool_key
         );
-        let _conn_lock = exist_conn_lock.as_ref().lock().await;
+        let queued_at = Instant::now();
+        let mut conn_state = exist_conn_lock.as_ref().lock().await;
+        if let Some(failure) = conn_state.as_ref().filter(|f| f.at > queued_at) {
+            debug!(
+                "checkout - inheriting failed connection for {}",
+                workload_key
+            );
+            return Err(failure.err.to_error());
+        }
 
         trace!(
             "checkout - got writelock for conn with key {} and hash {:?}",
@@ -270,10 +309,23 @@ impl PoolState {
                 }
                 None => {
                     debug!("new connection needed for {}", workload_key);
-                    break self
+                    match self
                         .spawner
                         .new_pool_conn(workload_key.clone(), deadline)
-                        .await?;
+                        .await
+                    {
+                        Ok(conn) => {
+                            *conn_state = None;
+                            break conn;
+                        }
+                        Err(e) => {
+                            *conn_state = SharedFailure::from_error(&e).map(|err| ConnFailure {
+                                at: Instant::now(),
+                                err,
+                            });
+                            return Err(e);
+                        }
+                    }
                 }
             };
         };
@@ -401,7 +453,7 @@ mod test {
     use hyper::{Request, Response};
     use prometheus_client::registry::Registry;
     use std::sync::RwLock;
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicU32, AtomicUsize};
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
@@ -1124,6 +1176,69 @@ mod test {
         })
         .await
         .expect("waiter remained blocked after cancellation");
+    }
+
+    async fn spawn_counting_stalled_server() -> (SocketAddr, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                held.push(stream);
+            }
+        });
+        (addr, accepted)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queued_callers_inherit_a_failed_connect() {
+        let (pool, _srv) = setup_test(3).await;
+        let (addr, accepted) = spawn_counting_stalled_server().await;
+        let key = key_to(addr, 2);
+
+        // The holder gives up quickly; the waiters would each have time to dial again.
+        let holder = pool.clone();
+        let holder_key = key.clone();
+        let holder_deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        tokio::spawn(async move {
+            let _ = holder
+                .send_request_pooled(&holder_key, connect_req(addr), Some(holder_deadline))
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let start = tokio::time::Instant::now();
+        let waiters = (0..3).map(|_| {
+            let pool = pool.clone();
+            let key = key.clone();
+            tokio::spawn(async move {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                pool.send_request_pooled(&key, connect_req(addr), Some(deadline))
+                    .await
+            })
+        });
+        for res in future::join_all(waiters).await {
+            let Err(err) = res.unwrap() else {
+                panic!("a stalled peer must not yield a stream");
+            };
+            assert!(
+                matches!(err, Error::HandshakeTimeout(HBONEHandshakeStage::Tls)),
+                "got {err:?}"
+            );
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Callers arriving after the failure dial again.
+        let (_, _) = send_with_deadline(&pool, addr).await;
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
