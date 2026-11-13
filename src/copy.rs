@@ -20,10 +20,13 @@ use pin_project_lite::pin_project;
 use std::future::Future;
 use std::io::Error;
 use std::marker::PhantomPinned;
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
 use tokio::io;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncRead, AsyncWrite, Interest};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::trace;
@@ -54,7 +57,7 @@ where
     fn split_into_buffered_reader(self) -> (Self::R, Self::W) {
         let (rh, wh) = tokio::io::split(self);
         let rb = BufReader::new(rh);
-        (rb, WriteAdapter(wh))
+        (rb, WriteAdapter(wh, None))
     }
 }
 
@@ -67,9 +70,10 @@ impl BufferedSplitter for TcpStreamSplitter {
     type W = WriteAdapter<OwnedWriteHalf>;
 
     fn split_into_buffered_reader(self) -> (Self::R, Self::W) {
+        let watch = AbortWatch::new(self.0.as_raw_fd());
         let (rh, wh) = self.0.into_split();
         let rb = BufReader::new(rh);
-        (rb, WriteAdapter(wh))
+        (rb, WriteAdapter(wh, Some(watch)))
     }
 
     fn reset(r: Self::R, w: Self::W) {
@@ -95,6 +99,12 @@ pub trait AsyncWriteBuf {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>>;
+    // Resolves with an error if the peer aborted the writer, without a write having to find out.
+    // A copy waiting on its reader would otherwise not notice, e.g. an HBONE stream reset after
+    // the stream's receive side finished. Never resolves for a writer that cannot tell.
+    fn poll_aborted(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Error> {
+        Poll::Pending
+    }
 }
 
 // Allow &T to be AsyncWriteBuf
@@ -107,6 +117,10 @@ impl<T: ?Sized + AsyncWriteBuf + Unpin> AsyncWriteBuf for &mut T {
         Pin::new(&mut **self).poll_write_buf(cx, buf)
     }
 
+    fn poll_aborted(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Error> {
+        Pin::new(&mut **self).poll_aborted(cx)
+    }
+
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         Pin::new(&mut **self).poll_flush(cx)
     }
@@ -117,7 +131,45 @@ impl<T: ?Sized + AsyncWriteBuf + Unpin> AsyncWriteBuf for &mut T {
 }
 
 // Allow anything that is AsyncWrite to be AsyncWriteBuf.
-pub struct WriteAdapter<T>(T);
+pub struct WriteAdapter<T>(T, Option<AbortWatch>);
+
+// AbortWatch notices that the peer of a TCP connection aborted it (sent a RST), which a connection
+// that has nothing left to read, because the peer half-closed, does not otherwise find out about
+// until it next writes. Only a watched connection that is half-closed pays for it: the watch
+// registers a duplicate of the socket with the reactor when it is first polled.
+//
+// The watched socket must outlive the watch, so it is only used by the halves of a copy.
+pub struct AbortWatch {
+    fd: RawFd,
+    watch: Option<Pin<Box<dyn Future<Output = Error> + Send + Sync>>>,
+}
+
+impl AbortWatch {
+    fn new(fd: RawFd) -> Self {
+        Self { fd, watch: None }
+    }
+
+    fn start(&self) -> io::Result<Pin<Box<dyn Future<Output = Error> + Send + Sync>>> {
+        // SAFETY: the socket outlives the copy, and so this watch.
+        let fd: OwnedFd = unsafe { BorrowedFd::borrow_raw(self.fd) }.try_clone_to_owned()?;
+        let fd = AsyncFd::with_interest(fd, Interest::ERROR)?;
+        Ok(Box::pin(async move {
+            // An error on a connection that the peer half-closed is the peer's reset.
+            let _ = fd.ready(Interest::ERROR).await;
+            Error::from(io::ErrorKind::ConnectionReset)
+        }))
+    }
+
+    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
+        if self.watch.is_none() {
+            self.watch = Some(self.start().unwrap_or_else(|e| {
+                trace!(err=%e, "failed to watch for an abort");
+                Box::pin(std::future::pending())
+            }));
+        }
+        self.watch.as_mut().expect("just set").as_mut().poll(cx)
+    }
+}
 
 impl<T: AsyncWrite + Unpin> AsyncWriteBuf for WriteAdapter<T> {
     fn poll_write_buf(
@@ -134,6 +186,13 @@ impl<T: AsyncWrite + Unpin> AsyncWriteBuf for WriteAdapter<T> {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+
+    fn poll_aborted(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Error> {
+        match &mut self.1 {
+            Some(watch) => watch.poll(cx),
+            None => Poll::Pending,
+        }
     }
 }
 
@@ -184,54 +243,38 @@ where
     let torn_down = A::teardown_cause(rd)
         .or_else(|| B::teardown_cause(ru))
         .map(|cause| Box::pin(async move { cause.torn_down().await }));
-    // A connection aborted error means a transport failed out from under the copy (e.g. an HBONE
-    // ping timeout), and a connection reset means a peer aborted its connection. Rather than
-    // closing gracefully, which the other peer would take as a clean end of stream, the other
-    // direction is stopped and both sides are reset. So each direction completes with `Ok` and its
-    // own result, or, when it aborts, with `Err` and the result of the whole copy.
-    let is_aborted = |res: &io::Result<u64>| matches!(res, Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset));
-    let downstream_to_upstream = async {
-        let translate_error = |e: io::Error| {
+    let (send_done, receive_done) = (AtomicBool::new(false), AtomicBool::new(false));
+    let downstream_to_upstream = copy_direction(
+        rd,
+        wu,
+        stats,
+        false,
+        &receive_done,
+        &send_done,
+        |e: io::Error| {
             SendError(Box::new(match e.kind() {
                 io::ErrorKind::NotConnected => BackendDisconnected,
                 io::ErrorKind::WriteZero => BackendDisconnected,
                 io::ErrorKind::UnexpectedEof => ClientDisconnected,
                 _ => e.into(),
             }))
-        };
-        let res = copy_buf(rd, wu, stats, false).await;
-        if is_aborted(&res) {
-            trace!(?res, "send aborted");
-            return Err(aborted_result(res, translate_error));
-        }
-        let res = ignore_io_errors(res).map_err(translate_error);
-        trace!(?res, "send");
-        let shutdown = ignore_shutdown_errors(shutdown(wu).await)
-            .map_err(translate_error)
-            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)));
-        Ok(shutdown.and(res))
-    };
-
-    let upstream_to_downstream = async {
-        let translate_error = |e: io::Error| {
+        },
+    );
+    let upstream_to_downstream = copy_direction(
+        ru,
+        wd,
+        stats,
+        true,
+        &send_done,
+        &receive_done,
+        |e: io::Error| {
             ReceiveError(Box::new(match e.kind() {
                 io::ErrorKind::NotConnected => ClientDisconnected,
                 io::ErrorKind::WriteZero => ClientDisconnected,
                 _ => e.into(),
             }))
-        };
-        let res = copy_buf(ru, wd, stats, true).await;
-        if is_aborted(&res) {
-            trace!(?res, "receive aborted");
-            return Err(aborted_result(res, translate_error));
-        }
-        let res = ignore_io_errors(res).map_err(translate_error);
-        trace!(?res, "receive");
-        let shutdown = ignore_shutdown_errors(shutdown(wd).await)
-            .map_err(translate_error)
-            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)));
-        Ok(shutdown.and(res))
-    };
+        },
+    );
 
     // Join the directions so that we keep completing either end once one side is complete; only
     // an abort stops the other direction. A teardown aborts both. On an abort, dropping the sides
@@ -259,6 +302,47 @@ where
     let received = received?;
     trace!(sent, received, "copy complete");
     Ok(())
+}
+
+// Copies one direction of a copy and then shuts down its writer. `other_done` and `done` are whether the other direction and
+// this one are done. A connection aborted error means a transport failed out from under the copy (e.g. an HBONE ping timeout),
+// and a connection reset means a peer aborted its connection. Rather than closing gracefully, which the other peer would
+// take as a clean end of stream, the other direction is stopped and both sides are reset. So the
+// direction completes with `Ok` and its own result, or, when it aborts, with `Err` and the result
+// of the whole copy.
+async fn copy_direction<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    stats: &ConnectionResult,
+    upstream_to_downstream: bool,
+    other_done: &AtomicBool,
+    done: &AtomicBool,
+    translate_error: impl Fn(io::Error) -> proxy::Error + Copy,
+) -> Result<Result<u64, proxy::Error>, Result<(), proxy::Error>>
+where
+    R: ResizeBufRead + Unpin,
+    W: AsyncWriteBuf + Unpin,
+{
+    let name = if upstream_to_downstream {
+        "receive"
+    } else {
+        "send"
+    };
+    let res = copy_buf(reader, writer, stats, upstream_to_downstream, other_done).await;
+    if matches!(&res, Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset))
+    {
+        trace!(?res, "{name} aborted");
+        return Err(aborted_result(res, translate_error));
+    }
+    done.store(true, Ordering::Relaxed);
+    // Let the other direction know, it may be waiting on its reader
+    tokio::task::yield_now().await;
+    let res = ignore_io_errors(res).map_err(translate_error);
+    trace!(?res, "{name}");
+    let shutdown = ignore_shutdown_errors(shutdown(writer).await)
+        .map_err(translate_error)
+        .map_err(|e| proxy::Error::ShutdownError(Box::new(e)));
+    Ok(shutdown.and(res))
 }
 
 // The result of a copy that a direction aborted. An abort caused by an HBONE teardown is reported
@@ -314,6 +398,7 @@ fn ignore_shutdown_errors(res: Result<(), io::Error>) -> Result<(), io::Error> {
     match &res {
         Err(e)
             if e.kind() == io::ErrorKind::NotConnected
+                || e.kind() == io::ErrorKind::BrokenPipe
                 || e.kind() == io::ErrorKind::UnexpectedEof =>
         {
             trace!(err=%e, "failed to shutdown peer, they already shutdown");
@@ -331,6 +416,8 @@ struct CopyBuf<'a, R: ?Sized, W: ?Sized> {
     writer: &'a mut W,
     buf: Option<Bytes>,
     metrics: &'a ConnectionResult,
+    // Whether the copy's other direction is done, so only this one is left to notice an abort.
+    other_done: &'a AtomicBool,
     amt: u64,
 }
 
@@ -339,6 +426,7 @@ async fn copy_buf<'a, R, W>(
     writer: &'a mut W,
     metrics: &ConnectionResult,
     is_send: bool,
+    other_done: &AtomicBool,
 ) -> std::io::Result<u64>
 where
     R: ResizeBufRead + Unpin + ?Sized,
@@ -350,6 +438,7 @@ where
         writer,
         buf: None,
         metrics,
+        other_done,
         amt: 0,
     }
     .await
@@ -370,7 +459,19 @@ where
             let buffer = if let Some(buffer) = me.buf.take() {
                 buffer
             } else {
-                ready!(Pin::new(&mut *me.reader).poll_bytes(cx))?
+                match Pin::new(&mut *me.reader).poll_bytes(cx) {
+                    Poll::Ready(res) => res?,
+                    Poll::Pending => {
+                        // Waiting on the reader, so a write won't find out if the peer aborted. While the
+                        // other direction is running, it finds out for both.
+                        if me.other_done.load(Ordering::Relaxed)
+                            && let Poll::Ready(err) = Pin::new(&mut *me.writer).poll_aborted(cx)
+                        {
+                            return Poll::Ready(Err(err));
+                        }
+                        return Poll::Pending;
+                    }
+                }
             };
             if buffer.is_empty() {
                 ready!(AsyncWriteBuf::poll_flush(Pin::new(&mut self.writer), cx))?;
@@ -719,5 +820,109 @@ pub(crate) mod tests {
         let (read, res) = copy_with_failing_upstream(io::ErrorKind::BrokenPipe).await;
         assert_eq!(read.unwrap(), 0);
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn app_reset_after_half_close_ends_copy() {
+        initialize_telemetry();
+        async fn tcp_pair() -> (TcpStream, TcpStream) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let a = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            (a, listener.accept().await.unwrap().0)
+        }
+        let (mut app, downstream) = tcp_pair().await;
+        let (upstream, mut backend) = tcp_pair().await;
+        let copy = tokio::spawn(async move {
+            let cr = connection_result();
+            copy_bidirectional(
+                TcpStreamSplitter(downstream),
+                TcpStreamSplitter(upstream),
+                &cr,
+            )
+            .await
+        });
+        app.shutdown().await.unwrap();
+        assert_eq!(backend.read(&mut [0; 16]).await.unwrap(), 0);
+
+        app.set_zero_linger().unwrap();
+        drop(app);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), copy)
+            .await
+            .expect("the copy never saw the reset")
+            .unwrap()
+            .unwrap();
+    }
+
+    struct ReadOnce(Option<Bytes>);
+    impl ResizeBufRead for ReadOnce {
+        fn poll_bytes(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<Bytes>> {
+            match self.0.take() {
+                Some(b) => Poll::Ready(Ok(b)),
+                None => Poll::Pending,
+            }
+        }
+        fn resize(self: Pin<&mut Self>, _: usize) {}
+    }
+
+    // A writer that resets on write if `reset_on_write`, and records whether it was shut down.
+    struct RecordingWriter {
+        reset_on_write: bool,
+        shutdown: std::sync::Arc<AtomicBool>,
+    }
+    impl AsyncWriteBuf for RecordingWriter {
+        fn poll_write_buf(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            b: Bytes,
+        ) -> Poll<io::Result<usize>> {
+            if self.reset_on_write {
+                Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()))
+            } else {
+                Poll::Ready(Ok(b.len()))
+            }
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.shutdown.store(true, Ordering::SeqCst);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct Side(ReadOnce, RecordingWriter);
+    impl BufferedSplitter for Side {
+        type R = ReadOnce;
+        type W = RecordingWriter;
+        fn split_into_buffered_reader(self) -> (Self::R, Self::W) {
+            (self.0, self.1)
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_does_not_shutdown_surviving_peer() {
+        let downstream_shutdown = std::sync::Arc::new(AtomicBool::new(false));
+        let downstream = Side(
+            ReadOnce(Some(Bytes::from_static(b"request"))),
+            RecordingWriter {
+                reset_on_write: false,
+                shutdown: downstream_shutdown.clone(),
+            },
+        );
+        // The upstream has half-closed, so its read is EOF, and its write finds that it was reset.
+        let upstream = Side(
+            ReadOnce(Some(Bytes::new())),
+            RecordingWriter {
+                reset_on_write: true,
+                shutdown: Default::default(),
+            },
+        );
+        copy_bidirectional(downstream, upstream, &connection_result())
+            .await
+            .unwrap();
+        assert!(!downstream_shutdown.load(Ordering::SeqCst));
     }
 }

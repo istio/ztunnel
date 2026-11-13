@@ -100,7 +100,7 @@ impl InboundPassthrough {
                             debug!(component="inbound passthrough", dur=?start.elapsed(), "connection completed");
                         }.in_current_span();
 
-                        assertions::size_between_ref(1500, 3000, &serve_client);
+                        assertions::size_between_ref(1500, 2500, &serve_client);
                         tokio::spawn(serve_client);
                     }
                     Err(e) => {
