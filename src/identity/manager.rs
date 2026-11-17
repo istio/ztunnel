@@ -1790,10 +1790,9 @@ mod tests {
         tokio::time::sleep(NANOSEC).await;
 
         // check the metric is removed
-        let after_a = family.get_or_create(&labels_a).get();
-        assert_eq!(
-            after_a, 0,
-            "{} metric should be zero after forget",
+        assert!(
+            family.get(&labels_a).is_none(),
+            "{} metric should not exist after forget",
             POD_NAME_A
         );
 
@@ -1877,9 +1876,11 @@ mod tests {
         test.secret_manager.forget_certificate(&id).await;
         tokio::time::sleep(NANOSEC).await;
 
-        let after_id = family.get_or_create(&labels_id).get();
+        assert!(
+            family.get(&labels_id).is_none(),
+            "identity metric should not exist after forget"
+        );
         let after_wl = family.get_or_create(&labels_wl).get();
-        assert_eq!(after_id, 0, "identity metric should be zero after forget");
         assert_eq!(
             after_wl, expiry_wl,
             "workload metric must survive identity forget"
