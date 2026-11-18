@@ -5005,7 +5005,6 @@ dependencies = [
  "notify-debouncer-full",
  "num_cpus",
  "oid-registry",
- "once_cell",
  "openssl",
  "openssl-sys",
  "pin-project-lite",

@@ -14,21 +14,20 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use once_cell::sync::Lazy;
 use prometheus_client::registry::Registry;
 use tracing::debug;
 
 use crate::metrics::sub_registry;
 use crate::{proxy, telemetry};
 
-// Ensure that the `tracing` stack is only initialised once using `once_cell`
-static TRACING: Lazy<()> = Lazy::new(telemetry::testing::setup_test_logging);
+// Ensure that the `tracing` stack is only initialised once.
+static TRACING: LazyLock<()> = LazyLock::new(telemetry::testing::setup_test_logging);
 
 pub fn initialize_telemetry() {
-    Lazy::force(&TRACING);
+    LazyLock::force(&TRACING);
 }
 
 pub fn test_proxy_metrics() -> Arc<proxy::Metrics> {

@@ -21,7 +21,6 @@ use hickory_resolver::system_conf::read_system_conf;
 use hickory_server::Server as HickoryServer;
 use hickory_server::server::Request;
 use hickory_server::zone_handler::LookupError;
-use once_cell::sync::Lazy;
 use rand::rng;
 use rand::seq::SliceRandom;
 use std::collections::HashSet;
@@ -29,7 +28,7 @@ use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tracing::event;
 use tracing::{debug, error, info, instrument, trace, warn};
@@ -56,7 +55,7 @@ const DEFAULT_TCP_REQUEST_TIMEOUT: u64 = 5;
 const DEFAULT_TCP_RESPONSE_BUFFER_SIZE: usize = 32;
 const DEFAULT_TTL_SECONDS: u32 = 30;
 
-static SVC: Lazy<Name> = Lazy::new(|| as_name("svc"));
+static SVC: LazyLock<Name> = LazyLock::new(|| as_name("svc"));
 
 /// A DNS server that serves known hostnames from ztunnel data structures.
 /// Unknown hosts are forwarded to an upstream resolver.
