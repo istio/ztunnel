@@ -34,14 +34,16 @@ use rustls::ServerConfig;
 pub static MESH_CIPHER_SUITES: Lazy<Vec<String>> = Lazy::new(|| {
     env::var("MESH_CIPHER_SUITES")
         .ok()
-        .map(|s| {
-            s.split(',')
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-                .collect()
-        })
+        .map(|s| parse_cipher_suite_names(&s))
         .unwrap_or_default()
 });
+
+fn parse_cipher_suite_names(val: &str) -> Vec<String> {
+    val.split(',')
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect()
+}
 
 #[async_trait::async_trait]
 pub trait ControlPlaneClientCertProvider: Send + Sync {
@@ -80,6 +82,13 @@ pub static CRYPTO_PROVIDER: &str = "tls-openssl";
 // One exception is CSR generation which doesn't currently have a plugin mechanism (https://github.com/rustls/rcgen/issues/228);
 // In that case, and any future ones, it is critical to guard the code with appropriate `cfg` guards.
 
+#[allow(dead_code)]
+const SUPPORTED_CIPHER_SUITES: &[&str] = &[
+    "TLS_AES_256_GCM_SHA384",
+    "TLS_AES_128_GCM_SHA256",
+    "TLS_CHACHA20_POLY1305_SHA256",
+];
+
 #[allow(unused_macros)]
 macro_rules! impl_parse_cipher_suites {
     ($fn_name:ident, $provider_mod:path) => {
@@ -94,7 +103,7 @@ macro_rules! impl_parse_cipher_suites {
                     "TLS_AES_256_GCM_SHA384" => suites.push(cs::TLS13_AES_256_GCM_SHA384),
                     "TLS_AES_128_GCM_SHA256" => suites.push(cs::TLS13_AES_128_GCM_SHA256),
                     "TLS_CHACHA20_POLY1305_SHA256" => suites.push(cs::TLS13_CHACHA20_POLY1305_SHA256),
-                    unknown => tracing::warn!("unknown cipher suite '{unknown}', ignoring"),
+                    unknown => tracing::warn!("unknown cipher suite '{unknown}', ignoring. Expected names: {}", SUPPORTED_CIPHER_SUITES.join(", ")),
                 }
             }
             if suites.is_empty() {
@@ -123,8 +132,8 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
 impl_parse_cipher_suites!(parse_cipher_suites_ring, rustls::crypto::ring::cipher_suite);
 
 #[cfg(feature = "tls-ring")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
-    let cipher_suites = if let Some(suites) = parse_cipher_suites_ring(&MESH_CIPHER_SUITES) {
+fn provider_with_suites(names: &[String]) -> Arc<CryptoProvider> {
+    let cipher_suites = if let Some(suites) = parse_cipher_suites_ring(names) {
         suites
     } else {
         let mut suites = vec![
@@ -147,6 +156,11 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
     })
 }
 
+#[cfg(feature = "tls-ring")]
+pub(super) fn provider() -> Arc<CryptoProvider> {
+    provider_with_suites(&MESH_CIPHER_SUITES)
+}
+
 #[cfg(feature = "tls-aws-lc")]
 impl_parse_cipher_suites!(
     parse_cipher_suites_aws_lc,
@@ -154,8 +168,8 @@ impl_parse_cipher_suites!(
 );
 
 #[cfg(feature = "tls-aws-lc")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
-    let cipher_suites = if let Some(suites) = parse_cipher_suites_aws_lc(&MESH_CIPHER_SUITES) {
+fn provider_with_suites(names: &[String]) -> Arc<CryptoProvider> {
+    let cipher_suites = if let Some(suites) = parse_cipher_suites_aws_lc(names) {
         suites
     } else {
         let mut suites = vec![
@@ -185,12 +199,17 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
     Arc::new(provider)
 }
 
+#[cfg(feature = "tls-aws-lc")]
+pub(super) fn provider() -> Arc<CryptoProvider> {
+    provider_with_suites(&MESH_CIPHER_SUITES)
+}
+
 #[cfg(feature = "tls-openssl")]
 impl_parse_cipher_suites!(parse_cipher_suites_openssl, rustls_openssl::cipher_suite);
 
 #[cfg(feature = "tls-openssl")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
-    let cipher_suites = if let Some(suites) = parse_cipher_suites_openssl(&MESH_CIPHER_SUITES) {
+fn provider_with_suites(names: &[String]) -> Arc<CryptoProvider> {
+    let cipher_suites = if let Some(suites) = parse_cipher_suites_openssl(names) {
         suites
     } else {
         let mut suites = vec![
@@ -233,6 +252,11 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
         kx_groups,
         ..rustls_openssl::default_provider()
     })
+}
+
+#[cfg(feature = "tls-openssl")]
+pub(super) fn provider() -> Arc<CryptoProvider> {
+    provider_with_suites(&MESH_CIPHER_SUITES)
 }
 
 /// Returns true if the given [`std::io::Error`] wraps a rustls
@@ -402,10 +426,6 @@ pub mod tests {
         }
     }
 
-    fn s(v: &str) -> String {
-        v.to_string()
-    }
-
     fn suite_names(suites: &[rustls::SupportedCipherSuite]) -> Vec<rustls::CipherSuite> {
         suites.iter().map(|s| s.suite()).collect()
     }
@@ -431,7 +451,7 @@ pub mod tests {
 
         #[test]
         fn single_tls13_suite() {
-            let result = parse(&[s("TLS_AES_256_GCM_SHA384")]).unwrap();
+            let result = parse(&["TLS_AES_256_GCM_SHA384".to_string()]).unwrap();
             assert_eq!(
                 suite_names(&result),
                 vec![CipherSuite::TLS13_AES_256_GCM_SHA384]
@@ -440,15 +460,15 @@ pub mod tests {
 
         #[test]
         fn tls12_suite_rejected_as_unknown() {
-            assert!(parse(&[s("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384")]).is_none());
+            assert!(parse(&["TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384".to_string()]).is_none());
         }
 
         #[test]
         fn multiple_valid_suites() {
             let input = vec![
-                s("TLS_AES_256_GCM_SHA384"),
-                s("TLS_AES_128_GCM_SHA256"),
-                s("TLS_CHACHA20_POLY1305_SHA256"),
+                "TLS_AES_256_GCM_SHA384".to_string(),
+                "TLS_AES_128_GCM_SHA256".to_string(),
+                "TLS_CHACHA20_POLY1305_SHA256".to_string(),
             ];
             let result = parse(&input).unwrap();
             assert_eq!(
@@ -463,16 +483,16 @@ pub mod tests {
 
         #[test]
         fn all_unknown_returns_none() {
-            let input = vec![s("BOGUS_CIPHER"), s("ANOTHER_FAKE")];
+            let input = vec!["BOGUS_CIPHER".to_string(), "ANOTHER_FAKE".to_string()];
             assert!(parse(&input).is_none());
         }
 
         #[test]
         fn mix_of_valid_and_unknown_keeps_valid() {
             let input = vec![
-                s("TLS_AES_128_GCM_SHA256"),
-                s("BOGUS_CIPHER"),
-                s("TLS_CHACHA20_POLY1305_SHA256"),
+                "TLS_AES_128_GCM_SHA256".to_string(),
+                "BOGUS_CIPHER".to_string(),
+                "TLS_CHACHA20_POLY1305_SHA256".to_string(),
             ];
             let result = parse(&input).unwrap();
             assert_eq!(
@@ -487,9 +507,9 @@ pub mod tests {
         #[test]
         fn all_three_supported_suites() {
             let input = vec![
-                s("TLS_AES_256_GCM_SHA384"),
-                s("TLS_AES_128_GCM_SHA256"),
-                s("TLS_CHACHA20_POLY1305_SHA256"),
+                "TLS_AES_256_GCM_SHA384".to_string(),
+                "TLS_AES_128_GCM_SHA256".to_string(),
+                "TLS_CHACHA20_POLY1305_SHA256".to_string(),
             ];
             let result = parse(&input).unwrap();
             assert_eq!(result.len(), 3);
@@ -498,8 +518,8 @@ pub mod tests {
         #[test]
         fn preserves_input_order() {
             let input = vec![
-                s("TLS_CHACHA20_POLY1305_SHA256"),
-                s("TLS_AES_256_GCM_SHA384"),
+                "TLS_CHACHA20_POLY1305_SHA256".to_string(),
+                "TLS_AES_256_GCM_SHA384".to_string(),
             ];
             let result = parse(&input).unwrap();
             assert_eq!(
@@ -513,17 +533,12 @@ pub mod tests {
     }
 
     mod mesh_cipher_suites_env_parsing {
-        fn parse_env_value(val: &str) -> Vec<String> {
-            val.split(',')
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-                .collect()
-        }
+        use super::super::parse_cipher_suite_names;
 
         #[test]
         fn comma_separated() {
             assert_eq!(
-                parse_env_value("TLS_AES_256_GCM_SHA384,TLS_AES_128_GCM_SHA256"),
+                parse_cipher_suite_names("TLS_AES_256_GCM_SHA384,TLS_AES_128_GCM_SHA256"),
                 vec!["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
             );
         }
@@ -531,7 +546,7 @@ pub mod tests {
         #[test]
         fn whitespace_trimmed() {
             assert_eq!(
-                parse_env_value("  TLS_AES_256_GCM_SHA384 , TLS_AES_128_GCM_SHA256  "),
+                parse_cipher_suite_names("  TLS_AES_256_GCM_SHA384 , TLS_AES_128_GCM_SHA256  "),
                 vec!["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
             );
         }
@@ -539,21 +554,36 @@ pub mod tests {
         #[test]
         fn empty_entries_filtered() {
             assert_eq!(
-                parse_env_value("TLS_AES_256_GCM_SHA384,,, ,TLS_AES_128_GCM_SHA256"),
+                parse_cipher_suite_names("TLS_AES_256_GCM_SHA384,,, ,TLS_AES_128_GCM_SHA256"),
                 vec!["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
             );
         }
 
         #[test]
         fn empty_string_produces_empty_vec() {
-            let result: Vec<String> = parse_env_value("");
-            assert!(result.is_empty());
+            assert!(parse_cipher_suite_names("").is_empty());
         }
 
         #[test]
         fn only_commas_produces_empty_vec() {
-            let result: Vec<String> = parse_env_value(",,,");
-            assert!(result.is_empty());
+            assert!(parse_cipher_suite_names(",,,").is_empty());
         }
+    }
+
+    #[test]
+    #[cfg(any(feature = "tls-aws-lc", feature = "tls-ring", feature = "tls-openssl"))]
+    fn provider_applies_configured_suites() {
+        let names = vec![
+            "TLS_AES_256_GCM_SHA384".to_string(),
+            "TLS_CHACHA20_POLY1305_SHA256".to_string(),
+        ];
+        let provider = super::provider_with_suites(&names);
+        assert_eq!(
+            suite_names(&provider.cipher_suites),
+            vec![
+                rustls::CipherSuite::TLS13_AES_256_GCM_SHA384,
+                rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
+            ]
+        );
     }
 }
