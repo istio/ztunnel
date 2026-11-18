@@ -112,8 +112,11 @@ impl Authorization {
                 // So we need ANY mg to match...
                 let mut clause_match = false;
                 for mg in clause.iter() {
-                    if mg.is_empty() {
-                        trace!(matches = false, "empty clause");
+                    // Istiod can leave an empty match after stripping HTTP attributes.
+                    // For DENY, it must match to fail closed while the remaining L4
+                    // clauses still apply. Keep empty matches from broadening ALLOW.
+                    if self.action == RbacAction::Allow && mg.is_empty() {
+                        trace!(matches = false, "empty match");
                         continue;
                     }
                     // We need ALL of these to match. Within each type, ANY must match
@@ -524,20 +527,74 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rbac_empty_policy() {
-        assert!(
-            !allow_policy(
-                "empty",
-                vec![vec![vec![RbacMatch {
-                    ..Default::default()
-                }]]]
-            )
-            .matches(&plaintext_conn())
-        );
-        assert!(allow_policy("empty", vec![vec![vec![]]]).matches(&plaintext_conn()));
-        assert!(allow_policy("empty", vec![vec![]]).matches(&plaintext_conn()));
-        assert!(!allow_policy("empty", vec![]).matches(&plaintext_conn()));
+    #[test_case(RbacAction::Allow; "allow")]
+    #[test_case(RbacAction::Deny; "deny")]
+    fn rbac_empty_policy(action: RbacAction) {
+        for (rules, expected) in [
+            (
+                vec![vec![vec![RbacMatch::default()]]],
+                action == RbacAction::Deny,
+            ),
+            (vec![vec![vec![]]], true),
+            (vec![vec![]], true),
+            (vec![], false),
+        ] {
+            let pol = Authorization {
+                action,
+                ..allow_policy("empty", rules)
+            };
+            for conn in [plaintext_conn(), tls_conn(), tls_conn_alt()] {
+                assert_eq!(pol.matches(&conn), expected, "{pol:?}: {conn}");
+            }
+        }
+    }
+
+    #[test_case(RbacAction::Allow; "allow")]
+    #[test_case(RbacAction::Deny; "deny")]
+    fn rbac_empty_match_with_l4(action: RbacAction) {
+        let port = RbacMatch {
+            destination_ports: vec![8080],
+            ..Default::default()
+        };
+        let not_port = RbacMatch {
+            not_destination_ports: vec![8080],
+            ..Default::default()
+        };
+        let empty_matches = action == RbacAction::Deny;
+        for (name, rule, expected, expected_alt) in [
+            (
+                "l4 with http-only when",
+                vec![vec![port.clone()], vec![RbacMatch::default()]],
+                empty_matches,
+                false,
+            ),
+            (
+                "http-only from with l4 exclusion",
+                vec![vec![RbacMatch::default()], vec![not_port.clone()]],
+                false,
+                empty_matches,
+            ),
+            (
+                "l4 or http-only to",
+                vec![vec![port.clone(), RbacMatch::default()]],
+                true,
+                empty_matches,
+            ),
+            (
+                "http-only or l4 to with l4 when",
+                vec![vec![RbacMatch::default(), not_port], vec![port]],
+                empty_matches,
+                false,
+            ),
+        ] {
+            let pol = Authorization {
+                action,
+                ..allow_policy(name, vec![rule])
+            };
+            assert_eq!(pol.matches(&plaintext_conn()), expected, "{name}");
+            assert_eq!(pol.matches(&tls_conn()), expected, "{name}");
+            assert_eq!(pol.matches(&tls_conn_alt()), expected_alt, "{name}");
+        }
     }
 
     #[test]

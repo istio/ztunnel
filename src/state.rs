@@ -1861,6 +1861,78 @@ mod tests {
         }
     }
 
+    #[test_case(false; "enforced")]
+    #[test_case(true; "dry run")]
+    #[tokio::test]
+    async fn assert_rbac_deny_with_http_when(dry_run: bool) {
+        use crate::xds::istio::security;
+
+        let from_namespace = |namespace: &str| security::Clause {
+            matches: vec![security::Match {
+                namespaces: vec![security::StringMatch {
+                    match_type: Some(security::string_match::MatchType::Exact(namespace.into())),
+                }],
+                ..Default::default()
+            }],
+        };
+        // Istiod strips HTTP attributes from DENY rules, leaving an empty match
+        // for the `when` condition in the second rule:
+        // - from: [{source: {namespaces: [staging]}}]
+        // - from: [{source: {namespaces: [pci]}}]
+        //   when: [{key: "request.headers[x-canary]", values: ["true"]}]
+        let policy = Authorization::try_from(XdsAuthorization {
+            name: "deny".into(),
+            namespace: "ns1".into(),
+            scope: security::Scope::Namespace.into(),
+            action: security::Action::Deny.into(),
+            rules: vec![
+                security::Rule {
+                    clauses: vec![from_namespace("staging")],
+                },
+                security::Rule {
+                    clauses: vec![
+                        from_namespace("pci"),
+                        security::Clause {
+                            matches: vec![security::Match::default()],
+                        },
+                    ],
+                },
+            ],
+            dry_run,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut state = ProxyState::new(None);
+        state.workloads.insert(Arc::new(create_workload(1)));
+        state.policies.insert(policy.to_key(), policy);
+        // A matching DENY must take precedence over an explicit ALLOW.
+        let allow = Authorization {
+            name: "allow".into(),
+            dry_run: false,
+            ..create_dry_run_wildcard_rbac_policy(rbac::RbacAction::Allow)
+        };
+        state.policies.insert(allow.to_key(), allow);
+        let state = create_state(state);
+
+        for namespace in [Some("staging"), Some("pci"), Some("other"), None] {
+            let mut ctx = get_rbac_context(&state, 1, "defaultacct");
+            ctx.conn.src_identity = namespace.map(|namespace| Identity::Spiffe {
+                trust_domain: "cluster.local".into(),
+                namespace: namespace.into(),
+                service_account: "defaultacct".into(),
+            });
+            let expected = if !dry_run && matches!(namespace, Some("staging" | "pci")) {
+                Err(proxy::AuthorizationRejectionError::ExplicitlyDenied(
+                    "ns1".into(),
+                    "deny".into(),
+                ))
+            } else {
+                Ok(())
+            };
+            assert_eq!(state.assert_rbac(&ctx).await, expected, "{namespace:?}");
+        }
+    }
+
     #[tokio::test]
     async fn assert_rbac_with_dest_workload_info() {
         let mut state = ProxyState::new(None);
