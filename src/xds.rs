@@ -186,8 +186,11 @@ impl ProxyStateUpdateMutator {
         // the only part that needs the lock.
         let prepared = PreparedWorkload::try_from_xds(w)?;
         let mut acc = EndpointAccumulator::default();
-        self.apply_prepared_workload(state, prepared, &mut acc);
+        let policies_changed = self.apply_prepared_workload(state, prepared, &mut acc);
         acc.apply(&mut state.services);
+        if policies_changed {
+            state.policies.send();
+        }
         Ok(())
     }
 
@@ -197,9 +200,12 @@ impl ProxyStateUpdateMutator {
     /// Endpoint changes are accumulated and applied once per service at the end.
     fn apply_prepared(&self, state: &mut ProxyState, prepared: Vec<PreparedUpdate>) {
         let mut acc = EndpointAccumulator::default();
+        let mut policies_changed = false;
         for update in prepared {
             match update {
-                PreparedUpdate::Workload(w) => self.apply_prepared_workload(state, w, &mut acc),
+                PreparedUpdate::Workload(w) => {
+                    policies_changed |= self.apply_prepared_workload(state, w, &mut acc)
+                }
                 // Services are applied in order (already a single clone + reindex,
                 // and must be present before phase-2 endpoint application).
                 PreparedUpdate::Service(s) => self.insert_service_prepared(state, *s),
@@ -210,21 +216,31 @@ impl ProxyStateUpdateMutator {
             }
         }
         acc.apply(&mut state.services);
+        if policies_changed {
+            // Existing connections must be re-checked against the workload's new policy list.
+            state.policies.send();
+        }
     }
 
     /// Inserts a pre-converted workload into the workload store and accumulates
     /// its service endpoint changes into `acc` (applied once per service later).
+    /// Returns true if an existing workload's set of selected policies changed.
     fn apply_prepared_workload(
         &self,
         state: &mut ProxyState,
         prepared: PreparedWorkload,
         acc: &mut EndpointAccumulator,
-    ) {
+    ) -> bool {
         debug!("handling insert");
         let PreparedWorkload {
             workload,
             endpoints,
         } = prepared;
+
+        let policies_changed = state
+            .workloads
+            .find_uid(&workload.uid)
+            .is_some_and(|prev| prev.authorization_policies != workload.authorization_policies);
 
         // First, remove the entry entirely to make sure things are cleaned up properly.
         self.remove_workload_for_insert(state, &workload.uid, acc);
@@ -236,6 +252,7 @@ impl ProxyStateUpdateMutator {
         for (service, endpoint) in endpoints {
             acc.upsert(service, workload.uid.clone(), endpoint);
         }
+        policies_changed
     }
 
     pub fn remove(&self, state: &mut ProxyState, xds_name: &Strng) {
@@ -838,5 +855,32 @@ mod tests {
         let remove = XdsUpdate::<XdsAddress>::Remove(workload(0, XdsStatus::Healthy).uid.into());
         apply(&updater, vec![remove]).unwrap();
         assert_eq!(endpoint_count(&state), 1);
+    }
+
+    // A change to an existing workload's policy list must notify policy watchers so
+    // existing connections are re-checked, even when no Authorization is pushed.
+    #[test]
+    fn workload_policy_change_notifies() {
+        let (updater, state) = updater_and_state();
+        let mut rx = state.read().unwrap().policies.subscribe();
+        let with_policies = |policies: &[&str]| XdsWorkload {
+            authorization_policies: policies.iter().map(|p| p.to_string()).collect(),
+            ..workload(0, XdsStatus::Healthy)
+        };
+
+        // a new workload has no existing connections to re-check
+        apply(&updater, vec![wl_update(with_policies(&[]))]).unwrap();
+        assert!(!rx.has_changed().unwrap());
+
+        // an unrelated update leaves the policy list unchanged
+        apply(&updater, vec![wl_update(with_policies(&[]))]).unwrap();
+        assert!(!rx.has_changed().unwrap());
+
+        apply(&updater, vec![wl_update(with_policies(&["ns/allow"]))]).unwrap();
+        assert!(rx.has_changed().unwrap());
+        rx.mark_unchanged();
+
+        apply(&updater, vec![wl_update(with_policies(&[]))]).unwrap();
+        assert!(rx.has_changed().unwrap());
     }
 }
