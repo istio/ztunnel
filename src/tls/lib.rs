@@ -39,10 +39,30 @@ pub static MESH_CIPHER_SUITES: Lazy<Vec<String>> = Lazy::new(|| {
 });
 
 fn parse_cipher_suite_names(val: &str) -> Vec<String> {
-    val.split(',')
+    let raw: Vec<String> = val
+        .split(',')
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-        .collect()
+        .collect();
+    let recognized: Vec<String> = raw
+        .iter()
+        .filter(|v| {
+            if SUPPORTED_CIPHER_SUITES.contains(&v.as_str()) {
+                true
+            } else {
+                tracing::warn!(
+                    "unknown cipher suite '{v}', ignoring. Expected names: {}",
+                    SUPPORTED_CIPHER_SUITES.join(", ")
+                );
+                false
+            }
+        })
+        .cloned()
+        .collect();
+    if !raw.is_empty() && recognized.is_empty() {
+        tracing::warn!("all configured cipher suites were unrecognized, falling back to defaults");
+    }
+    recognized
 }
 
 #[async_trait::async_trait]
@@ -59,12 +79,24 @@ static TLS_VERSIONS_13_ONLY: &[&rustls::SupportedProtocolVersion] = &[&rustls::v
 static TLS_VERSIONS_12_AND_13: &[&rustls::SupportedProtocolVersion] =
     &[&rustls::version::TLS13, &rustls::version::TLS12];
 
-pub fn tls_versions() -> &'static [&'static rustls::SupportedProtocolVersion] {
-    if *TLS12_ENABLED {
+static TLS_VERSIONS: Lazy<&'static [&'static rustls::SupportedProtocolVersion]> = Lazy::new(|| {
+    if !MESH_CIPHER_SUITES.is_empty() {
+        if *TLS12_ENABLED {
+            tracing::warn!(
+                "TLS 1.2 disabled despite TLS12_ENABLED=true because MESH_CIPHER_SUITES is set; \
+                 custom cipher suites are only supported with TLS 1.3"
+            );
+        }
+        TLS_VERSIONS_13_ONLY
+    } else if *TLS12_ENABLED {
         TLS_VERSIONS_12_AND_13
     } else {
         TLS_VERSIONS_13_ONLY
     }
+});
+
+pub fn tls_versions() -> &'static [&'static rustls::SupportedProtocolVersion] {
+    &TLS_VERSIONS
 }
 
 #[cfg(feature = "tls-aws-lc")]
@@ -97,17 +129,16 @@ macro_rules! impl_parse_cipher_suites {
                 return None;
             }
             use $provider_mod as cs;
-            let mut suites = Vec::new();
-            for name in names {
-                match name.as_str() {
-                    "TLS_AES_256_GCM_SHA384" => suites.push(cs::TLS13_AES_256_GCM_SHA384),
-                    "TLS_AES_128_GCM_SHA256" => suites.push(cs::TLS13_AES_128_GCM_SHA256),
-                    "TLS_CHACHA20_POLY1305_SHA256" => suites.push(cs::TLS13_CHACHA20_POLY1305_SHA256),
-                    unknown => tracing::warn!("unknown cipher suite '{unknown}', ignoring. Expected names: {}", SUPPORTED_CIPHER_SUITES.join(", ")),
-                }
-            }
+            let suites: Vec<_> = names
+                .iter()
+                .filter_map(|name| match name.as_str() {
+                    "TLS_AES_256_GCM_SHA384" => Some(cs::TLS13_AES_256_GCM_SHA384),
+                    "TLS_AES_128_GCM_SHA256" => Some(cs::TLS13_AES_128_GCM_SHA256),
+                    "TLS_CHACHA20_POLY1305_SHA256" => Some(cs::TLS13_CHACHA20_POLY1305_SHA256),
+                    _ => None,
+                })
+                .collect();
             if suites.is_empty() {
-                tracing::warn!("all configured cipher suites were unrecognized ({names:?}), falling back to defaults");
                 None
             } else {
                 let applied: Vec<_> = suites.iter().map(|s| s.suite()).collect();
@@ -567,6 +598,19 @@ pub mod tests {
         #[test]
         fn only_commas_produces_empty_vec() {
             assert!(parse_cipher_suite_names(",,,").is_empty());
+        }
+
+        #[test]
+        fn unknown_suites_filtered() {
+            assert_eq!(
+                parse_cipher_suite_names("TLS_AES_256_GCM_SHA384,TLS_BOGUS,TLS_AES_128_GCM_SHA256"),
+                vec!["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
+            );
+        }
+
+        #[test]
+        fn all_unknown_produces_empty_vec() {
+            assert!(parse_cipher_suite_names("TLS_BOGUS,TLS_FAKE").is_empty());
         }
     }
 
