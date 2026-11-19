@@ -152,7 +152,9 @@ impl AbortWatch {
     fn start(&self) -> io::Result<Pin<Box<dyn Future<Output = Error> + Send + Sync>>> {
         // SAFETY: the socket outlives the copy, and so this watch.
         let fd: OwnedFd = unsafe { BorrowedFd::borrow_raw(self.fd) }.try_clone_to_owned()?;
-        let fd = AsyncFd::with_interest(fd, Interest::ERROR)?;
+        // SAFETY: `fd` is an owned duplicate that the `AsyncFd` takes ownership of, so it stays
+        // open and refers to the same file description for the lifetime of the `AsyncFd`.
+        let fd = unsafe { AsyncFd::register_with_interest(fd, Interest::ERROR) }?;
         Ok(Box::pin(async move {
             // An error on a connection that the peer half-closed is the peer's reset.
             let _ = fd.ready(Interest::ERROR).await;
