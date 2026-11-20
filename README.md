@@ -41,7 +41,31 @@ Rustls has support for plugging in various crypto providers to meet various need
 | [boring](https://github.com/cloudflare/boring)     | `--features tls-boring --no-default-features`  |
 | [openssl](https://github.com/tofay/rustls-openssl) | `--features tls-openssl --no-default-features` |
 
-In all options, only TLS 1.3 with cipher suites `TLS13_AES_256_GCM_SHA384` and `TLS13_AES_128_GCM_SHA256` is used.
+In all options, only TLS 1.3 with cipher suites `TLS13_AES_256_GCM_SHA384` and `TLS13_AES_128_GCM_SHA256` is used by default.
+
+#### Cipher suite configuration
+
+The default cipher suites can be overridden at startup with the `MESH_CIPHER_SUITES` environment variable.
+The value is a comma-separated list of TLS 1.3 cipher suite names (case-sensitive, whitespace around names is trimmed):
+
+```shell
+MESH_CIPHER_SUITES=TLS_AES_256_GCM_SHA384,TLS_CHACHA20_POLY1305_SHA256
+```
+
+Accepted names (the complete set of TLS 1.3 suites defined by RFC 8446):
+
+| Name | Suite |
+|------|-------|
+| `TLS_AES_256_GCM_SHA384` | AES-256-GCM with SHA-384 |
+| `TLS_AES_128_GCM_SHA256` | AES-128-GCM with SHA-256 |
+| `TLS_CHACHA20_POLY1305_SHA256` | ChaCha20-Poly1305 with SHA-256 |
+
+When set, the specified suites **replace** the defaults entirely. Input order is preserved and determines server preference.
+Unrecognized names are logged as warnings and skipped. If all names are unrecognized, the defaults are used.
+
+This variable is ignored when using the `boring` provider (BoringSSL FIPS uses fixed cipher suites).
+
+The configured suites are visible in the `/config_dump` admin endpoint under `cipherSuites`.
 
 #### `boring` FIPS
 
