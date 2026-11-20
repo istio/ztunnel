@@ -523,6 +523,49 @@ pub mod testing {
         );
     }
 
+    /// assert_contains_span asserts the logs contain a line whose top-level fields match
+    /// `event_match` and whose span named `span_name` contains every key-value in `span_fields`.
+    #[track_caller]
+    pub fn assert_contains_span(
+        event_match: HashMap<&str, &str>,
+        span_name: &str,
+        span_fields: HashMap<&str, &str>,
+    ) {
+        let logs = {
+            let buf = global_buf().lock().unwrap();
+            std::str::from_utf8(&buf)
+                .expect("Logs contain invalid UTF8")
+                .to_string()
+        };
+        for line in logs.lines() {
+            let log: Value = serde_json::from_str(line).expect("log must be valid json");
+
+            let event_ok = event_match.iter().all(|(k, v)| {
+                log.get(k)
+                    .and_then(|val| val.as_str())
+                    .is_some_and(|have| have == *v)
+            });
+            if !event_ok {
+                continue;
+            }
+
+            let Some(span_obj) = log.get(span_name).and_then(|v| v.as_object()) else {
+                continue;
+            };
+
+            let span_ok = span_fields.iter().all(|(k, v)| {
+                span_obj
+                    .get(*k)
+                    .and_then(|val| val.as_str())
+                    .is_some_and(|have| have == *v)
+            });
+            if span_ok {
+                return;
+            }
+        }
+        panic!("No log line matched event={event_match:?} with span {span_name}={span_fields:?}");
+    }
+
     /// MockWriter will store written logs
     #[derive(Debug)]
     pub struct MockWriter<'a> {
