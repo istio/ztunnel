@@ -623,15 +623,31 @@ impl ServiceStore {
         }
     }
 
+    /// Returns the Kubernetes headless services matching the given hostname. When a client
+    /// namespace is provided, skip services not visible to it so a NAMESPACE-scoped headless
+    /// service's pod FQDNs are not resolvable from another namespace (see get_best_by_host).
     pub fn get_headless_by_host(
         &self,
         host: &Strng,
         cluster_local_domain: &str,
+        ns: Option<&Strng>,
     ) -> Vec<NamespacedHostname> {
         self.get_by_host(&strng::new(host))
             .into_iter()
             .flat_map(|svcs| svcs.into_iter())
             .filter(|svc| svc.is_kubernetes_headless(cluster_local_domain))
+            .filter(|svc| {
+                let visible = ns.is_none_or(|n| svc.visible_to(n));
+                if !visible {
+                    debug!(
+                        hostname = %svc.hostname,
+                        service_namespace = %svc.namespace,
+                        client_namespace = ns.map(Strng::as_str).unwrap_or(""),
+                        "visibility filtering: service not visible to client namespace"
+                    );
+                }
+                visible
+            })
             .map(|svc| svc.namespaced_hostname())
             .collect_vec()
     }
