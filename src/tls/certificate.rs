@@ -324,7 +324,6 @@ impl WorkloadCertificate {
             }
         }
 
-        // TODO: check if our own certificate is revoked in the CRL and log warning
         let raw_client_cert_verifier = builder.build()?;
 
         let client_cert_verifier =

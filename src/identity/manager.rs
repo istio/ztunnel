@@ -18,9 +18,11 @@ use std::fmt;
 use std::fmt::{Formatter, Write};
 use std::hash::{Hash, RandomState};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::config::ProxyMode;
+use crate::proxy::Metrics;
+use crate::tls::crl::{CrlManager, check_own_cert_revocation};
 use async_trait::async_trait;
 
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
@@ -265,6 +267,18 @@ struct Worker {
     certs: Mutex<HashMap<CacheKey, CertChannel>>,
     // How many concurrent fetch_certificate calls can be pending at a time.
     concurrency: u16,
+
+    // CRL self-check dependencies, injected post-construction via enable_crl_self_check().
+    // Empty when CRL is not configured or in tests.
+    crl_self_check: OnceLock<CrlSelfCheckDeps>,
+}
+
+// Groups dependencies needed for CRL self-check (own cert revocation detection).
+struct CrlSelfCheckDeps {
+    crl_manager: Arc<CrlManager>,
+    metrics: Arc<Metrics>,
+    // Fires after each CRL reload, obtained from CrlManager::subscribe_reloads().
+    crl_reload_rx: watch::Receiver<u64>,
 }
 
 impl Worker {
@@ -281,6 +295,7 @@ impl Worker {
             time_conv: cfg.time_conv,
             concurrency: cfg.concurrency,
             certs: Default::default(),
+            crl_self_check: OnceLock::new(),
         });
 
         // Process requests in the background. The task will terminate on its own when the
@@ -326,7 +341,15 @@ impl Worker {
         // for other workloads. Kept separate from the `pending` KeyedPriorityKey for convenience.
         let mut pending_backoffs_by_key: HashMap<CacheKey, ExponentialBackoff> = HashMap::new();
 
+        // CRL-reload notification: cloned once when deps become available.
+        let mut crl_reload_rx: Option<watch::Receiver<u64>> = None;
         'main: loop {
+            if crl_reload_rx.is_none()
+                && let Some(deps) = self.crl_self_check.get()
+            {
+                crl_reload_rx = Some(deps.crl_reload_rx.clone());
+            }
+
             let next = pending.peek().map(|(_, PendingPriority(_, ts))| *ts);
             tokio::select! {
                 // Handle requests from SecretManager. Those are generally split between the
@@ -460,6 +483,12 @@ impl Worker {
                             // Reset (pop and drop) the backoff on success.
                             pending_backoffs_by_key.remove(&key);
                             let certs: tls::WorkloadCertificate = certs; // Type annotation.
+
+                            // Check if new certs are in the CRLs
+                            if let Some(deps) = self.crl_self_check.get() {
+                                check_own_cert_revocation(&certs, &deps.crl_manager, &deps.metrics);
+                            }
+
                             let refresh_at = self.time_conv.system_time_to_instant(certs.refresh_at());
                             let refresh_at = if let Some(t) = refresh_at {
                                 t.into()
@@ -490,6 +519,17 @@ impl Worker {
                         (key, res)
                     });
                 },
+                // Handle CRL reload: check all managed certs against the new CRL set.
+                Ok(()) = async {
+                    match crl_reload_rx.as_mut() {
+                        Some(rx) => rx.changed().await.map_err(|_| ()),
+                        None => {std::future::pending::<Result<(),()>>().await}
+                    }
+                } => {
+                    if let Some(deps) = self.crl_self_check.get() {
+                        self.check_all_certs_against_crl(deps).await;
+                    }
+                }
             };
         }
         // SecretManager dropped, drain remaining requests and terminate background processing.
@@ -543,6 +583,15 @@ impl Worker {
             }
         }
         None
+    }
+
+    async fn check_all_certs_against_crl(&self, deps: &CrlSelfCheckDeps) {
+        let certs = self.certs.lock().await;
+        for channel in certs.values() {
+            if let CertState::Available(cert) = &*channel.rx.borrow() {
+                check_own_cert_revocation(cert, &deps.crl_manager, &deps.metrics);
+            }
+        }
     }
 }
 
@@ -792,6 +841,17 @@ impl SecretManager {
             ret.push(f(key, &chan.rx.borrow()));
         }
         ret
+    }
+
+    /// Enable CRL self-check for all future certificate fetches and CRL reloads.
+    /// Called once during startup after CrlManager is created.
+    pub fn enable_crl_self_check(&self, crl_manager: Arc<CrlManager>, metrics: Arc<Metrics>) {
+        let crl_reload_rx = crl_manager.subscribe_reloads();
+        let _ = self.worker.crl_self_check.set(CrlSelfCheckDeps {
+            crl_manager,
+            metrics,
+            crl_reload_rx,
+        });
     }
 }
 

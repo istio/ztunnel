@@ -53,6 +53,9 @@ pub struct Metrics {
     pub crl_policy_rejections: Family<CrlLabels, Counter>,
 
     pub crl_untracked_connections: Family<CrlLabels, Counter>,
+
+    /// Counts how many times ztunnel detected its own certificate as revoked in loaded CRLs.
+    pub own_cert_revoked: Counter,
 }
 
 #[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
@@ -419,6 +422,13 @@ impl Metrics {
             crl_untracked_connections.clone(),
         );
 
+        let own_cert_revoked = Counter::default();
+        registry.register(
+            "own_cert_revoked",
+            "Number of times ztunnel detected its own certificate as revoked in loaded CRLs (unstable)", 
+            own_cert_revoked.clone()
+        );
+
         Self {
             connection_opens,
             connection_close,
@@ -430,6 +440,7 @@ impl Metrics {
             open_sockets,
             crl_policy_rejections,
             crl_untracked_connections,
+            own_cert_revoked,
         }
     }
 
@@ -451,6 +462,10 @@ impl Metrics {
         self.crl_untracked_connections
             .get_or_create(&CrlLabels { reporter })
             .inc();
+    }
+
+    pub fn record_own_cert_revoked(&self) {
+        self.own_cert_revoked.inc();
     }
 }
 

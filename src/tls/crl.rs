@@ -16,17 +16,21 @@ use notify::{Config, RecommendedWatcher};
 use notify_debouncer_full::{
     DebounceEventResult, Debouncer, FileIdMap, new_debouncer_opt, notify::RecursiveMode,
 };
-use rustls::pki_types::CertificateRevocationListDer;
 use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateRevocationListDer, UnixTime};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tokio::sync::watch;
 use tracing::{debug, warn};
-use webpki::{CertRevocationList, OwnedCertRevocationList};
+use webpki::{CertRevocationList, KeyUsage, OwnedCertRevocationList};
 
 use crate::proxy::Metrics;
-use crate::tls::revocation::{ConnRegistration, RevocationHandle, RevocationIndex};
+use crate::tls::WorkloadCertificate;
+use crate::tls::revocation::{
+    ConnRegistration, RevocationHandle, RevocationIndex, verify_cert_chain,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CrlError {
@@ -49,6 +53,10 @@ pub struct CrlManager {
     index: RevocationIndex,
     /// Monotonic counter bumped on every CRL set reload
     generation: Arc<AtomicU64>,
+    /// Notifies subscribers after each successful CRL reload. Sends the generation counter.
+    crl_reload_tx: watch::Sender<u64>,
+    /// Stored for cloning via `subscribe_reloads()`.
+    crl_reload_rx: watch::Receiver<u64>,
 }
 
 impl std::fmt::Debug for CrlManager {
@@ -79,6 +87,7 @@ impl CrlManager {
     pub fn new(crl_path: PathBuf, metrics: Arc<Metrics>) -> Result<Self, CrlError> {
         debug!(path = ?crl_path, "initializing crl manager");
 
+        let (crl_reload_tx, crl_reload_rx) = watch::channel(0u64);
         let manager = Self {
             inner: Arc::new(RwLock::new(CrlManagerInner {
                 crls: None,
@@ -88,6 +97,8 @@ impl CrlManager {
             })),
             index: RevocationIndex::new(metrics),
             generation: Arc::new(AtomicU64::new(0)),
+            crl_reload_tx,
+            crl_reload_rx,
         };
 
         // try to load the CRL, but don't fail if the file doesn't exist yet
@@ -120,6 +131,7 @@ impl CrlManager {
         let res = self.reload_crl_data();
         if res.is_ok() {
             self.index.navigate(self);
+            let _ = self.crl_reload_tx.send(self.generation());
         }
         res
     }
@@ -333,14 +345,137 @@ impl CrlManager {
         debug!("crl file watcher started successfully");
         Ok(())
     }
+
+    /// Returns a receiver that fires after each successful CRL reload.
+    /// The value is the CRL generation counter at the time of reload.
+    pub fn subscribe_reloads(&self) -> watch::Receiver<u64> {
+        self.crl_reload_rx.clone()
+    }
+}
+
+/// Check whether a workload certificate chain is revoked in the currently loaded CRLs.
+///
+/// This is a diagnostic check: it emits a warning log and increments a metric
+/// If the certificate (leaf or intermediate) appears in the CRL set.
+pub fn check_own_cert_revocation(
+    cert: &WorkloadCertificate,
+    crl_manager: &CrlManager,
+    metrics: &Metrics,
+) {
+    let crls = crl_manager.get_crls();
+    if crls.is_empty() {
+        return;
+    }
+
+    let chain_der = cert.cert_and_intermediates_der();
+    let (end_entity, intermediates) = match chain_der.split_first() {
+        Some((ee, inters)) => (ee, inters),
+        None => return,
+    };
+
+    match verify_cert_chain(
+        end_entity,
+        intermediates,
+        &cert.root_store(),
+        UnixTime::now(),
+        KeyUsage::server_auth(),
+        &crls,
+    ) {
+        Err(webpki::Error::CertRevoked) => {
+            let identity = cert
+                .identity()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+
+            let serial = cert.cert.serial();
+            warn!(
+                %identity,
+                %serial,
+                "own workload certificate is revoked in loaded CRL; \
+                peers with this CRL will reject connections from this identity"
+            );
+            metrics.record_own_cert_revoked();
+        }
+        Err(err) => {
+            debug!(
+                error = %err,
+                "own certificate chain validation failed during CRL self-check \
+                (non-revocation error, likely misconfigured roots or unrelated CRL)"
+            );
+        }
+        Ok(_) => {}
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::helpers::test_proxy_metrics;
-    use std::io::Write;
+    use crate::{
+        identity::Identity,
+        test_helpers::helpers::test_proxy_metrics,
+        tls::mock::{
+            TEST_PKEY, TEST_ROOT, TEST_ROOT_KEY, TestIdentity, crl_pem_revoking_cert,
+            generate_intermediate_ca, generate_test_certs_at,
+        },
+    };
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertificateRevocationListParams, DistinguishedName,
+        DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose,
+        PKCS_ECDSA_P256_SHA256, RevocationReason, RevokedCertParams, SanType, SerialNumber, string,
+    };
+    use std::{io::Write, str::FromStr, time::SystemTime};
     use tempfile::NamedTempFile;
+    use time::OffsetDateTime;
+
+    /// A CA's key pair and certificate parameters, used to sign certs and CRLs in tests
+    type CaMaterial = (rcgen::KeyPair, rcgen::CertificateParams);
+
+    /// Creates a CA with the given CN and serial, capable of signing certs and CRLs.
+    /// Returns the key pair and params ( not yet self-signed, pass to `self_signed`
+    /// or use as issuer in `crl_pem_signed`)
+    fn gen_ca(cn: &str, serial: u64) -> CaMaterial {
+        let kp = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut p = CertificateParams::default();
+        p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        p.serial_number = Some(SerialNumber::from(serial));
+
+        let now = SystemTime::now();
+        p.not_before = now.into();
+        p.not_after = (now + Duration::from_secs(3600)).into();
+
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, cn);
+        p.distinguished_name = dn;
+
+        (kp, p)
+    }
+
+    /// Creates a PEM-encoded CRL signed by `issuer` that revokes the given serial numbers.
+    /// Each revoked entry uses KeyCompromise as the reason.
+    fn crl_pem_signed(issuer: &CaMaterial, crl_number: u64, revoked_serials: &[&[u8]]) -> String {
+        let now = OffsetDateTime::now_utc();
+        let revoked_certs = revoked_serials
+            .iter()
+            .map(|s| RevokedCertParams {
+                serial_number: SerialNumber::from_slice(s),
+                revocation_time: now,
+                reason_code: Some(RevocationReason::KeyCompromise),
+                invalidity_date: None,
+            })
+            .collect();
+        let params = CertificateRevocationListParams {
+            this_update: now,
+            next_update: now + time::Duration::days(30),
+            crl_number: SerialNumber::from(crl_number),
+            issuing_distribution_point: None,
+            revoked_certs,
+            key_identifier_method: KeyIdMethod::Sha256,
+        };
+
+        let iss = Issuer::from_params(&issuer.1, &issuer.0);
+        params.signed_by(&iss).unwrap().pem().unwrap()
+    }
 
     #[test]
     fn test_crl_manager_missing_file() {
@@ -426,5 +561,229 @@ mod tests {
 
         let crls = manager.get_crls();
         assert_eq!(crls.len(), 1, "should have loaded one CRL");
+    }
+
+    #[test]
+    fn test_self_check_revoked_cert_detected() {
+        let id = Identity::from_str("spiffe://cluster.local/ns/default/sa/test").unwrap();
+        let now = SystemTime::now();
+        let cert = generate_test_certs_at(
+            &TestIdentity::Identity(id),
+            now,
+            now + Duration::from_secs(3600),
+            None,
+        );
+
+        // Create CRL that revokes this cert's serial number by the same CA.
+        let crl_pem = crl_pem_revoking_cert(&cert.cert.serial_bytes());
+
+        // Write CRL to temp file and create CrlManager
+        let mut crl_file = NamedTempFile::new().unwrap();
+        crl_file.write_all(crl_pem.as_bytes()).unwrap();
+        crl_file.flush().unwrap();
+
+        let metrics = test_proxy_metrics();
+        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics.clone()).unwrap();
+
+        assert_eq!(metrics.own_cert_revoked.get(), 0);
+        check_own_cert_revocation(&cert, &crl_manager, &metrics);
+        assert_eq!(metrics.own_cert_revoked.get(), 1);
+    }
+
+    #[test]
+    fn test_self_check_non_revoked_cert_passes() {
+        let id = Identity::from_str("spiffe://cluster.local/ns/default/sa/test").unwrap();
+        let now = SystemTime::now();
+        let cert = generate_test_certs_at(
+            &TestIdentity::Identity(id),
+            now,
+            now + Duration::from_secs(3600),
+            None,
+        );
+
+        // Create CRL that revokes a different serial (all zeros, won't match random serial).
+        let crl_pem = crl_pem_revoking_cert(&[0u8; 20]);
+
+        let mut crl_file = NamedTempFile::new().unwrap();
+        crl_file.write_all(crl_pem.as_bytes()).unwrap();
+        crl_file.flush().unwrap();
+
+        let metrics = test_proxy_metrics();
+        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics.clone()).unwrap();
+
+        check_own_cert_revocation(&cert, &crl_manager, &metrics);
+        assert_eq!(metrics.own_cert_revoked.get(), 0);
+    }
+
+    #[test]
+    fn test_self_check_cross_ca_no_false_positive() {
+        // Cert issued by TEST_ROOT (CA-A)
+        let id = Identity::from_str("spiffe://cluster.local/ns/default/sa/test").unwrap();
+        let now = SystemTime::now();
+        let cert = generate_test_certs_at(
+            &TestIdentity::Identity(id),
+            now,
+            now + Duration::from_secs(3600),
+            None,
+        );
+        let cert_serial = cert.cert.serial_bytes();
+
+        // CRL signed by a different CA (CA-B), revoking the same serial
+        let ca_b = gen_ca("CA-b", 999);
+        let crl_pem = crl_pem_signed(&ca_b, 1, &[&cert_serial]);
+
+        let mut crl_file = NamedTempFile::new().unwrap();
+        crl_file.write_all(crl_pem.as_bytes()).unwrap();
+        crl_file.flush().unwrap();
+
+        let metrics = test_proxy_metrics();
+        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics.clone()).unwrap();
+
+        // Same serial, different issuer: webpki must NOT match
+        check_own_cert_revocation(&cert, &crl_manager, &metrics);
+        assert_eq!(metrics.own_cert_revoked.get(), 0);
+    }
+
+    #[test]
+    fn test_self_check_no_crls_loaded() {
+        let id = Identity::from_str("spiffe://cluster.local/ns/default/sa/test").unwrap();
+        let now = SystemTime::now();
+        let cert = generate_test_certs_at(
+            &TestIdentity::Identity(id),
+            now,
+            now + Duration::from_secs(3600),
+            None,
+        );
+
+        // empty crl_file
+        let crl_file = NamedTempFile::new().unwrap();
+        let metrics = test_proxy_metrics();
+        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics.clone()).unwrap();
+
+        // get_crls() returns empty vec, function returns early
+        check_own_cert_revocation(&cert, &crl_manager, &metrics);
+        assert_eq!(metrics.own_cert_revoked.get(), 0);
+    }
+
+    #[test]
+    fn test_self_check_intermediate_ca_revoked() {
+        let now = SystemTime::now();
+
+        // generate intermediate CA signed by TEST_ROOT
+        let (ia_key_pem, ia_cert_pem, ia_serial) = generate_intermediate_ca(TEST_ROOT_KEY);
+
+        // generate leaf cert signed by intermediate CA
+        let leaf_kp = KeyPair::from_pem(str::from_utf8(TEST_PKEY).unwrap()).unwrap();
+        let ia_kp = KeyPair::from_pem(&ia_key_pem).unwrap();
+
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::OrganizationName, "cluster.local");
+
+        let mut leaf_params = CertificateParams::default();
+        leaf_params.not_before = now.into();
+        leaf_params.not_after = (now + Duration::from_secs(3600)).into();
+        leaf_params.serial_number = Some(SerialNumber::from(77777u64));
+        leaf_params.distinguished_name = dn;
+        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf_params.extended_key_usages = vec![
+            ExtendedKeyUsagePurpose::ServerAuth,
+            ExtendedKeyUsagePurpose::ClientAuth,
+        ];
+        leaf_params.subject_alt_names = vec![SanType::URI(
+            string::Ia5String::try_from("spiffe://cluster.local/ns/default/sa/test".to_string())
+                .unwrap(),
+        )];
+
+        // intermediate CA is the issuer
+        let mut ia_dn = DistinguishedName::new();
+        ia_dn.push(DnType::OrganizationName, "cluster.local");
+
+        let mut ia_params = CertificateParams::default();
+        ia_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ia_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        ia_params.distinguished_name = ia_dn;
+
+        let ia_issuer = Issuer::from_params(&ia_params, &ia_kp);
+
+        let leaf_cert = leaf_params.signed_by(&leaf_kp, &ia_issuer).unwrap();
+        let leaf_cert_pem = leaf_cert.pem();
+        let leaf_key_pem = leaf_kp.serialize_pem();
+
+        // build chain: leaf + intermediate, root in trust store
+        let cert = WorkloadCertificate::new(
+            leaf_key_pem.as_bytes(),
+            leaf_cert_pem.as_bytes(),
+            vec![ia_cert_pem.as_bytes(), TEST_ROOT],
+        )
+        .unwrap();
+
+        // CRL that revokes the intermediate CA serial ( not the leaf)
+        let crl_pem = crl_pem_revoking_cert(&ia_serial);
+
+        let mut crl_file = NamedTempFile::new().unwrap();
+        crl_file.write_all(crl_pem.as_bytes()).unwrap();
+        crl_file.flush().unwrap();
+
+        let metrics = test_proxy_metrics();
+        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics.clone()).unwrap();
+
+        check_own_cert_revocation(&cert, &crl_manager, &metrics);
+        assert_eq!(
+            metrics.own_cert_revoked.get(),
+            1,
+            "intermediate CA revocation should be detected via chain-level check"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crl_reload_notification() {
+        // create a valid CRL to load
+        let ca_kp = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+
+        let issuer = Issuer::from_params(&ca_params, &ca_kp);
+        let now = time::OffsetDateTime::now_utc();
+
+        let crl_params = CertificateRevocationListParams {
+            this_update: now,
+            next_update: now + time::Duration::days(30),
+            crl_number: SerialNumber::from(1u64),
+            issuing_distribution_point: None,
+            revoked_certs: vec![],
+            key_identifier_method: KeyIdMethod::Sha256,
+        };
+
+        let crl_pem = crl_params.signed_by(&issuer).unwrap().pem().unwrap();
+
+        // Write to CRL file
+        let mut crl_file = NamedTempFile::new().unwrap();
+        crl_file.write_all(crl_pem.as_bytes()).unwrap();
+        crl_file.flush().unwrap();
+
+        let metrics = test_proxy_metrics();
+        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics).unwrap();
+
+        // Subscribe before reload.
+        let mut rx = crl_manager.subscribe_reloads();
+
+        let initial_gen = crl_manager.generation();
+
+        // trigger a reload
+        crl_manager.load_crl().unwrap();
+        let next_gen = crl_manager.generation();
+        assert!(
+            next_gen > initial_gen,
+            "generation should increment after reload"
+        );
+
+        // the channel should have received the next generation ( tea. earl grey. hot )
+        rx.changed().await.expect("channel should not be closed");
+        assert_eq!(
+            *rx.borrow(),
+            next_gen,
+            "channel should carry the next generation"
+        );
     }
 }
