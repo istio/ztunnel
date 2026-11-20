@@ -89,6 +89,11 @@ impl H2ConnectClient {
         future_count >= self.max_allowed_streams
     }
 
+    #[cfg(test)]
+    pub fn stream_count(&self) -> u16 {
+        self.stream_count.load(Ordering::SeqCst)
+    }
+
     pub fn ready_to_use(&mut self) -> bool {
         let cx = &mut Context::from_waker(futures::task::noop_waker_ref());
         match self.sender.poll_ready(cx) {
@@ -108,18 +113,10 @@ impl H2ConnectClient {
         &mut self,
         req: http::Request<()>,
     ) -> Result<(crate::proxy::h2::H2Stream, Option<Baggage>), Error> {
-        let cur = self.stream_count.fetch_add(1, Ordering::SeqCst);
+        let (cur, dropped1, dropped2) = crate::proxy::h2::DropCounter::acquire(&self.stream_count);
         trace!(current_streams = cur, "sending request");
-        let (send, recv, baggage) = match self.internal_send(req).await {
-            Ok(r) => r,
-            Err(e) => {
-                // Request failed, so drop the stream now
-                self.stream_count.fetch_sub(1, Ordering::SeqCst);
-                return Err(e);
-            }
-        };
+        let (send, recv, baggage) = self.internal_send(req).await?;
 
-        let (dropped1, dropped2) = crate::proxy::h2::DropCounter::new(self.stream_count.clone());
         let read = crate::proxy::h2::H2StreamReadHalf {
             recv_stream: recv,
             _dropped: dropped1,
