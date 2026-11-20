@@ -66,6 +66,13 @@ pub fn baggage_header_val(baggage: &Baggage, workload_type: &str) -> String {
     .join(",")
 }
 
+// baggage-octet from https://www.w3.org/TR/baggage/#definition. These values come from the peer
+// and end up in metric labels, which are written out without escaping, so a value like `a"b` must
+// not get through.
+fn is_baggage_octet(b: u8) -> bool {
+    matches!(b, 0x21 | 0x23..=0x2B | 0x2D..=0x3A | 0x3C..=0x5B | 0x5D..=0x7E)
+}
+
 pub fn parse_baggage_header(headers: GetAll<HeaderValue>) -> Result<Baggage, ToStrError> {
     let mut baggage = Baggage {
         ..Default::default()
@@ -75,8 +82,9 @@ pub fn parse_baggage_header(headers: GetAll<HeaderValue>) -> Result<Baggage, ToS
         v.split(',').for_each(|s| {
             let parts: Vec<&str> = s.split('=').collect();
             if parts.len() > 1 {
-                let val = match parts[1] {
+                let val = match parts[1].trim() {
                     "" => None,
+                    s if !s.bytes().all(is_baggage_octet) => None,
                     s => Some(s.into()),
                 };
                 match parts[0] {
@@ -119,6 +127,22 @@ pub mod tests {
         assert_eq!(baggage.namespace, Some("NS1".into()));
         assert_eq!(baggage.workload_name, Some("N1".into()));
         assert_eq!(baggage.service_name, Some("N2".into()));
+        assert_eq!(baggage.revision, Some("V1".into()));
+        Ok(())
+    }
+
+    #[test]
+    fn baggage_parser_invalid_values() -> anyhow::Result<()> {
+        let mut hm = HeaderMap::new();
+        let baggage_str = r#"k8s.cluster.name=K1"} 1 # x,k8s.namespace.name=N\S1,service.name=a b,cloud.region=r;p,service.version= V1 "#;
+        let header_value = HeaderValue::from_str(baggage_str)?;
+        hm.append(BAGGAGE_HEADER, header_value);
+        let baggage = parse_baggage_header(hm.get_all(BAGGAGE_HEADER))?;
+        assert_eq!(baggage.cluster_id, None);
+        assert_eq!(baggage.namespace, None);
+        assert_eq!(baggage.service_name, None);
+        assert_eq!(baggage.region, None);
+        // Surrounding whitespace is allowed by the spec and is not part of the value
         assert_eq!(baggage.revision, Some("V1".into()));
         Ok(())
     }
