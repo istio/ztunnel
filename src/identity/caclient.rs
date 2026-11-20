@@ -163,10 +163,7 @@ impl CaClient {
         });
         self.ca_headers.iter().for_each(|(k, v)| {
             req.metadata_mut().insert(k.clone(), v.clone());
-
-            if let Ok(v_str) = v.to_str() {
-                debug!("CA header added: {}={}", k, v_str);
-            }
+            debug!("CA header added: {}", k);
         });
 
         let resp = client

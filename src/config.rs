@@ -189,19 +189,9 @@ impl serde::Serialize for MetadataVector {
         let mut seq: <S as serde::Serializer>::SerializeSeq =
             serializer.serialize_seq(Some(self.vec.len()))?;
 
-        for (k, v) in &self.vec {
-            let serialized_key = k.to_string();
-
-            match v.to_str() {
-                Ok(serialized_val) => {
-                    seq.serialize_element(&(serialized_key, serialized_val))?;
-                }
-                Err(_) => {
-                    return Err(serde::ser::Error::custom(
-                        "failed to serialize metadata value",
-                    ));
-                }
-            }
+        // Values may carry credentials for the XDS server or CA, so only the keys are exposed.
+        for (k, _) in &self.vec {
+            seq.serialize_element(&(k.to_string(), "<redacted>"))?;
         }
         seq.end()
     }
@@ -1291,6 +1281,18 @@ pub mod tests {
             let value: AsciiMetadataValue = AsciiMetadataValue::from_str(&v).unwrap();
             assert!(metadata.vec.contains(&(key, value)));
         }
+    }
+
+    #[test]
+    fn metadata_vector_serialization_redacts_values() {
+        let metadata = MetadataVector {
+            vec: vec![(
+                AsciiMetadataKey::from_static("authorization"),
+                AsciiMetadataValue::from_static("Bearer secret-token"),
+            )],
+        };
+        let out = serde_json::to_string(&metadata).unwrap();
+        assert_eq!(out, r#"[["authorization","<redacted>"]]"#);
     }
 
     #[test]
