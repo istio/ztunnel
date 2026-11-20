@@ -19,6 +19,8 @@ use crate::PQC_ENABLED;
 use crate::TLS12_ENABLED;
 use crate::identity::{self, Identity};
 
+#[cfg(feature = "tls-openssl")]
+use once_cell::sync::Lazy;
 use std::fmt::Debug;
 
 use std::sync::Arc;
@@ -121,8 +123,21 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
     Arc::new(provider)
 }
 
+// Built once per process: every input (TLS12_ENABLED, PQC_ENABLED) is fixed for the life of the
+// process. Building it is expensive because `rustls_openssl::default_provider()` probes each
+// default key exchange group by generating and discarding a real key pair (via EVP_PKEY_keygen,
+// inside the FIPS provider when FIPS is enabled, since rustls-openssl 0.4.2), and provider() is
+// called several times per new connection.
+#[cfg(feature = "tls-openssl")]
+static OPENSSL_PROVIDER: Lazy<Arc<CryptoProvider>> = Lazy::new(build_openssl_provider);
+
 #[cfg(feature = "tls-openssl")]
 pub(super) fn provider() -> Arc<CryptoProvider> {
+    OPENSSL_PROVIDER.clone()
+}
+
+#[cfg(feature = "tls-openssl")]
+fn build_openssl_provider() -> Arc<CryptoProvider> {
     let mut cipher_suites = vec![
         rustls_openssl::cipher_suite::TLS13_AES_256_GCM_SHA384,
         rustls_openssl::cipher_suite::TLS13_AES_128_GCM_SHA256,
@@ -306,6 +321,19 @@ pub mod tests {
         assert!(
             !provider.kx_groups.is_empty(),
             "kx_groups should not be empty"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "tls-openssl")]
+    fn test_openssl_provider_is_cached() {
+        // provider() is on the per-connection path; it must not rebuild (and re-probe) the
+        // CryptoProvider on every call.
+        let a = super::provider();
+        let b = super::provider();
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "provider() should return the cached instance"
         );
     }
 
