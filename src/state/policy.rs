@@ -47,13 +47,11 @@ impl PolicyStore {
         self.by_key.get(key)
     }
 
-    pub fn get_by_namespace(&self, namespace: &Strng) -> Vec<Strng> {
-        self.by_namespace
-            .get(namespace)
-            .into_iter()
-            .flatten()
-            .cloned()
-            .collect()
+    pub fn get_by_namespace<'a>(
+        &'a self,
+        namespace: &Strng,
+    ) -> impl Iterator<Item = &'a Strng> + use<'a> {
+        self.by_namespace.get(namespace).into_iter().flatten()
     }
 
     pub fn insert(&mut self, xds_name: Strng, rbac: Authorization) {
@@ -133,13 +131,19 @@ mod tests {
         // insert this namespace-scoped policy into policystore then assert it is
         // exists in by_namespace of policystore
         store.insert(xds_name.clone().into(), policy.clone());
-        let namespace_policies = store.get_by_namespace(&namespace.into());
-        assert!(namespace_policies.contains(&policy_key));
+        assert!(
+            store
+                .get_by_namespace(&namespace.into())
+                .any(|key| key == &policy_key)
+        );
         // change policy scope to workload and insert it into policystore again, then
         // assert it is not exists in by_namespace of policystore anymore
         policy.scope = RbacScope::WorkloadSelector;
         store.insert(xds_name.clone().into(), policy.clone());
-        let namespace_policies = store.get_by_namespace(&namespace.into());
-        assert!(!namespace_policies.contains(&policy_key));
+        assert!(
+            !store
+                .get_by_namespace(&namespace.into())
+                .any(|key| key == &policy_key)
+        );
     }
 }
