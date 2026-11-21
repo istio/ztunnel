@@ -394,6 +394,14 @@ pub struct ParsedMetrics {
 }
 
 impl ParsedMetrics {
+    pub fn from_registry(registry: &prometheus_client::registry::Registry) -> Self {
+        let mut text = String::new();
+        prometheus_client::encoding::text::encode(&mut text, registry).unwrap();
+        let iter = text.lines().map(|x| Ok::<_, io::Error>(x.to_string()));
+        let scrape = prometheus_parse::Scrape::parse(iter).unwrap();
+        ParsedMetrics { scrape }
+    }
+
     pub fn query(
         &self,
         metric: &str,
