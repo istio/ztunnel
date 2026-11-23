@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::{Formatter, Write};
 use std::hash::{Hash, RandomState};
@@ -26,6 +26,8 @@ use crate::tls::crl::{CrlManager, check_own_cert_revocation};
 use async_trait::async_trait;
 
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
+use rustls::pki_types::UnixTime;
+use tokio::sync::futures::Notified;
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{Duration, Instant, sleep_until};
 
@@ -268,9 +270,12 @@ struct Worker {
     // How many concurrent fetch_certificate calls can be pending at a time.
     concurrency: u16,
 
-    // CRL self-check dependencies, injected post-construction via enable_crl_self_check().
-    // Empty when CRL is not configured or in tests.
-    crl_self_check: OnceLock<CrlSelfCheckDeps>,
+    // CRL self-check dependencies, plus their readiness signal,
+    // injected post-construction via enable_crl_self_check().
+    crl_self_check: CrlSelfCheck,
+
+    /// Cache keys whose current certificate is revoked in the loaded CRLs.
+    revoked_keys: Mutex<HashSet<CacheKey>>,
 }
 
 // Groups dependencies needed for CRL self-check (own cert revocation detection).
@@ -279,6 +284,40 @@ struct CrlSelfCheckDeps {
     metrics: Arc<Metrics>,
     // Fires after each CRL reload, obtained from CrlManager::subscribe_reloads().
     crl_reload_rx: watch::Receiver<u64>,
+}
+
+/// CRL self-check dependencies are injected post-construction because CrlManager
+/// is created after the worker.
+/// We use `OnceLock` to set them one time and `ready` to notify the worker so
+/// it can awake from `select!` and clone the reload receiver
+/// `set()` function does it all.
+#[derive(Default)]
+struct CrlSelfCheck {
+    /// Stored deps; empty until `enable_crl_self_check()` runs
+    deps: OnceLock<CrlSelfCheckDeps>,
+    /// One-shot wake up signal for the worker's selec! loop.
+    /// Rings when `deps` are stored
+    ready: tokio::sync::Notify,
+}
+
+impl CrlSelfCheck {
+    /// Stores the `deps`` and rings `ready`
+    /// `ready` is only notified on success, that is the first time the OnceLock is set
+    fn set(&self, deps: CrlSelfCheckDeps) -> Result<(), CrlSelfCheckDeps> {
+        let res = self.deps.set(deps);
+        if res.is_ok() {
+            self.ready.notify_one();
+        }
+        res
+    }
+
+    fn get(&self) -> Option<&CrlSelfCheckDeps> {
+        self.deps.get()
+    }
+
+    fn notified(&self) -> Notified<'_> {
+        self.ready.notified()
+    }
 }
 
 impl Worker {
@@ -295,7 +334,8 @@ impl Worker {
             time_conv: cfg.time_conv,
             concurrency: cfg.concurrency,
             certs: Default::default(),
-            crl_self_check: OnceLock::new(),
+            crl_self_check: Default::default(),
+            revoked_keys: Default::default(),
         });
 
         // Process requests in the background. The task will terminate on its own when the
@@ -344,12 +384,6 @@ impl Worker {
         // CRL-reload notification: cloned once when deps become available.
         let mut crl_reload_rx: Option<watch::Receiver<u64>> = None;
         'main: loop {
-            if crl_reload_rx.is_none()
-                && let Some(deps) = self.crl_self_check.get()
-            {
-                crl_reload_rx = Some(deps.crl_reload_rx.clone());
-            }
-
             let next = pending.peek().map(|(_, PendingPriority(_, ts))| *ts);
             tokio::select! {
                 // Handle requests from SecretManager. Those are generally split between the
@@ -416,6 +450,7 @@ impl Worker {
                         Some(Fetch::Forgetting) => continue 'main,
                         None => unreachable!("processing should represent all fetches"),
                     }
+                    let mut revoked = false;
                     let (state, refresh_at) = match res {
                         Err(err) => {
                             // Check if we should retain the existing valid certificate
@@ -485,9 +520,9 @@ impl Worker {
                             let certs: tls::WorkloadCertificate = certs; // Type annotation.
 
                             // Check if new certs are in the CRLs
-                            if let Some(deps) = self.crl_self_check.get() {
-                                check_own_cert_revocation(&certs, &deps.crl_manager, &deps.metrics);
-                            }
+                            revoked = self.crl_self_check.get().is_some_and(|deps| {
+                                check_own_cert_revocation(&certs, &deps.crl_manager, self.now_unix())
+                            });
 
                             let refresh_at = self.time_conv.system_time_to_instant(certs.refresh_at());
                             let refresh_at = if let Some(t) = refresh_at {
@@ -506,7 +541,18 @@ impl Worker {
                             (CertState::Available(Arc::new(certs)), refresh_at)
                         },
                     };
-                    if self.update_certs(&key, state).await {
+                    let still_managed =  self.update_certs(&key, state).await;
+                    if still_managed {
+                        if let Some(deps) = self.crl_self_check.get() {
+                            let key = key.clone();
+                            self.update_revoked_keys(&deps.metrics, |set| {
+                                if revoked {
+                                    set.insert(key);
+                                } else {
+                                    set.remove(&key);
+                                }
+                            }).await;
+                        }
                         push_increase(&mut pending, key, PendingPriority(Priority::Background, refresh_at));
                     }
                 },
@@ -528,6 +574,12 @@ impl Worker {
                 } => {
                     if let Some(deps) = self.crl_self_check.get() {
                         self.check_all_certs_against_crl(deps).await;
+                    }
+                },
+                // Wake up when CRL self-check deps become available
+                _ = self.crl_self_check.notified(), if crl_reload_rx.is_none() => {
+                    if let Some(deps) = self.crl_self_check.get() {
+                        crl_reload_rx = Some(deps.crl_reload_rx.clone());
                     }
                 }
             };
@@ -585,13 +637,52 @@ impl Worker {
         None
     }
 
+    /// Mutate the revoked-key set and sync the revocation metrics.
+    ///
+    /// `f` receives the HashSet<CacheKey> and may insert/remove keys
+    async fn update_revoked_keys(&self, metrics: &Metrics, f: impl FnOnce(&mut HashSet<CacheKey>)) {
+        let mut revoked = self.revoked_keys.lock().await;
+        let prev_count = revoked.len();
+        f(&mut revoked);
+        let new_count = revoked.len();
+        metrics.update_own_cert_revocation_state(prev_count, new_count);
+    }
+
+    fn now_unix(&self) -> UnixTime {
+        let now = self
+            .time_conv
+            .instant_to_system_time(Instant::now().into())
+            .expect("SystemTime cannot represent current time");
+
+        UnixTime::since_unix_epoch(
+            now.duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .expect("time is before Unix epoch"),
+        )
+    }
     async fn check_all_certs_against_crl(&self, deps: &CrlSelfCheckDeps) {
-        let certs = self.certs.lock().await;
-        for channel in certs.values() {
-            if let CertState::Available(cert) = &*channel.rx.borrow() {
-                check_own_cert_revocation(cert, &deps.crl_manager, &deps.metrics);
+        let now = self.now_unix();
+
+        let certs_snapshot = {
+            let certs = self.certs.lock().await;
+            certs
+                .iter()
+                .filter_map(|(key, channel)| match &*channel.rx.borrow() {
+                    CertState::Available(cert) => Some((key.clone(), Arc::clone(cert))),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut new_revoked = HashSet::new();
+        for (key, cert) in &certs_snapshot {
+            if check_own_cert_revocation(cert, &deps.crl_manager, now) {
+                new_revoked.insert(key.clone());
             }
         }
+
+        self.update_revoked_keys(&deps.metrics, |set| {
+            *set = new_revoked;
+        })
+        .await;
     }
 }
 
@@ -829,6 +920,15 @@ impl SecretManager {
 
     async fn forget_key(&self, key: CacheKey) {
         if self.worker.certs.lock().await.remove(&key).is_some() {
+            // A forgotten key can no longer be revoked
+            if let Some(deps) = self.worker.crl_self_check.get() {
+                self.worker
+                    .update_revoked_keys(&deps.metrics, |set| {
+                        set.remove(&key);
+                    })
+                    .await;
+            }
+
             self.post(Request::Forget(key)).await;
         }
     }
@@ -921,11 +1021,19 @@ pub mod mock {
 mod tests {
     use std::time;
 
+    use ::time::OffsetDateTime;
     use matches::assert_matches;
+    use rcgen::{
+        CertificateParams, CertificateRevocationListParams, DistinguishedName, DnType, Issuer,
+        KeyIdMethod, KeyPair, KeyUsagePurpose, RevocationReason, RevokedCertParams, SerialNumber,
+    };
+    use tempfile::NamedTempFile;
 
     use crate::identity::caclient::mock::CaClient as MockCaClient;
     use crate::identity::{self, *};
     use crate::strng;
+    use crate::test_helpers::helpers::{crl_file_with, test_proxy_metrics};
+    use crate::tls::mock::TEST_ROOT_KEY;
 
     use super::{mock, *};
 
@@ -1031,6 +1139,8 @@ mod tests {
     const MILLISEC: Duration = Duration::from_millis(1);
     const SEC: Duration = Duration::from_secs(1);
     const CERT_HALFLIFE: Duration = Duration::from_secs(50);
+    // Serial that no real certificate can have.
+    const REVOKED_SERIAL: &[u8; 20] = &[0u8; 20];
 
     // Represents common test case setup.
     struct Test {
@@ -1051,6 +1161,88 @@ mod tests {
         async fn tear_down(self) {
             self.into_worker().await.unwrap();
         }
+    }
+
+    // Keeps the CRL temp file alive and exposes the manager to trigger further reloads
+    struct CrlSelfCheckEnv {
+        metrics: Arc<Metrics>,
+        crl_manager: Arc<CrlManager>,
+        crl_file: NamedTempFile,
+    }
+
+    /// PEM CRL signed by TEST_ROOT revoking multiple serials
+    fn crl_pem_revoking_many(revoked_serials: &[&[u8]]) -> String {
+        let ca_kp = KeyPair::from_pem(str::from_utf8(TEST_ROOT_KEY).unwrap()).unwrap();
+        let mut ca_params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::OrganizationName, "cluster.local");
+        ca_params.distinguished_name = dn;
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+
+        let now = OffsetDateTime::now_utc();
+        let revoked_certs = revoked_serials
+            .iter()
+            .map(|s| RevokedCertParams {
+                serial_number: SerialNumber::from_slice(s),
+                revocation_time: now,
+                reason_code: Some(RevocationReason::KeyCompromise),
+                invalidity_date: None,
+            })
+            .collect();
+
+        let params = CertificateRevocationListParams {
+            this_update: now,
+            next_update: now + ::time::Duration::days(30),
+            crl_number: SerialNumber::from(1u64),
+            issuing_distribution_point: None,
+            revoked_certs,
+            key_identifier_method: KeyIdMethod::Sha256,
+        };
+
+        params
+            .signed_by(&Issuer::from_params(&ca_params, &ca_kp))
+            .unwrap()
+            .pem()
+            .unwrap()
+    }
+
+    async fn wait_for_gauge(metrics: &Arc<Metrics>, expected: i64) {
+        for _ in 0..100 {
+            if metrics.own_cert_revoked.get() == expected {
+                return;
+            }
+            tokio::time::sleep(MILLISEC).await;
+        }
+
+        assert_eq!(
+            metrics.own_cert_revoked.get(),
+            expected,
+            "gauge did not converge to {expected} in time"
+        );
+    }
+
+    async fn setup_revoked_cert(sm: &SecretManager, id: &Identity) -> (CrlSelfCheckEnv, Vec<u8>) {
+        let cert = sm.fetch_certificate(id).await.unwrap();
+        let serial = cert.cert.serial_bytes().to_vec();
+
+        let crl_file = crl_file_with(&tls::mock::crl_pem_revoking_cert(&serial));
+        let metrics = test_proxy_metrics();
+        let crl_manager =
+            Arc::new(CrlManager::new(crl_file.path().to_path_buf(), metrics.clone()).unwrap());
+
+        sm.enable_crl_self_check(crl_manager.clone(), metrics.clone());
+        // let the worker consume the Notify
+        tokio::time::sleep(NANOSEC).await;
+        // Trigger reload
+        crl_manager.load_crl().unwrap();
+        (
+            CrlSelfCheckEnv {
+                metrics,
+                crl_manager,
+                crl_file,
+            },
+            serial,
+        )
     }
 
     fn setup(concurrency: u16) -> Test {
@@ -1629,5 +1821,181 @@ mod tests {
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/sa"), Err(_));
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/sa/sa/"), Err(_));
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/foobar/sa/"), Err(_));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_crl_self_check_reload_detects_revoked() {
+        let test = setup(2);
+        let (env, _serial) = setup_revoked_cert(&test.secret_manager, &identity("a")).await;
+
+        wait_for_gauge(&env.metrics, 1).await;
+        assert_eq!(env.metrics.own_cert_revoked_episodes.get(), 1);
+
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_crl_self_check_multiple_certs_single_episode() {
+        let test = setup(2);
+
+        let cert_a = test
+            .secret_manager
+            .fetch_certificate(&identity("a"))
+            .await
+            .unwrap();
+        let serial_a = cert_a.cert.serial_bytes();
+
+        let cert_b = test
+            .secret_manager
+            .fetch_certificate(&identity("b"))
+            .await
+            .unwrap();
+        let serial_b = cert_b.cert.serial_bytes();
+
+        let crl_file = crl_file_with(&crl_pem_revoking_many(&[&serial_a, &serial_b]));
+        let metrics = test_proxy_metrics();
+        let crl_manager =
+            Arc::new(CrlManager::new(crl_file.path().to_path_buf(), metrics.clone()).unwrap());
+
+        test.secret_manager
+            .enable_crl_self_check(crl_manager.clone(), metrics.clone());
+        tokio::time::sleep(NANOSEC).await;
+        crl_manager.load_crl().unwrap();
+
+        wait_for_gauge(&metrics, 2).await;
+        assert_eq!(metrics.own_cert_revoked_episodes.get(), 1);
+
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_crl_self_check_forget_clears_gauge() {
+        let test = setup(2);
+        let id = identity("a");
+        let (env, _serial) = setup_revoked_cert(&test.secret_manager, &id).await;
+
+        wait_for_gauge(&env.metrics, 1).await;
+        assert_eq!(env.metrics.own_cert_revoked_episodes.get(), 1);
+
+        test.secret_manager.forget_certificate(&id).await;
+
+        assert_eq!(env.metrics.own_cert_revoked.get(), 0);
+        assert_eq!(env.metrics.own_cert_revoked_episodes.get(), 1);
+
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_crl_self_check_renewal_clears_drift() {
+        let test = setup(2);
+        let start = Instant::now();
+        let id = identity("a");
+
+        let (env, old_serial) = setup_revoked_cert(&test.secret_manager, &id).await;
+        wait_for_gauge(&env.metrics, 1).await;
+
+        // Renewal timeline in virtual time:
+        //   +SEC            initial fetch completes, cert minted (not_before)
+        //   +CERT_HALFLIFE  worker triggers the renewal (half of the 100s lifetime)
+        //   +SEC            the renewal fetch completes, fresh cert replaces the revoked one
+        // The extra MILLISEC gives margin so we wake strictly past the deadline.
+        tokio::time::sleep_until(start + SEC + CERT_HALFLIFE + SEC + MILLISEC).await;
+        wait_for_gauge(&env.metrics, 0).await;
+        assert_eq!(env.metrics.own_cert_revoked_episodes.get(), 1);
+
+        let fetches = test.caclient.fetches().await;
+        let refreshes = fetches.iter().filter(|k| *k.identity() == id).count();
+
+        assert!(refreshes >= 2, "expected at least one renewal fetch");
+        let renewed = test.secret_manager.fetch_certificate(&id).await.unwrap();
+        assert_ne!(renewed.cert.serial_bytes(), old_serial.as_slice());
+
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_crl_self_check_second_episode() {
+        let test = setup(2);
+        let start = Instant::now();
+        let id = identity("a");
+        let (env, _old_serial) = setup_revoked_cert(&test.secret_manager, &id).await;
+
+        // Recover via renewal
+        // Renewal timeline in virtual time:
+        //   +SEC            initial fetch completes, cert minted (not_before)
+        //   +CERT_HALFLIFE  worker triggers the renewal (half of the 100s lifetime)
+        //   +SEC            the renewal fetch completes, fresh cert replaces the revoked one
+        // The extra MILLISEC gives margin so we wake strictly past the deadline.
+        tokio::time::sleep_until(start + SEC + CERT_HALFLIFE + SEC + MILLISEC).await;
+        wait_for_gauge(&env.metrics, 0).await;
+        assert_eq!(env.metrics.own_cert_revoked_episodes.get(), 1);
+
+        // Revoke the renewed cert's serial => new episode starts
+        let renewed = test.secret_manager.fetch_certificate(&id).await.unwrap();
+        let renewed_serial = renewed.cert.serial_bytes();
+        std::fs::write(
+            env.crl_file.path(),
+            tls::mock::crl_pem_revoking_cert(&renewed_serial),
+        )
+        .unwrap();
+        env.crl_manager.load_crl().unwrap();
+
+        wait_for_gauge(&env.metrics, 1).await;
+        assert_eq!(env.metrics.own_cert_revoked_episodes.get(), 2);
+
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_crl_self_check_reload_recomputes() {
+        let test = setup(2);
+        let id = identity("a");
+        let (env, serial) = setup_revoked_cert(&test.secret_manager, &id).await;
+
+        // Sanity: ensure the generated serial is not the one we are going to revoke
+        assert_ne!(serial.as_slice(), REVOKED_SERIAL);
+
+        // Replace CRL file with one that revokes nothing =>
+        // next reload fully recompute the set
+        std::fs::write(
+            env.crl_file.path(),
+            tls::mock::crl_pem_revoking_cert(REVOKED_SERIAL),
+        )
+        .unwrap();
+
+        env.crl_manager.load_crl().unwrap();
+
+        wait_for_gauge(&env.metrics, 0).await;
+        assert_eq!(env.metrics.own_cert_revoked_episodes.get(), 1);
+
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_crl_self_check_no_false_positive() {
+        let test = setup(2);
+        let id = identity("a");
+
+        // cache now have a real
+        let cert = test.secret_manager.fetch_certificate(&id).await.unwrap();
+        // sanity check
+        assert_ne!(cert.cert.serial_bytes(), REVOKED_SERIAL);
+
+        // CRL revoking a serial that cannot match
+        let crl_file = crl_file_with(&tls::mock::crl_pem_revoking_cert(REVOKED_SERIAL));
+        let metrics = test_proxy_metrics();
+        let crl_manager =
+            Arc::new(CrlManager::new(crl_file.path().to_path_buf(), metrics.clone()).unwrap());
+
+        test.secret_manager
+            .enable_crl_self_check(crl_manager.clone(), metrics.clone());
+        // let the worker time to handle the notify
+        tokio::time::sleep(NANOSEC).await;
+        crl_manager.load_crl().unwrap();
+
+        wait_for_gauge(&metrics, 0).await;
+        assert_eq!(metrics.own_cert_revoked_episodes.get(), 0);
+
+        test.tear_down().await;
     }
 }

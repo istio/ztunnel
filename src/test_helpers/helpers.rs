@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::process::Command;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use std::time::Instant;
 
 use once_cell::sync::Lazy;
 use prometheus_client::registry::Registry;
+use tempfile::NamedTempFile;
 use tracing::debug;
 
 use crate::metrics::sub_registry;
@@ -61,4 +63,12 @@ pub fn run_command(cmd: &str) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// Write a CRL PEM to a fresh temp file, ready for CrlManager::new
+pub fn crl_file_with(pem: &str) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+    file.write_all(pem.as_bytes()).unwrap();
+    file.flush().unwrap();
+    file
 }

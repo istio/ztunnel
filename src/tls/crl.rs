@@ -355,29 +355,29 @@ impl CrlManager {
 
 /// Check whether a workload certificate chain is revoked in the currently loaded CRLs.
 ///
-/// This is a diagnostic check: it emits a warning log and increments a metric
-/// If the certificate (leaf or intermediate) appears in the CRL set.
+/// This is a diagnostic check: it emits a warning log and returns whether the
+/// certificate chain appears in the CRL set.
 pub fn check_own_cert_revocation(
     cert: &WorkloadCertificate,
     crl_manager: &CrlManager,
-    metrics: &Metrics,
-) {
+    now: UnixTime,
+) -> bool {
     let crls = crl_manager.get_crls();
     if crls.is_empty() {
-        return;
+        return false;
     }
 
     let chain_der = cert.cert_and_intermediates_der();
     let (end_entity, intermediates) = match chain_der.split_first() {
         Some((ee, inters)) => (ee, inters),
-        None => return,
+        None => return false,
     };
 
     match verify_cert_chain(
         end_entity,
         intermediates,
         &cert.root_store(),
-        UnixTime::now(),
+        now,
         KeyUsage::server_auth(),
         &crls,
     ) {
@@ -391,10 +391,10 @@ pub fn check_own_cert_revocation(
             warn!(
                 %identity,
                 %serial,
-                "own workload certificate is revoked in loaded CRL; \
+                "certificate chain for this identity contains a revoked certificate; \
                 peers with this CRL will reject connections from this identity"
             );
-            metrics.record_own_cert_revoked();
+            true
         }
         Err(err) => {
             debug!(
@@ -402,8 +402,9 @@ pub fn check_own_cert_revocation(
                 "own certificate chain validation failed during CRL self-check \
                 (non-revocation error, likely misconfigured roots or unrelated CRL)"
             );
+            false
         }
-        Ok(_) => {}
+        Ok(_) => false,
     }
 }
 
@@ -412,7 +413,7 @@ mod tests {
     use super::*;
     use crate::{
         identity::Identity,
-        test_helpers::helpers::test_proxy_metrics,
+        test_helpers::helpers::{crl_file_with, test_proxy_metrics},
         tls::mock::{
             TEST_PKEY, TEST_ROOT, TEST_ROOT_KEY, TestIdentity, crl_pem_revoking_cert,
             generate_intermediate_ca, generate_test_certs_at,
@@ -564,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn test_self_check_revoked_cert_detected() {
+    fn test_self_check_revoked_leaf() {
         let id = Identity::from_str("spiffe://cluster.local/ns/default/sa/test").unwrap();
         let now = SystemTime::now();
         let cert = generate_test_certs_at(
@@ -578,95 +579,20 @@ mod tests {
         let crl_pem = crl_pem_revoking_cert(&cert.cert.serial_bytes());
 
         // Write CRL to temp file and create CrlManager
-        let mut crl_file = NamedTempFile::new().unwrap();
-        crl_file.write_all(crl_pem.as_bytes()).unwrap();
-        crl_file.flush().unwrap();
+        let crl_file = crl_file_with(&crl_pem);
 
         let metrics = test_proxy_metrics();
-        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics.clone()).unwrap();
+        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics).unwrap();
 
-        assert_eq!(metrics.own_cert_revoked.get(), 0);
-        check_own_cert_revocation(&cert, &crl_manager, &metrics);
-        assert_eq!(metrics.own_cert_revoked.get(), 1);
+        assert!(check_own_cert_revocation(
+            &cert,
+            &crl_manager,
+            UnixTime::now()
+        ));
     }
 
     #[test]
-    fn test_self_check_non_revoked_cert_passes() {
-        let id = Identity::from_str("spiffe://cluster.local/ns/default/sa/test").unwrap();
-        let now = SystemTime::now();
-        let cert = generate_test_certs_at(
-            &TestIdentity::Identity(id),
-            now,
-            now + Duration::from_secs(3600),
-            None,
-        );
-
-        // Create CRL that revokes a different serial (all zeros, won't match random serial).
-        let crl_pem = crl_pem_revoking_cert(&[0u8; 20]);
-
-        let mut crl_file = NamedTempFile::new().unwrap();
-        crl_file.write_all(crl_pem.as_bytes()).unwrap();
-        crl_file.flush().unwrap();
-
-        let metrics = test_proxy_metrics();
-        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics.clone()).unwrap();
-
-        check_own_cert_revocation(&cert, &crl_manager, &metrics);
-        assert_eq!(metrics.own_cert_revoked.get(), 0);
-    }
-
-    #[test]
-    fn test_self_check_cross_ca_no_false_positive() {
-        // Cert issued by TEST_ROOT (CA-A)
-        let id = Identity::from_str("spiffe://cluster.local/ns/default/sa/test").unwrap();
-        let now = SystemTime::now();
-        let cert = generate_test_certs_at(
-            &TestIdentity::Identity(id),
-            now,
-            now + Duration::from_secs(3600),
-            None,
-        );
-        let cert_serial = cert.cert.serial_bytes();
-
-        // CRL signed by a different CA (CA-B), revoking the same serial
-        let ca_b = gen_ca("CA-b", 999);
-        let crl_pem = crl_pem_signed(&ca_b, 1, &[&cert_serial]);
-
-        let mut crl_file = NamedTempFile::new().unwrap();
-        crl_file.write_all(crl_pem.as_bytes()).unwrap();
-        crl_file.flush().unwrap();
-
-        let metrics = test_proxy_metrics();
-        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics.clone()).unwrap();
-
-        // Same serial, different issuer: webpki must NOT match
-        check_own_cert_revocation(&cert, &crl_manager, &metrics);
-        assert_eq!(metrics.own_cert_revoked.get(), 0);
-    }
-
-    #[test]
-    fn test_self_check_no_crls_loaded() {
-        let id = Identity::from_str("spiffe://cluster.local/ns/default/sa/test").unwrap();
-        let now = SystemTime::now();
-        let cert = generate_test_certs_at(
-            &TestIdentity::Identity(id),
-            now,
-            now + Duration::from_secs(3600),
-            None,
-        );
-
-        // empty crl_file
-        let crl_file = NamedTempFile::new().unwrap();
-        let metrics = test_proxy_metrics();
-        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics.clone()).unwrap();
-
-        // get_crls() returns empty vec, function returns early
-        check_own_cert_revocation(&cert, &crl_manager, &metrics);
-        assert_eq!(metrics.own_cert_revoked.get(), 0);
-    }
-
-    #[test]
-    fn test_self_check_intermediate_ca_revoked() {
+    fn test_self_check_revoked_intermediate() {
         let now = SystemTime::now();
 
         // generate intermediate CA signed by TEST_ROOT
@@ -720,19 +646,86 @@ mod tests {
         // CRL that revokes the intermediate CA serial ( not the leaf)
         let crl_pem = crl_pem_revoking_cert(&ia_serial);
 
-        let mut crl_file = NamedTempFile::new().unwrap();
-        crl_file.write_all(crl_pem.as_bytes()).unwrap();
-        crl_file.flush().unwrap();
+        let crl_file = crl_file_with(&crl_pem);
 
         let metrics = test_proxy_metrics();
-        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics.clone()).unwrap();
+        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics).unwrap();
 
-        check_own_cert_revocation(&cert, &crl_manager, &metrics);
-        assert_eq!(
-            metrics.own_cert_revoked.get(),
-            1,
+        assert!(
+            check_own_cert_revocation(&cert, &crl_manager, UnixTime::now()),
             "intermediate CA revocation should be detected via chain-level check"
         );
+    }
+
+    #[test]
+    fn test_self_check_non_revoked() {
+        let id = Identity::from_str("spiffe://cluster.local/ns/default/sa/test").unwrap();
+        let now = SystemTime::now();
+        let cert = generate_test_certs_at(
+            &TestIdentity::Identity(id),
+            now,
+            now + Duration::from_secs(3600),
+            None,
+        );
+        let metrics = test_proxy_metrics();
+
+        let cannot_match_pem = crl_pem_revoking_cert(&[0u8; 20]);
+        let crl_file = crl_file_with(&cannot_match_pem);
+
+        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics).unwrap();
+
+        assert!(!check_own_cert_revocation(
+            &cert,
+            &crl_manager,
+            UnixTime::now()
+        ));
+    }
+
+    #[test]
+    fn test_self_check_cross_ca_ignored() {
+        let id = Identity::from_str("spiffe://cluster.local/ns/default/sa/test").unwrap();
+        let now = SystemTime::now();
+        let cert = generate_test_certs_at(
+            &TestIdentity::Identity(id),
+            now,
+            now + Duration::from_secs(3600),
+            None,
+        );
+        let metrics = test_proxy_metrics();
+
+        let ca_b = gen_ca("CA-b", 999);
+        let crl_pem = crl_pem_signed(&ca_b, 1, &[&cert.cert.serial_bytes()]);
+        let crl_file = crl_file_with(&crl_pem);
+
+        let crl_manager = CrlManager::new(crl_file.path().to_path_buf(), metrics).unwrap();
+
+        assert!(!check_own_cert_revocation(
+            &cert,
+            &crl_manager,
+            UnixTime::now()
+        ));
+    }
+
+    #[test]
+    fn test_self_check_no_crls_loaded() {
+        let id = Identity::from_str("spiffe://cluster.local/ns/default/sa/test").unwrap();
+        let now = SystemTime::now();
+        let cert = generate_test_certs_at(
+            &TestIdentity::Identity(id),
+            now,
+            now + Duration::from_secs(3600),
+            None,
+        );
+        let metrics = test_proxy_metrics();
+        let empty_crl_file = NamedTempFile::new().unwrap();
+
+        let crl_manager = CrlManager::new(empty_crl_file.path().to_path_buf(), metrics).unwrap();
+
+        assert!(!check_own_cert_revocation(
+            &cert,
+            &crl_manager,
+            UnixTime::now()
+        ));
     }
 
     #[tokio::test]
