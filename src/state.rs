@@ -787,11 +787,7 @@ impl DemandProxyState {
         let labels = OnDemandDnsLabels::new()
             .with_destination(workload)
             .with_source(src_workload);
-        self.metrics
-            .as_ref()
-            .on_demand_dns
-            .get_or_create(&labels)
-            .inc();
+        self.metrics.record_on_demand_dns(&labels);
         self.resolve_on_demand_dns(workload, original_target_address)
             .await
     }

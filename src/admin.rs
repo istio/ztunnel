@@ -15,6 +15,7 @@
 use crate::config::Config;
 use crate::hyper_util::{Server, empty_response, plaintext_response};
 use crate::identity::{CacheKey, SecretManager};
+use crate::metrics::evict::Evictable;
 use crate::state::DemandProxyState;
 use crate::tls::Certificate;
 use crate::version::BuildInfo;
@@ -53,6 +54,7 @@ struct State {
     shutdown_trigger: signal::ShutdownTrigger,
     cert_manager: Arc<SecretManager>,
     handlers: Vec<Arc<dyn AdminHandler>>,
+    evict: Vec<Arc<dyn Evictable>>,
 }
 
 pub struct Service {
@@ -111,10 +113,17 @@ impl Service {
                 shutdown_trigger,
                 cert_manager,
                 handlers: vec![],
+                evict: vec![],
             },
         )
         .await
         .map(|s| Service { s })
+    }
+
+    /// Serve `POST /metrics/evict?ttl=<duration>` to evict idle connection metrics on demand.
+    pub fn with_eviction(mut self, metrics: Arc<dyn Evictable>) -> Self {
+        self.s.state_mut().evict.push(metrics);
+        self
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -154,6 +163,7 @@ impl Service {
                     .await
                 }
                 "/logging" => Ok(handle_logging(req).await),
+                "/metrics/evict" => Ok(handle_evict(&state.evict, &req)),
                 "/" => Ok(handle_dashboard(req).await),
                 _ => Ok(empty_response(hyper::StatusCode::NOT_FOUND)),
             }
@@ -179,6 +189,10 @@ async fn handle_dashboard(_req: Request<Incoming>) -> Response<Full<Bytes>> {
         ("quitquitquit", "shut down the server"),
         ("config_dump", "dump the current Ztunnel configuration"),
         ("logging", "query/changing logging levels"),
+        (
+            "metrics/evict",
+            "POST with ?ttl=<duration> to evict connection metrics idle at least that long",
+        ),
     ];
 
     let mut api_rows = String::new();
@@ -542,16 +556,61 @@ fn base64_encode(data: String) -> String {
     STANDARD.encode(data)
 }
 
+/// Evicts connection series that have been idle for at least the `ttl` query parameter (a
+/// duration such as `30s`; `0s` evicts everything without an open connection), instead of the
+/// configured TTL.
+fn handle_evict<T>(evict: &[Arc<dyn Evictable>], req: &Request<T>) -> Response<Full<Bytes>> {
+    use hyper::StatusCode;
+    if req.method() != hyper::Method::POST {
+        return empty_response(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    let ttl = req
+        .uri()
+        .query()
+        .into_iter()
+        .flat_map(|q| url::form_urlencoded::parse(q.as_bytes()))
+        .find(|(k, _)| k == "ttl")
+        .map(|(_, v)| v.into_owned());
+    let Some(ttl) = ttl else {
+        return plaintext_response(
+            StatusCode::BAD_REQUEST,
+            "missing ttl query parameter, e.g. ?ttl=30s\n".into(),
+        );
+    };
+    let ttl = match duration_str::parse(&ttl) {
+        Ok(ttl) => ttl,
+        Err(e) => {
+            return plaintext_response(
+                StatusCode::BAD_REQUEST,
+                format!("invalid ttl {ttl:?}: {e}\n"),
+            );
+        }
+    };
+    match evict
+        .iter()
+        .filter_map(|m| m.evict_idle(ttl))
+        .reduce(|a, b| a + b)
+    {
+        Some(n) => plaintext_response(StatusCode::OK, format!("evicted {n} series sets\n")),
+        None => plaintext_response(
+            StatusCode::CONFLICT,
+            "metrics eviction is disabled\n".into(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ConfigDump;
     use super::change_log_level;
     use super::dump_certs;
     use super::handle_config_dump;
+    use super::handle_evict;
     use crate::admin::HELP_STRING;
     use crate::config::ProxyConfig;
     use crate::config::construct_config;
     use crate::identity;
+    use crate::metrics::evict::Evictable;
     use crate::strng;
     use crate::test_helpers::{get_response_str, helpers, new_proxy_state};
     use crate::xds::istio::security::Address as XdsAddress;
@@ -972,5 +1031,47 @@ mod tests {
         let resp = change_log_level(true, "off");
         let resp_str = get_response_str(resp).await;
         assert!(resp_str.contains("current log level is hickory_server::server=off,off\n"));
+    }
+
+    use hyper::Request;
+
+    fn req(method: &str, uri: &str) -> Request<()> {
+        Request::builder().method(method).uri(uri).body(()).unwrap()
+    }
+
+    async fn call(m: &[Arc<dyn Evictable>], method: &str, uri: &str) -> (u16, String) {
+        let resp = handle_evict(m, &req(method, uri));
+        let status = resp.status().as_u16();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_evict_endpoint() {
+        let m = Arc::new(crate::proxy::Metrics::with_eviction_ttl(
+            &mut prometheus_client::registry::Registry::default(),
+            Duration::from_secs(3600),
+        ));
+        let tl = crate::proxy::CommonTrafficLabels::default();
+        let e = m.evictor().unwrap();
+        e.connection_opened(&tl);
+        e.connection_closed(&tl, &tl);
+        let on: Vec<Arc<dyn Evictable>> = vec![m.clone()];
+
+        assert_eq!(call(&on, "GET", "/metrics/evict?ttl=0s").await.0, 405);
+        assert_eq!(call(&on, "POST", "/metrics/evict").await.0, 400);
+        assert_eq!(call(&on, "POST", "/metrics/evict?ttl=nope").await.0, 400);
+        // Not idle for an hour yet, so nothing goes; with a zero ttl, it does.
+        let (status, body) = call(&on, "POST", "/metrics/evict?ttl=1h").await;
+        assert_eq!((status, body.as_str()), (200, "evicted 0 series sets\n"));
+        let (status, body) = call(&on, "POST", "/metrics/evict?ttl=0s").await;
+        assert_eq!((status, body.as_str()), (200, "evicted 1 series sets\n"));
+
+        // Eviction disabled.
+        let off: Vec<Arc<dyn Evictable>> = vec![Arc::new(crate::proxy::Metrics::new(
+            &mut prometheus_client::registry::Registry::default(),
+        ))];
+        assert_eq!(call(&off, "POST", "/metrics/evict?ttl=0s").await.0, 409);
+        assert_eq!(call(&[], "POST", "/metrics/evict?ttl=0s").await.0, 409);
     }
 }

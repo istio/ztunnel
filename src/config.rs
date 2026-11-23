@@ -76,6 +76,7 @@ const POOL_UNUSED_RELEASE_TIMEOUT: &str = "POOL_UNUSED_RELEASE_TIMEOUT";
 const OUTBOUND_CONNECT_MAX_RETRIES: &str = "OUTBOUND_CONNECT_MAX_RETRIES";
 const OUTBOUND_CONNECT_BASE_BACKOFF: &str = "OUTBOUND_CONNECT_BASE_BACKOFF";
 const OUTBOUND_CONNECT_MAX_BACKOFF: &str = "OUTBOUND_CONNECT_MAX_BACKOFF";
+const METRICS_EVICTION_TTL: &str = "METRICS_EVICTION_TTL";
 // CONNECTION_TERMINATION_DEADLINE configures an explicit deadline
 const CONNECTION_TERMINATION_DEADLINE: &str = "CONNECTION_TERMINATION_DEADLINE";
 // TERMINATION_GRACE_PERIOD_SECONDS configures the Kubernetes terminationGracePeriodSeconds configuration.
@@ -106,6 +107,7 @@ const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24); // 24 hours
 const DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT: Duration = Duration::from_secs(60 * 5); // 5 minutes
+const DEFAULT_METRICS_EVICTION_TTL: Duration = Duration::from_secs(0); // disabled
 const DEFAULT_POOL_MAX_STREAMS_PER_CONNECTION: u16 = 100; //Go: 100, Hyper: 200, Envoy: 2147483647 (lol), Spec recommended minimum 100
 
 const DEFAULT_OUTBOUND_CONNECT_MAX_RETRIES: usize = 0;
@@ -238,6 +240,10 @@ pub struct Config {
     pub outbound_connect_base_backoff: Duration,
     /// Upper bound on the delay between outbound connect retries.
     pub outbound_connect_max_backoff: Duration,
+
+    /// How long a connection metric series may be idle (no open connections or activity) before it is evicted on scrape.
+    /// Zero disables eviction.
+    pub metrics_eviction_ttl: Duration,
 
     pub socks5_addr: Option<SocketAddr>,
     pub admin_addr: Address,
@@ -822,6 +828,11 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             DEFAULT_OUTBOUND_CONNECT_MAX_BACKOFF,
         )?,
 
+        metrics_eviction_ttl: parse_duration_default(
+            METRICS_EVICTION_TTL,
+            DEFAULT_METRICS_EVICTION_TTL,
+        )?,
+
         // window size: per-stream limit
         window_size: parse_default(HTTP2_STREAM_WINDOW_SIZE, 4 * 1024 * 1024)?,
         // connection window size: per connection.
@@ -1288,6 +1299,21 @@ pub mod tests {
             let key: AsciiMetadataKey = AsciiMetadataKey::from_str(&k).unwrap();
             let value: AsciiMetadataValue = AsciiMetadataValue::from_str(&v).unwrap();
             assert!(metadata.vec.contains(&(key, value)));
+        }
+    }
+
+    #[test]
+    fn test_metrics_eviction_ttl() {
+        let build = || construct_config(ProxyConfig::default()).unwrap();
+        unsafe {
+            env::remove_var(METRICS_EVICTION_TTL);
+            assert_eq!(build().metrics_eviction_ttl, DEFAULT_METRICS_EVICTION_TTL);
+            env::set_var(METRICS_EVICTION_TTL, "30s");
+            assert_eq!(build().metrics_eviction_ttl, Duration::from_secs(30));
+            // Zero disables eviction.
+            env::set_var(METRICS_EVICTION_TTL, "0s");
+            assert_eq!(build().metrics_eviction_ttl, Duration::ZERO);
+            env::remove_var(METRICS_EVICTION_TTL);
         }
     }
 

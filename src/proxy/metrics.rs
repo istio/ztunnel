@@ -16,7 +16,7 @@ use std::fmt::Write;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, atomic};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use prometheus_client::encoding::{
     EncodeLabelSet, EncodeLabelValue, LabelSetEncoder, LabelValueEncoder,
@@ -53,6 +53,9 @@ pub struct Metrics {
     pub crl_policy_rejections: Family<CrlLabels, Counter>,
 
     pub crl_untracked_connections: Family<CrlLabels, Counter>,
+
+    /// Tracks idle connection series so they can be evicted. None when eviction is disabled.
+    evictor: Option<crate::metrics::evict::Evictor>,
 }
 
 #[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
@@ -282,7 +285,7 @@ pub struct CommonTrafficLabels {
     destination_version: DefaultedUnknown<RichStrng>,
     destination_cluster: DefaultedUnknown<RichStrng>,
 
-    request_protocol: RequestProtocol,
+    pub(crate) request_protocol: RequestProtocol,
     response_flags: ResponseFlags,
     connection_security_policy: SecurityPolicy,
 
@@ -350,8 +353,21 @@ impl OnDemandDnsLabels {
     }
 }
 
+impl crate::metrics::evict::Evictable for Metrics {
+    fn evict_idle(&self, ttl: Duration) -> Option<usize> {
+        Metrics::evict_idle(self, ttl)
+    }
+}
+
 impl Metrics {
+    /// Creates metrics with eviction of idle connection series disabled.
     pub fn new(registry: &mut Registry) -> Self {
+        Self::with_eviction_ttl(registry, Duration::ZERO)
+    }
+
+    /// Creates metrics that evict a connection series once it has been idle for `ttl`.
+    /// A zero `ttl` disables eviction.
+    pub fn with_eviction_ttl(registry: &mut Registry, ttl: Duration) -> Self {
         let connection_opens = Family::default();
         registry.register(
             "tcp_connections_opened",
@@ -430,7 +446,54 @@ impl Metrics {
             open_sockets,
             crl_policy_rejections,
             crl_untracked_connections,
+            evictor: (!ttl.is_zero()).then(|| crate::metrics::evict::Evictor::new(ttl)),
         }
+    }
+
+    pub fn evictor(&self) -> Option<&crate::metrics::evict::Evictor> {
+        self.evictor.as_ref()
+    }
+
+    /// Drops connection metric series that have had no open connections or activity for at least
+    /// `ttl`. Returns None if eviction is disabled.
+    pub fn evict_idle(&self, ttl: Duration) -> Option<usize> {
+        let evictor = self.evictor.as_ref()?;
+        let now = std::time::Instant::now();
+        evictor.sweep_on_demand_dns(now, ttl, |l| {
+            self.on_demand_dns.remove(l);
+        });
+        Some(evictor.sweep_idle(now, ttl, |l| self.remove_series(l)))
+    }
+
+    pub fn record_on_demand_dns(&self, labels: &OnDemandDnsLabels) {
+        if let Some(e) = &self.evictor {
+            e.on_demand_dns_used(labels);
+        }
+        self.on_demand_dns.get_or_create(labels).inc();
+    }
+
+    fn remove_series(&self, l: &CommonTrafficLabels) {
+        // Exhaustive, so a new metric must be either evicted here or explicitly exempted.
+        let Metrics {
+            connection_opens,
+            connection_close,
+            connection_failures,
+            connection_retries,
+            received_bytes,
+            sent_bytes,
+            // Labels are bounded (reporter only).
+            open_sockets: _,
+            crl_policy_rejections: _,
+            crl_untracked_connections: _,
+            on_demand_dns: _, // Not tied to a connection; see Evictor::on_demand_dns_used.
+            evictor: _,
+        } = self;
+        connection_opens.remove(l);
+        connection_close.remove(l);
+        connection_failures.remove(l);
+        connection_retries.remove(l);
+        received_bytes.remove(l);
+        sent_bytes.remove(l);
     }
 
     pub fn record_socket_open(&self, labels: &SocketLabels) {
@@ -508,6 +571,8 @@ pub struct ConnectionResult {
     pub(crate) retries: u32,
     // Have we recorded yet?
     pub(crate) recorded: bool,
+    // The labels the connection was opened with, for metric eviction.
+    open_tl: Option<CommonTrafficLabels>,
 }
 
 // log_early_deny allows logging a connection is denied before we have enough information to emit proper
@@ -641,6 +706,10 @@ impl ConnectionResultBuilder {
     pub fn record_retry<E: std::error::Error + 'static>(&self, err: &E) {
         let mut tl = self.tl.clone();
         tl.response_flags = failure_reason(err);
+        // Track before incrementing, so a concurrent sweep cannot evict the series in between.
+        if let Some(e) = &self.metrics.evictor {
+            e.touch(&tl);
+        }
         self.metrics.connection_retries.get_or_create(&tl).inc();
         event!(
             target: "access",
@@ -667,6 +736,12 @@ impl ConnectionResultBuilder {
     }
 
     pub fn build(self) -> ConnectionResult {
+        // Track before incrementing, so a concurrent sweep cannot evict the series in between and
+        // orphan the cached counters below.
+        let open_tl = self.metrics.evictor.as_ref().map(|e| {
+            e.connection_opened(&self.tl);
+            self.tl.clone()
+        });
         // Grab the metrics with our labels now, so we don't need to fetch them each time.
         // The inner metric is an Arc so clone is fine/cheap.
         // With the raw Counter, we increment is a simple atomic add operation (~1ns).
@@ -720,6 +795,7 @@ impl ConnectionResultBuilder {
             recv_metric,
             retries: self.retries,
             recorded: false,
+            open_tl,
         }
     }
 }
@@ -764,6 +840,12 @@ impl ConnectionResult {
         }
         self.recorded = true;
         let tl = &self.tl;
+
+        // Track before incrementing, so a concurrent sweep cannot evict the series in between and
+        // lose the increment.
+        if let (Some(e), Some(open_tl)) = (&self.metrics.evictor, &self.open_tl) {
+            e.connection_closed(open_tl, tl);
+        }
 
         // Unconditionally record the connection was closed
         self.metrics.connection_close.get_or_create(tl).inc();
@@ -884,6 +966,8 @@ fn to_value<T: AsRef<str>>(t: &T) -> impl Value + '_ {
 mod tests {
     use super::*;
     use crate::proxy::h2::Teardown;
+    use prometheus_client::encoding::text::encode;
+    use std::time::Duration;
 
     #[test]
     fn teardown_failure_reason() {
@@ -896,5 +980,153 @@ mod tests {
             reason(proxy::Error::Teardown(Teardown::PingTimeout)),
             ResponseFlags::ConnectionFailure
         );
+    }
+
+    fn open(m: &Arc<Metrics>) -> ConnectionResult {
+        ConnectionResultBuilder::new(
+            "127.0.0.1:1".parse().unwrap(),
+            "127.0.0.1:2".parse().unwrap(),
+            None,
+            Instant::now(),
+            ConnectionOpen {
+                reporter: Reporter::source,
+                source: None,
+                derived_source: None,
+                destination: None,
+                destination_service: None,
+                connection_security_policy: SecurityPolicy::unknown,
+            },
+            m.clone(),
+        )
+        .build()
+    }
+
+    #[test]
+    fn evict_idle_removes_series() {
+        let m = Metrics::with_eviction_ttl(&mut Registry::default(), Duration::from_secs(60));
+        let tl = CommonTrafficLabels::new();
+        m.connection_opens.get_or_create(&tl).inc();
+        m.sent_bytes.get_or_create(&tl).inc();
+        let e = m.evictor().unwrap();
+        e.connection_opened(&tl);
+        e.connection_closed(&tl, &tl);
+
+        // Freshly active: still exported.
+        assert_eq!(m.evict_idle(Duration::from_secs(60)), Some(0));
+        assert!(m.connection_opens.get(&tl).is_some());
+
+        // Idle for longer than the TTL: gone.
+        let sweep = Instant::now() + Duration::from_secs(61);
+        assert_eq!(e.sweep(sweep, |l| m.remove_series(l)), 1);
+        assert!(m.connection_opens.get(&tl).is_none());
+        assert!(m.sent_bytes.get(&tl).is_none());
+    }
+
+    // Every series written by a connection's lifecycle must be gone once it is idle, except the
+    // explicitly exempt families.
+    #[test]
+    fn idle_connection_leaves_no_series_behind() {
+        const EXEMPT: &[&str] = &["tcp_sockets_open", "crl_"];
+        let mut registry = Registry::default();
+        let ttl = Duration::from_secs(60);
+        let m = Arc::new(Metrics::with_eviction_ttl(&mut registry, ttl));
+        let samples = |registry: &Registry| {
+            let mut buf = String::new();
+            encode(&mut buf, registry).unwrap();
+            buf.lines()
+                .filter(|l| !l.starts_with('#'))
+                .map(|l| l.split(['{', ' ']).next().unwrap().to_string())
+                .filter(|n| !EXEMPT.iter().any(|e| n.starts_with(e)))
+                .collect::<Vec<_>>()
+        };
+
+        let builder = || {
+            ConnectionResultBuilder::new(
+                "127.0.0.1:1".parse().unwrap(),
+                "127.0.0.1:2".parse().unwrap(),
+                None,
+                Instant::now(),
+                ConnectionOpen {
+                    reporter: Reporter::source,
+                    source: None,
+                    derived_source: None,
+                    destination: None,
+                    destination_service: None,
+                    connection_security_policy: SecurityPolicy::unknown,
+                },
+                m.clone(),
+            )
+        };
+        // A retried attempt, then a failed one, then a successful one.
+        let b = builder();
+        b.record_retry(&proxy::Error::Identity(crate::identity::Error::Forgotten));
+        b.build()
+            .record(Err(proxy::Error::AuthorizationPolicyLateRejection));
+        builder().build().record::<proxy::Error>(Ok(()));
+        m.record_socket_open(&SocketLabels {
+            reporter: Reporter::source,
+        });
+        m.record_on_demand_dns(&OnDemandDnsLabels::new());
+        m.record_crl_rejection(Reporter::source);
+
+        let before = samples(&registry);
+        for name in [
+            "tcp_connections_opened_total",
+            "tcp_connections_closed_total",
+            "tcp_connections_failed_total",
+            "tcp_connection_retries_total",
+            "tcp_sent_bytes_total",
+            "tcp_received_bytes_total",
+            "on_demand_dns_total",
+        ] {
+            assert!(
+                before.iter().any(|n| n == name),
+                "{name} not written: {before:?}"
+            );
+        }
+
+        m.evict_idle(Duration::ZERO).unwrap();
+        let left = samples(&registry);
+        assert!(left.is_empty(), "series survived eviction: {left:?}");
+    }
+
+    #[test]
+    fn disabled_without_ttl() {
+        let m = Arc::new(Metrics::new(&mut Registry::default()));
+        assert!(m.evictor().is_none());
+        open(&m).record::<crate::proxy::Error>(Ok(()));
+        assert_eq!(m.evict_idle(Duration::ZERO), None);
+    }
+
+    #[tokio::test]
+    async fn evicts_idle_series_after_ttl() {
+        let mut registry = Registry::default();
+        let ttl = Duration::from_millis(300);
+        let metrics = Arc::new(Metrics::with_eviction_ttl(&mut registry, ttl));
+
+        let conn = open(&metrics);
+        // Mirrors the scrape handler: encode, then evict.
+        let scrape = |m: &Metrics| {
+            let mut buf = String::new();
+            encode(&mut buf, &registry).unwrap();
+            m.evict_idle(ttl);
+            buf
+        };
+        let has_series = |out: &str| out.contains("tcp_connections_opened_total{");
+
+        // An open connection is never evicted, however long it has been quiet.
+        tokio::time::sleep(ttl * 2).await;
+        assert!(has_series(&scrape(&metrics)), "series kept while open");
+
+        // Once closed, the series survive scrapes within the TTL...
+        conn.record::<crate::proxy::Error>(Ok(()));
+        assert!(has_series(&scrape(&metrics)), "series kept within TTL");
+
+        // The first scrape after the TTL still exports the series, then evicts it.
+        tokio::time::sleep(ttl + Duration::from_millis(100)).await;
+        let out = scrape(&metrics);
+        assert!(has_series(&out), "series exported one last time:\n{out}");
+        let out = scrape(&metrics);
+        assert!(!has_series(&out), "series evicted after TTL:\n{out}");
     }
 }

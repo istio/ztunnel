@@ -82,9 +82,15 @@ pub async fn build_with_cert(
     let istio_registry = metrics::sub_registry(&mut registry);
     let _ = metrics::meta::Metrics::new(istio_registry);
     let xds_metrics = xds::Metrics::new(istio_registry);
-    let proxy_metrics = Arc::new(proxy::Metrics::new(istio_registry));
+    let proxy_metrics = Arc::new(proxy::Metrics::with_eviction_ttl(
+        istio_registry,
+        config.metrics_eviction_ttl,
+    ));
     let dns_metrics = if config.dns_proxy {
-        Some(dns::Metrics::new(istio_registry))
+        Some(dns::Metrics::with_eviction_ttl(
+            istio_registry,
+            config.metrics_eviction_ttl,
+        ))
     } else {
         None
     };
@@ -118,7 +124,11 @@ pub async fn build_with_cert(
         cert_manager.clone(),
     )
     .await
-    .context("admin server starts")?;
+    .context("admin server starts")?
+    .with_eviction(proxy_metrics.clone());
+    if let Some(m) = &dns_metrics {
+        admin_server = admin_server.with_eviction(Arc::new(m.clone()));
+    }
     let admin_address = admin_server.address();
 
     // Optionally create the HBONE proxy.
@@ -130,8 +140,8 @@ pub async fn build_with_cert(
         config.clone(),
         state.clone(),
         cert_manager.clone(),
-        proxy_metrics,
-        dns_metrics,
+        proxy_metrics.clone(),
+        dns_metrics.clone(),
         drain_rx.clone(),
     )
     .map_err(|e| anyhow::anyhow!("failed to start proxy factory {:?}", e))?;
@@ -235,7 +245,12 @@ pub async fn build_with_cert(
     // Create and start the metrics server.
     let metrics_server = metrics::Server::new(config.clone(), drain_rx.clone(), registry)
         .await
-        .context("stats server starts")?;
+        .context("stats server starts")?
+        .with_eviction(proxy_metrics.clone());
+    let metrics_server = match &dns_metrics {
+        Some(m) => metrics_server.with_eviction(Arc::new(m.clone())),
+        None => metrics_server,
+    };
     let metrics_address = metrics_server.address();
     // Run the metrics sever in the current tokio worker pool.
     metrics_server.spawn();
