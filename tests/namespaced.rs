@@ -946,12 +946,16 @@ mod namespaced {
             })
             .unwrap();
 
-        // The long running connection should also fail on next attempt
-        let tx_send_result = tx.send_and_wait(()).await;
-        assert!(
-            tx_send_result.is_err(),
-            "long running connection should fail after workload deletion"
-        );
+        // The long running connection should also fail. Teardown of the existing HBONE stream is
+        // asynchronous, so allow it some time.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tx.send_and_wait(()).await.is_ok() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "long running connection should fail after workload deletion"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
 
         drop(tx);
         assert!(cjh.join().unwrap().is_err());
