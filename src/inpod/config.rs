@@ -142,6 +142,10 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
+        // Ephemeral ports get a unique port, no reuse.
+        if addr.port() == 0 {
+            return self.sf.tcp_bind(addr);
+        }
         let sock = self.sf.configure(|| match addr {
             std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
             std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
@@ -156,6 +160,10 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
     }
 
     fn udp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
+        // Ephemeral ports get a unique port, no reuse.
+        if addr.port() == 0 {
+            return self.sf.udp_bind(addr);
+        }
         let sock = self.sf.configure(|| {
             let sock = match addr {
                 std::net::SocketAddr::V4(_) => nix::sys::socket::socket(
@@ -307,6 +315,59 @@ mod test {
             assert!(sock_ref.reuse_port().unwrap());
             assert_eq!(sock_ref.mark().unwrap(), 123);
         }
+    }
+
+    #[tokio::test]
+    async fn test_inpod_config_port_reuse_skipped_for_ephemeral() {
+        let cfg = fixture!();
+
+        let inpod_cfg = InPodConfig::new(&cfg).unwrap();
+        assert!(inpod_cfg.reuse_port);
+
+        let sf = inpod_cfg.socket_factory(
+            InpodNetns::new(
+                Arc::new(crate::inpod::netns::InpodNetns::current().unwrap()),
+                new_netns(),
+            )
+            .unwrap(),
+        );
+
+        let sock_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        {
+            let s = sf.tcp_bind(sock_addr).unwrap().inner();
+            let sock_ref = socket2::SockRef::from(&s);
+            assert!(!sock_ref.reuse_port().unwrap());
+            assert_eq!(sock_ref.mark().unwrap(), 123);
+        }
+
+        {
+            let s = sf.udp_bind(sock_addr).unwrap();
+            let sock_ref = socket2::SockRef::from(&s);
+            assert!(!sock_ref.reuse_port().unwrap());
+            assert_eq!(sock_ref.mark().unwrap(), 123);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_inpod_config_ephemeral_udp_ports_unique() {
+        let cfg = fixture!();
+
+        let inpod_cfg = InPodConfig::new(&cfg).unwrap();
+        let sf = inpod_cfg.socket_factory(
+            InpodNetns::new(
+                Arc::new(crate::inpod::netns::InpodNetns::current().unwrap()),
+                new_netns(),
+            )
+            .unwrap(),
+        );
+
+        let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let socks: Vec<_> = (0..800).map(|_| sf.udp_bind(addr).unwrap()).collect();
+        let ports: std::collections::HashSet<_> = socks
+            .iter()
+            .map(|s| s.local_addr().unwrap().port())
+            .collect();
+        assert_eq!(ports.len(), socks.len(), "ephemeral binds shared a port");
     }
 
     #[tokio::test]
