@@ -463,6 +463,18 @@ pub mod testing {
     /// Common keys to match one are "target" and "message"; most of the rest are custom.
     #[track_caller]
     pub fn assert_contains(want: HashMap<&str, &str>) {
+        // Logs can land after the metrics the caller waited on, especially on a loaded machine.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match find_match(&want) {
+                Ok(()) => return,
+                Err(msg) if std::time::Instant::now() >= deadline => panic!("{msg}"),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+    }
+
+    fn find_match(want: &HashMap<&str, &str>) -> Result<(), String> {
         let logs = {
             let buf = global_buf().lock().unwrap();
             std::str::from_utf8(&buf)
@@ -476,7 +488,7 @@ pub mod testing {
             })
             .map(|log| {
                 let mut errors = HashMap::new();
-                for (k, v) in &want {
+                for (k, v) in want {
                     let Some(have) = log.get(k) else {
                         if !v.is_empty() {
                             errors.insert(k.to_string(), LogError::Missing(v.to_string()));
@@ -504,7 +516,7 @@ pub mod testing {
 
         let found_exact_match = errors.first().map(|h| h.is_empty()).unwrap_or(false);
         if found_exact_match {
-            return;
+            return Ok(());
         }
 
         let total = errors.len();
@@ -518,9 +530,9 @@ pub mod testing {
                     .join("\n")
             })
             .join("\n\n");
-        panic!(
+        Err(format!(
             "Analyzed {total} logs but none matched our criteria. Closest 10 matches:\n\n{help}"
-        );
+        ))
     }
 
     /// MockWriter will store written logs
