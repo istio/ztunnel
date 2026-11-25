@@ -140,19 +140,28 @@ impl Service {
                     state.config.self_termination_deadline,
                 )
                 .await),
-                "/config_dump" => {
-                    handle_config_dump(
-                        &state.handlers,
-                        ConfigDump {
-                            proxy_state: state.proxy_state.clone(),
-                            static_config: Default::default(),
-                            version: BuildInfo::new(),
-                            config: state.config.clone(),
-                            certificates: dump_certs(state.cert_manager.borrow()).await,
-                        },
-                    )
-                    .await
-                }
+                "/config_dump" => match config_dump_resource(req.uri()).as_deref() {
+                    None => {
+                        handle_config_dump(
+                            &state.handlers,
+                            ConfigDump {
+                                proxy_state: state.proxy_state.clone(),
+                                static_config: Default::default(),
+                                version: BuildInfo::new(),
+                                config: state.config.clone(),
+                                certificates: dump_certs(state.cert_manager.borrow()).await,
+                            },
+                        )
+                        .await
+                    }
+                    Some("certificates") => {
+                        handle_config_dump_certificates(state.cert_manager.borrow()).await
+                    }
+                    Some(_) => Ok(plaintext_response(
+                        hyper::StatusCode::NOT_FOUND,
+                        "unsupported resource; only resource=certificates is supported\n".into(),
+                    )),
+                },
                 "/logging" => Ok(handle_logging(req).await),
                 "/" => Ok(handle_dashboard(req).await),
                 _ => Ok(empty_response(hyper::StatusCode::NOT_FOUND)),
@@ -177,7 +186,11 @@ async fn handle_dashboard(_req: Request<Incoming>) -> Response<Full<Bytes>> {
             "query or toggle heap profiling with ?activate=true|false (requires jmalloc)",
         ),
         ("quitquitquit", "shut down the server"),
-        ("config_dump", "dump the current Ztunnel configuration"),
+        (
+            "config_dump",
+            "dump the current Ztunnel configuration; \
+             params: resource=certificates to dump only the certificates",
+        ),
         ("logging", "query/changing logging levels"),
     ];
 
@@ -353,7 +366,35 @@ async fn handle_config_dump(
         let x = h.handle()?;
         kv.insert(h.key().to_string(), x);
     }
-    let body = serde_json::to_string_pretty(&kv)?;
+    pretty_json_response(&kv)
+}
+
+// The resource named by /config_dump?resource=, as in Envoy: the first value
+// wins and an empty value means no filter.
+fn config_dump_resource(uri: &hyper::Uri) -> Option<String> {
+    url::form_urlencoded::parse(uri.query()?.as_bytes())
+        .find(|(k, _)| k == "resource")
+        .map(|(_, v)| v.into_owned())
+        .filter(|v| !v.is_empty())
+}
+
+// The config dump with only its certificates key, built without the rest of
+// the dump, so clients can parse both replies the same way.
+async fn handle_config_dump_certificates(
+    cert_manager: &SecretManager,
+) -> anyhow::Result<Response<Full<Bytes>>> {
+    let mut kv = serde_json::Map::new();
+    kv.insert(
+        "certificates".to_string(),
+        serde_json::to_value(dump_certs(cert_manager).await)?,
+    );
+    pretty_json_response(&kv)
+}
+
+fn pretty_json_response(
+    kv: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<Response<Full<Bytes>>> {
+    let body = serde_json::to_string_pretty(kv)?;
     Ok(Response::builder()
         .status(hyper::StatusCode::OK)
         .header(hyper::header::CONTENT_TYPE, "application/json")
@@ -546,6 +587,7 @@ fn base64_encode(data: String) -> String {
 mod tests {
     use super::ConfigDump;
     use super::change_log_level;
+    use super::config_dump_resource;
     use super::dump_certs;
     use super::handle_config_dump;
     use crate::admin::HELP_STRING;
@@ -899,6 +941,49 @@ mod tests {
         "hboneMtlsPort": 15008
       }"#
         ));
+    }
+
+    #[test]
+    fn test_config_dump_resource() {
+        let resource = |uri: &str| config_dump_resource(&uri.parse::<hyper::Uri>().unwrap());
+        assert_eq!(resource("/config_dump"), None);
+        assert_eq!(resource("/config_dump?"), None);
+        assert_eq!(resource("/config_dump?resource="), None);
+        assert_eq!(resource("/config_dump?resource"), None);
+        assert_eq!(resource("/config_dump?other=certificates"), None);
+        assert_eq!(resource("/config_dump?Resource=certificates"), None);
+        assert_eq!(
+            resource("/config_dump?resource=certificates").as_deref(),
+            Some("certificates")
+        );
+        assert_eq!(
+            resource("/config_dump?other=1&resource=certificates").as_deref(),
+            Some("certificates")
+        );
+        // Percent-encoding is decoded.
+        assert_eq!(
+            resource("/config_dump?resource=certific%61tes").as_deref(),
+            Some("certificates")
+        );
+        // The first value wins, as in Envoy.
+        assert_eq!(
+            resource("/config_dump?resource=certificates&resource=workloads").as_deref(),
+            Some("certificates")
+        );
+        assert_eq!(
+            resource("/config_dump?resource=workloads&resource=certificates").as_deref(),
+            Some("workloads")
+        );
+        // An empty first value means no filter, even if a later one is set.
+        assert_eq!(
+            resource("/config_dump?resource=&resource=certificates"),
+            None
+        );
+        // Values are not trimmed.
+        assert_eq!(
+            resource("/config_dump?resource=certificates%20").as_deref(),
+            Some("certificates ")
+        );
     }
 
     // each of these tests assert that we can change the log level and the
