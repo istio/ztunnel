@@ -15,11 +15,10 @@
 use itertools::Itertools;
 use std::fmt::Debug;
 use std::str::FromStr;
+use std::sync::{LazyLock, OnceLock};
 use std::time::Instant;
 use std::{env, fmt, io};
 
-use once_cell::sync::Lazy;
-use once_cell::sync::OnceCell;
 use serde::Serializer;
 use serde::ser::SerializeMap;
 
@@ -48,11 +47,11 @@ mod worker;
 
 use nonblocking::{NonBlocking, NonBlockingBuilder, WorkerGuard};
 
-pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
-static LOG_HANDLE: OnceCell<LogHandle> = OnceCell::new();
+pub static APPLICATION_START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
+static LOG_HANDLE: OnceLock<LogHandle> = OnceLock::new();
 
 pub fn setup_logging() -> WorkerGuard {
-    Lazy::force(&APPLICATION_START_TIME);
+    LazyLock::force(&APPLICATION_START_TIME);
     let (non_blocking, _guard) = NonBlockingBuilder::default()
         .lossy(false)
         .buffered_lines_limit(10000) // Buffer up to 10k lines; backpressure (not drop) when full
@@ -421,12 +420,11 @@ impl<'a> FormatFields<'a> for IstioJsonFormat {
 pub mod testing {
     use crate::telemetry::{APPLICATION_START_TIME, IstioJsonFormat, fmt_layer};
     use itertools::Itertools;
-    use once_cell::sync::Lazy;
     use serde_json::Value;
     use std::collections::HashMap;
     use std::fmt::{Display, Formatter};
     use std::io;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock};
 
     use tracing_subscriber::fmt;
 
@@ -579,7 +577,7 @@ pub mod testing {
     }
 
     pub fn setup_test_logging() {
-        Lazy::force(&APPLICATION_START_TIME);
+        LazyLock::force(&APPLICATION_START_TIME);
         let mock_writer = MockWriter::new(global_buf());
         let (non_blocking, _guard) = super::NonBlockingBuilder::default()
             .lossy(false)

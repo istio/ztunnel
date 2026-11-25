@@ -20,7 +20,7 @@ use crate::state::{DemandProxyState, ProxyState};
 use nix::sched::{CloneFlags, unshare};
 use prometheus_client::registry::Registry;
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use tokio::net::UnixStream;
 
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
@@ -32,7 +32,6 @@ use super::istio::zds::{WorkloadInfo, WorkloadRequest, WorkloadResponse, ZdsHell
 
 use crate::drain::{DrainTrigger, DrainWatcher};
 use crate::{dns, drain};
-use once_cell::sync::Lazy;
 use std::os::fd::{AsRawFd, OwnedFd};
 use tracing::debug;
 
@@ -47,8 +46,8 @@ pub struct Fixture {
     pub drain_tx: DrainTrigger,
     pub drain_rx: DrainWatcher,
 }
-// Ensure that the `tracing` stack is only initialised once using `once_cell`
-static UNSHARE: Lazy<()> = Lazy::new(|| {
+// Ensure that the network namespace is only initialised once.
+static UNSHARE: LazyLock<()> = LazyLock::new(|| {
     unshare(CloneFlags::CLONE_NEWNET).unwrap();
     let lo_set = std::process::Command::new("ip")
         .args(["link", "set", "lo", "up"])
@@ -61,7 +60,7 @@ static UNSHARE: Lazy<()> = Lazy::new(|| {
 impl Default for Fixture {
     fn default() -> Fixture {
         crate::test_helpers::helpers::initialize_telemetry();
-        Lazy::force(&UNSHARE);
+        LazyLock::force(&UNSHARE);
         let mut registry = Registry::default();
 
         let cfg = crate::config::Config {
