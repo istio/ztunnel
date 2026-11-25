@@ -20,7 +20,6 @@ use crate::TLS12_ENABLED;
 use crate::identity::{self, Identity};
 
 use std::fmt::Debug;
-#[cfg(feature = "tls-openssl")]
 use std::sync::LazyLock;
 
 use std::sync::Arc;
@@ -68,15 +67,27 @@ pub static CRYPTO_PROVIDER: &str = "tls-openssl";
 // One exception is CSR generation which doesn't currently have a plugin mechanism (https://github.com/rustls/rcgen/issues/228);
 // In that case, and any future ones, it is critical to guard the code with appropriate `cfg` guards.
 
-#[cfg(feature = "tls-boring")]
+// The provider is built once per process, on first use. Every input (the crypto backend,
+// TLS12_ENABLED and PQC_ENABLED) is fixed for the life of the process, and provider() is called
+// several times per new connection. Building one can be expensive: for example,
+// `rustls_openssl::default_provider()` probes each default key exchange group by generating and
+// discarding a real key pair (inside the FIPS provider when FIPS is enabled, since
+// rustls-openssl 0.4.2).
+static PROVIDER: LazyLock<Arc<CryptoProvider>> = LazyLock::new(|| Arc::new(build_provider()));
+
 pub(super) fn provider() -> Arc<CryptoProvider> {
+    PROVIDER.clone()
+}
+
+#[cfg(feature = "tls-boring")]
+fn build_provider() -> CryptoProvider {
     // Due to 'fips-only' feature on the boring provider, this will use only AES_256_GCM_SHA384
     // and AES_128_GCM_SHA256
-    Arc::new(boring_rustls_provider::provider())
+    boring_rustls_provider::provider()
 }
 
 #[cfg(feature = "tls-ring")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
+fn build_provider() -> CryptoProvider {
     let mut cipher_suites = vec![
         rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
         rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
@@ -90,14 +101,14 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
             rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
         ]);
     }
-    Arc::new(CryptoProvider {
+    CryptoProvider {
         cipher_suites,
         ..rustls::crypto::ring::default_provider()
-    })
+    }
 }
 
 #[cfg(feature = "tls-aws-lc")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
+fn build_provider() -> CryptoProvider {
     let mut cipher_suites = vec![
         rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
         rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256,
@@ -120,24 +131,11 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
         provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768]
     }
 
-    Arc::new(provider)
-}
-
-// Built once per process: every input (TLS12_ENABLED, PQC_ENABLED) is fixed for the life of the
-// process. Building it is expensive because `rustls_openssl::default_provider()` probes each
-// default key exchange group by generating and discarding a real key pair (via EVP_PKEY_keygen,
-// inside the FIPS provider when FIPS is enabled, since rustls-openssl 0.4.2), and provider() is
-// called several times per new connection.
-#[cfg(feature = "tls-openssl")]
-static OPENSSL_PROVIDER: LazyLock<Arc<CryptoProvider>> = LazyLock::new(build_openssl_provider);
-
-#[cfg(feature = "tls-openssl")]
-pub(super) fn provider() -> Arc<CryptoProvider> {
-    OPENSSL_PROVIDER.clone()
+    provider
 }
 
 #[cfg(feature = "tls-openssl")]
-fn build_openssl_provider() -> Arc<CryptoProvider> {
+fn build_provider() -> CryptoProvider {
     let mut cipher_suites = vec![
         rustls_openssl::cipher_suite::TLS13_AES_256_GCM_SHA384,
         rustls_openssl::cipher_suite::TLS13_AES_128_GCM_SHA256,
@@ -174,11 +172,11 @@ fn build_openssl_provider() -> Arc<CryptoProvider> {
         ]
     };
 
-    Arc::new(CryptoProvider {
+    CryptoProvider {
         cipher_suites,
         kx_groups,
         ..rustls_openssl::default_provider()
-    })
+    }
 }
 
 /// Returns true if the given [`std::io::Error`] wraps a rustls
@@ -325,10 +323,9 @@ pub mod tests {
     }
 
     #[test]
-    #[cfg(feature = "tls-openssl")]
-    fn test_openssl_provider_is_cached() {
-        // provider() is on the per-connection path; it must not rebuild (and re-probe) the
-        // CryptoProvider on every call.
+    fn test_provider_is_cached() {
+        // provider() is on the per-connection path; it must not rebuild the CryptoProvider on
+        // every call.
         let a = super::provider();
         let b = super::provider();
         assert!(
