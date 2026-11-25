@@ -1017,7 +1017,7 @@ impl WorkloadStore {
         self.insert_notifier.send_replace(());
     }
 
-    pub fn remove(&mut self, uid: &Strng) -> Option<Workload> {
+    pub fn remove(&mut self, uid: &Strng) -> Option<Arc<Workload>> {
         match self.by_uid.remove(uid) {
             None => {
                 trace!("tried to remove workload but it was not found");
@@ -1049,7 +1049,7 @@ impl WorkloadStore {
                     }
                 }
 
-                Some(prev.deref().clone())
+                Some(prev)
             }
         }
     }

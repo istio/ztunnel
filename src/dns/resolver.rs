@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use hickory_proto::op::Message;
 use hickory_proto::rr::Record;
 use hickory_resolver::lookup::Lookup;
 use hickory_server::server::Request;
@@ -61,9 +62,10 @@ impl Response {
 
 impl From<Lookup> for Response {
     fn from(value: Lookup) -> Self {
+        let message: Message = value.into();
         Self {
-            answers: value.answers().to_vec(),
-            additionals: value.additionals().to_vec(),
+            answers: message.answers,
+            additionals: message.additionals,
             is_authoritative: false, // Non-authoritative, since results came from upstream resolver.
         }
     }

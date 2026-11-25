@@ -198,8 +198,8 @@ fn expiration(cert: X509Certificate) -> Expiration {
     }
 }
 
-pub fn parse_cert(cert: Vec<u8>) -> Result<Certificate, Error> {
-    let der = CertificateDer::from_pem_slice(&cert)
+pub fn parse_cert(cert: &[u8]) -> Result<Certificate, Error> {
+    let der = CertificateDer::from_pem_slice(cert)
         .map_err(|e| Error::CertificateParseError(format!("no certificate: {e}")))?;
     let (_, parsed) = x509_parser::parse_x509_certificate(&der)?;
     let expiry = expiration(parsed);
@@ -234,7 +234,7 @@ fn parse_key(key: &[u8]) -> Result<PrivateKeyDer<'static>, Error> {
 
 impl WorkloadCertificate {
     pub fn new(key: &[u8], cert: &[u8], chain: Vec<&[u8]>) -> Result<WorkloadCertificate, Error> {
-        let cert = parse_cert(cert.to_vec())?;
+        let cert = parse_cert(cert)?;
 
         // The Istio API does something pretty unhelpful, by providing a single chain of certs.
         // The last one is the root. However, there may be multiple roots concatenated in that last cert,
@@ -247,14 +247,14 @@ impl WorkloadCertificate {
         let roots = parse_cert_multi(raw_root)?;
         let chain = chain[..cmp::max(0, chain.len() - 1)]
             .iter()
-            .map(|x| x.to_vec())
+            .copied()
             .map(parse_cert)
             .collect::<Result<Vec<_>, _>>()?;
         let key: PrivateKeyDer = parse_key(key)?;
 
         let mut roots_store = RootCertStore::empty();
-        let (_valid, invalid) =
-            roots_store.add_parsable_certificates(roots.iter().map(|c| c.der.clone()));
+        let (_valid, invalid) = roots_store
+            .add_parsable_certificates(roots.iter().map(|c| CertificateDer::from(c.der.as_ref())));
         if invalid > 0 {
             tracing::warn!("warning: found {invalid} invalid root certs");
         }
@@ -464,7 +464,7 @@ mod test {
 
     #[test]
     fn parse_cert_empty() {
-        let e = parse_err(parse_cert(vec![]));
+        let e = parse_err(parse_cert(&[]));
         assert!(
             e.starts_with("no certificate:") && e.contains("no items found"),
             "{e}"
@@ -480,14 +480,14 @@ mod test {
             None,
             TEST_ROOT_KEY,
         );
-        let e = parse_err(parse_cert(key.into_bytes()));
+        let e = parse_err(parse_cert(key.as_bytes()));
         assert!(e.contains("no items found"), "{e}");
     }
 
     #[test]
     fn parse_cert_truncated() {
         let truncated = &TEST_ROOT[..TEST_ROOT.len() / 2];
-        let e = parse_err(parse_cert(truncated.to_vec()));
+        let e = parse_err(parse_cert(truncated));
         assert!(e.starts_with("no certificate:"), "{e}");
     }
 
