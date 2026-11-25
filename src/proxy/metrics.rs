@@ -31,6 +31,7 @@ use tracing_core::field::Value;
 
 use crate::identity::Identity;
 use crate::metrics::DefaultedUnknown;
+use crate::metrics::expiring::{ExpiringCounter, ExpiringFamily, Sweep};
 use crate::proxy::{self, HboneAddress};
 
 use crate::state::service::ServiceDescription;
@@ -39,16 +40,16 @@ use crate::strng::{RichStrng, Strng};
 
 #[derive(Debug)]
 pub struct Metrics {
-    pub connection_opens: Family<CommonTrafficLabels, Counter>,
-    pub connection_close: Family<CommonTrafficLabels, Counter>,
-    pub connection_failures: Family<CommonTrafficLabels, Counter>,
-    pub connection_retries: Family<CommonTrafficLabels, Counter>,
+    pub connection_opens: ExpiringFamily<CommonTrafficLabels>,
+    pub connection_close: ExpiringFamily<CommonTrafficLabels>,
+    pub connection_failures: ExpiringFamily<CommonTrafficLabels>,
+    pub connection_retries: ExpiringFamily<CommonTrafficLabels>,
     pub open_sockets: Family<SocketLabels, Gauge>,
-    pub received_bytes: Family<CommonTrafficLabels, Counter>,
-    pub sent_bytes: Family<CommonTrafficLabels, Counter>,
+    pub received_bytes: ExpiringFamily<CommonTrafficLabels>,
+    pub sent_bytes: ExpiringFamily<CommonTrafficLabels>,
 
     // on-demand DNS is not a part of DNS proxy, but part of ztunnel proxy itself
-    pub on_demand_dns: Family<OnDemandDnsLabels, Counter>,
+    pub on_demand_dns: ExpiringFamily<OnDemandDnsLabels>,
 
     pub crl_policy_rejections: Family<CrlLabels, Counter>,
 
@@ -352,46 +353,46 @@ impl OnDemandDnsLabels {
 
 impl Metrics {
     pub fn new(registry: &mut Registry) -> Self {
-        let connection_opens = Family::default();
+        let connection_opens = ExpiringFamily::default();
         registry.register(
             "tcp_connections_opened",
             "The total number of TCP connections opened",
             connection_opens.clone(),
         );
-        let connection_close = Family::default();
+        let connection_close = ExpiringFamily::default();
         registry.register(
             "tcp_connections_closed",
             "The total number of TCP connections closed",
             connection_close.clone(),
         );
 
-        let received_bytes = Family::default();
+        let received_bytes = ExpiringFamily::default();
         registry.register(
             "tcp_received_bytes",
             "The size of total bytes received during request in case of a TCP connection",
             received_bytes.clone(),
         );
-        let sent_bytes = Family::default();
+        let sent_bytes = ExpiringFamily::default();
         registry.register(
             "tcp_sent_bytes",
             "The size of total bytes sent during response in case of a TCP connection",
             sent_bytes.clone(),
         );
-        let on_demand_dns = Family::default();
+        let on_demand_dns = ExpiringFamily::default();
         registry.register(
             "on_demand_dns",
             "The total number of requests that used on-demand DNS (unstable)",
             on_demand_dns.clone(),
         );
 
-        let connection_failures = Family::default();
+        let connection_failures = ExpiringFamily::default();
         registry.register(
             "tcp_connections_failed",
             "The total number of TCP connections that failed to establish (unstable)",
             connection_failures.clone(),
         );
 
-        let connection_retries = Family::default();
+        let connection_retries = ExpiringFamily::default();
         registry.register(
             "tcp_connection_retries",
             "The total number of upstream connection attempts that failed and were retried (unstable)",
@@ -431,6 +432,32 @@ impl Metrics {
             crl_policy_rejections,
             crl_untracked_connections,
         }
+    }
+
+    /// The families that take part in idle expiry, with their registered names.
+    /// Gauges and small fixed families (sockets, CRL) are left out on purpose.
+    pub fn expiring_families(&self) -> Vec<(&'static str, Box<dyn Sweep>)> {
+        vec![
+            (
+                "tcp_connections_opened",
+                Box::new(self.connection_opens.clone()),
+            ),
+            (
+                "tcp_connections_closed",
+                Box::new(self.connection_close.clone()),
+            ),
+            (
+                "tcp_connections_failed",
+                Box::new(self.connection_failures.clone()),
+            ),
+            (
+                "tcp_connection_retries",
+                Box::new(self.connection_retries.clone()),
+            ),
+            ("tcp_received_bytes", Box::new(self.received_bytes.clone())),
+            ("tcp_sent_bytes", Box::new(self.sent_bytes.clone())),
+            ("on_demand_dns", Box::new(self.on_demand_dns.clone())),
+        ]
     }
 
     pub fn record_socket_open(&self, labels: &SocketLabels) {
@@ -499,11 +526,15 @@ pub struct ConnectionResult {
     // sent records the number of bytes sent on this connection
     pub(crate) sent: AtomicU64,
     // sent_metric records the number of bytes sent on this connection to the aggregated metric counter
-    pub(crate) sent_metric: Counter,
+    pub(crate) sent_metric: ExpiringCounter,
     // recv records the number of bytes received on this connection
     pub(crate) recv: AtomicU64,
     // recv_metric records the number of bytes received on this connection to the aggregated metric counter
-    pub(crate) recv_metric: Counter,
+    pub(crate) recv_metric: ExpiringCounter,
+    // opened_metric is the connections-opened counter this connection was counted in. It is only
+    // held, never written after open: holding it keeps that series from expiring while the
+    // connection is open (see ExpiringFamily::try_sweep).
+    pub(crate) _opened_metric: ExpiringCounter,
     // Number of failed upstream attempts that were retried before this one
     pub(crate) retries: u32,
     // Have we recorded yet?
@@ -668,12 +699,14 @@ impl ConnectionResultBuilder {
 
     pub fn build(self) -> ConnectionResult {
         // Grab the metrics with our labels now, so we don't need to fetch them each time.
-        // The inner metric is an Arc so clone is fine/cheap.
-        // With the raw Counter, we increment is a simple atomic add operation (~1ns).
+        // get_or_create returns an owned handle (an Arc clone) that shares the counter.
+        // Incrementing it is a simple atomic add operation (~1ns).
         // Fetching the metric itself is ~300ns; fast, but we call it on each read/write so it would
         // add up.
-        let sent_metric = self.metrics.sent_bytes.get_or_create(&self.tl).clone();
-        let recv_metric = self.metrics.received_bytes.get_or_create(&self.tl).clone();
+        // Holding these handles also keeps the two series from being removed as idle
+        // while the connection is open (see ExpiringFamily::try_sweep).
+        let sent_metric = self.metrics.sent_bytes.get_or_create(&self.tl);
+        let recv_metric = self.metrics.received_bytes.get_or_create(&self.tl);
         let sent = atomic::AtomicU64::new(0);
         let recv = atomic::AtomicU64::new(0);
 
@@ -706,7 +739,8 @@ impl ConnectionResultBuilder {
             "connection opened"
         );
 
-        self.metrics.connection_opens.get_or_create(&self.tl).inc();
+        let opened_metric = self.metrics.connection_opens.get_or_create(&self.tl);
+        opened_metric.inc();
         ConnectionResult {
             src: self.src,
             dst: self.dst,
@@ -718,6 +752,7 @@ impl ConnectionResultBuilder {
             sent_metric,
             recv,
             recv_metric,
+            _opened_metric: opened_metric,
             retries: self.retries,
             recorded: false,
         }

@@ -73,6 +73,7 @@ const ZTUNNEL_RESOURCE_CPU_LIMIT: &str = "ZTUNNEL_RESOURCE_CPU_LIMIT";
 const ZTUNNEL_RESOURCE_CPU_REQUEST: &str = "ZTUNNEL_RESOURCE_CPU_REQUEST";
 const POOL_MAX_STREAMS_PER_CONNECTION: &str = "POOL_MAX_STREAMS_PER_CONNECTION";
 const POOL_UNUSED_RELEASE_TIMEOUT: &str = "POOL_UNUSED_RELEASE_TIMEOUT";
+const METRICS_IDLE_EXPIRY: &str = "METRICS_IDLE_EXPIRY";
 const OUTBOUND_CONNECT_MAX_RETRIES: &str = "OUTBOUND_CONNECT_MAX_RETRIES";
 const OUTBOUND_CONNECT_BASE_BACKOFF: &str = "OUTBOUND_CONNECT_BASE_BACKOFF";
 const OUTBOUND_CONNECT_MAX_BACKOFF: &str = "OUTBOUND_CONNECT_MAX_BACKOFF";
@@ -106,6 +107,8 @@ const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24); // 24 hours
 const DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT: Duration = Duration::from_secs(60 * 5); // 5 minutes
+// Well above any scrape interval, so a series used every few minutes does not flap.
+const MIN_METRICS_IDLE_EXPIRY: Duration = Duration::from_secs(60 * 5); // 5 minutes
 const DEFAULT_POOL_MAX_STREAMS_PER_CONNECTION: u16 = 100; //Go: 100, Hyper: 200, Envoy: 2147483647 (lol), Spec recommended minimum 100
 
 const DEFAULT_OUTBOUND_CONNECT_MAX_RETRIES: usize = 0;
@@ -233,6 +236,11 @@ pub struct Config {
     pub pool_max_streams_per_conn: u16,
 
     pub pool_unused_release_timeout: Duration,
+
+    /// If set, label sets of the traffic metrics that are not written to are removed,
+    /// between 1x and 2x this interval after their last write. None (the default) keeps
+    /// every label set until the process exits.
+    pub metrics_idle_expiry: Option<Duration>,
 
     /// Retries after the initial outbound connect attempt. 0 disables retrying.
     pub outbound_connect_max_retries: usize,
@@ -424,6 +432,11 @@ fn parse_duration(env: &str) -> Result<Option<Duration>, Error> {
             duration_str::parse(&ds).map_err(|e| Error::EnvVar(env.to_string(), ds, e.to_string()))
         })
         .transpose()
+}
+
+/// 0 disables idle metric expiry, the same as leaving it unset.
+fn metrics_idle_expiry(d: Option<Duration>) -> Option<Duration> {
+    d.filter(|d| !d.is_zero())
 }
 
 fn parse_duration_default(env: &str, default: Duration) -> Result<Duration, Error> {
@@ -811,6 +824,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT,
         )?,
 
+        metrics_idle_expiry: metrics_idle_expiry(parse_duration(METRICS_IDLE_EXPIRY)?),
+
         outbound_connect_max_retries: parse_default(
             OUTBOUND_CONNECT_MAX_RETRIES,
             DEFAULT_OUTBOUND_CONNECT_MAX_RETRIES,
@@ -1000,6 +1015,14 @@ fn validate_config(cfg: Config) -> Result<Config, Error> {
         return Err(Error::InvalidState(format!(
             "{OUTBOUND_CONNECT_BASE_BACKOFF} ({:?}) must not exceed {OUTBOUND_CONNECT_MAX_BACKOFF} ({:?})",
             cfg.outbound_connect_base_backoff, cfg.outbound_connect_max_backoff
+        )));
+    }
+
+    if let Some(d) = cfg.metrics_idle_expiry
+        && d < MIN_METRICS_IDLE_EXPIRY
+    {
+        return Err(Error::InvalidState(format!(
+            "{METRICS_IDLE_EXPIRY} ({d:?}) must be 0 (disabled) or at least {MIN_METRICS_IDLE_EXPIRY:?}"
         )));
     }
 
@@ -1430,6 +1453,28 @@ pub mod tests {
         let err = validate_config(cfg(600, 500)).unwrap_err();
         assert!(
             matches!(&err, Error::InvalidState(msg) if msg.contains(OUTBOUND_CONNECT_BASE_BACKOFF)),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn metrics_idle_expiry_parse_and_floor() {
+        // Parsing, through the same steps construct_config uses.
+        let parse = |v: &str| metrics_idle_expiry(Some(duration_str::parse(v).unwrap()));
+        assert_eq!(parse("0"), None, "a bare 0 disables expiry");
+        assert_eq!(parse("0s"), None);
+        assert_eq!(parse("6h"), Some(Duration::from_secs(6 * 3600)));
+        // Validation. Built from a parsed config rather than env vars, as above.
+        let cfg = |v| Config {
+            metrics_idle_expiry: v,
+            ..parse_config().unwrap()
+        };
+        assert!(validate_config(cfg(None)).is_ok());
+        assert!(validate_config(cfg(parse("5m"))).is_ok());
+        assert!(validate_config(cfg(parse("6h"))).is_ok());
+        let err = validate_config(cfg(parse("4m"))).unwrap_err();
+        assert!(
+            matches!(&err, Error::InvalidState(msg) if msg.contains(METRICS_IDLE_EXPIRY)),
             "{err}"
         );
     }

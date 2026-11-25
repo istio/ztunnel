@@ -5008,6 +5008,7 @@ dependencies = [
  "once_cell",
  "openssl",
  "openssl-sys",
+ "parking_lot",
  "pin-project-lite",
  "pingora-pool",
  "ppp",

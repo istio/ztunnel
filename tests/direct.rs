@@ -508,6 +508,174 @@ async fn test_tcp_connections_metrics() {
     .await;
 }
 
+// With idle expiry on, traffic series go after their last write, and the
+// metrics that never expire stay. with_app does not validate the config, so
+// the interval can be shorter than the floor.
+#[tokio::test]
+async fn test_metrics_idle_expiry() {
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
+    let echo_addr = echo.address();
+    tokio::spawn(echo.run());
+    let cfg = config::Config {
+        metrics_idle_expiry: Some(Duration::from_millis(500)),
+        ..test_config()
+    };
+    testapp::with_app(cfg, async move |app| {
+        let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
+        let mut stream = app
+            .socks5_connect(
+                DestinationAddr::Ip(dst),
+                TEST_WORKLOAD_SOURCE.parse().unwrap(),
+            )
+            .await;
+        read_write_stream(&mut stream).await;
+        drop(stream);
+        assert_eventually(
+            Duration::from_secs(2),
+            || async {
+                app.metrics()
+                    .await
+                    .unwrap()
+                    .query_sum("istio_tcp_connections_closed_total", &Default::default())
+            },
+            1,
+        )
+        .await;
+
+        // Gone between 1 and 2 intervals after the last write.
+        assert_eventually(
+            Duration::from_secs(5),
+            || async {
+                let m = app.metrics().await.unwrap();
+                (
+                    m.query("istio_tcp_connections_opened_total", &Default::default())
+                        .is_some(),
+                    m.query("istio_tcp_sent_bytes_total", &Default::default())
+                        .is_some(),
+                )
+            },
+            (false, false),
+        )
+        .await;
+        let m = app.metrics().await.unwrap();
+        assert!(m.query("istio_build", &Default::default()).is_some());
+        assert!(
+            m.query_sum(
+                "istio_metrics_expired_series_total",
+                &HashMap::from([("metric".into(), "tcp_connections_opened".into())])
+            ) >= 1,
+            "{}",
+            m.dump()
+        );
+    })
+    .await;
+}
+
+// An open connection that sends nothing for several intervals keeps its
+// bytes series and its opened series, and every byte is counted when it
+// writes again.
+#[tokio::test]
+async fn test_metrics_idle_expiry_keeps_open_connection() {
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
+    let echo_addr = echo.address();
+    tokio::spawn(echo.run());
+    let interval = Duration::from_millis(300);
+    let cfg = config::Config {
+        metrics_idle_expiry: Some(interval),
+        ..test_config()
+    };
+    testapp::with_app(cfg, async move |app| {
+        let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
+        let mut stream = app
+            .socks5_connect(
+                DestinationAddr::Ip(dst),
+                TEST_WORKLOAD_SOURCE.parse().unwrap(),
+            )
+            .await;
+        let first = read_write_stream(&mut stream).await as u64;
+        tokio::time::sleep(interval * 4).await;
+        let m = app.metrics().await.unwrap();
+        assert_eq!(
+            m.query_sum("istio_tcp_sent_bytes_total", &Default::default()),
+            first,
+            "{}",
+            m.dump()
+        );
+        assert_eq!(
+            m.query_sum("istio_tcp_connections_opened_total", &Default::default()),
+            1,
+            "the opened series expired while its connection was open: {}",
+            m.dump()
+        );
+        let second = read_write_stream(&mut stream).await as u64;
+        drop(stream);
+        assert_eventually(
+            Duration::from_secs(2),
+            || async {
+                app.metrics()
+                    .await
+                    .unwrap()
+                    .query_sum("istio_tcp_sent_bytes_total", &Default::default())
+            },
+            first + second,
+        )
+        .await;
+    })
+    .await;
+}
+
+// A series that keeps being written never expires, even across many
+// intervals.
+#[tokio::test]
+async fn test_metrics_idle_expiry_keeps_busy_series() {
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
+    let echo_addr = echo.address();
+    tokio::spawn(echo.run());
+    let interval = Duration::from_millis(300);
+    let cfg = config::Config {
+        metrics_idle_expiry: Some(interval),
+        ..test_config()
+    };
+    testapp::with_app(cfg, async move |app| {
+        let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
+        // A new connection on the same labels every half interval, for 6
+        // intervals: opened and closed are written far more often than they
+        // can expire.
+        let mut total = 0u64;
+        for _ in 0..12 {
+            let mut stream = app
+                .socks5_connect(
+                    DestinationAddr::Ip(dst),
+                    TEST_WORKLOAD_SOURCE.parse().unwrap(),
+                )
+                .await;
+            read_write_stream(&mut stream).await;
+            drop(stream);
+            total += 1;
+            tokio::time::sleep(interval / 2).await;
+        }
+        assert_eventually(
+            Duration::from_secs(2),
+            || async {
+                app.metrics()
+                    .await
+                    .unwrap()
+                    .query_sum("istio_tcp_connections_closed_total", &Default::default())
+            },
+            total,
+        )
+        .await;
+        let m = app.metrics().await.unwrap();
+        assert_eq!(
+            m.query_sum("istio_tcp_connections_opened_total", &Default::default()),
+            total,
+            "a busy series expired: {}",
+            m.dump()
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn test_tcp_bytes_metrics() {
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;

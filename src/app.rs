@@ -83,6 +83,15 @@ pub async fn build_with_cert(
     let _ = metrics::meta::Metrics::new(istio_registry);
     let xds_metrics = xds::Metrics::new(istio_registry);
     let proxy_metrics = Arc::new(proxy::Metrics::new(istio_registry));
+    if let Some(interval) = config.metrics_idle_expiry {
+        // On the main runtime, next to the metrics server, not on the data plane.
+        let expiry = metrics::expiring::Expiry::new(
+            interval,
+            istio_registry,
+            proxy_metrics.expiring_families(),
+        );
+        tokio::spawn(expiry.run());
+    }
     let dns_metrics = if config.dns_proxy {
         Some(dns::Metrics::new(istio_registry))
     } else {
