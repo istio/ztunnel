@@ -50,7 +50,7 @@ pub struct Connection {
     pub dst_network: Strng,
 }
 
-struct OptionDisplay<'a, T>(&'a Option<T>);
+pub(crate) struct OptionDisplay<'a, T>(pub(crate) &'a Option<T>);
 
 impl<T: Display> Display for OptionDisplay<'_, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
