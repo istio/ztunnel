@@ -658,10 +658,7 @@ impl AdsClient {
         let mut req = tonic::Request::new(outbound);
         self.config.xds_headers.iter().for_each(|(k, v)| {
             req.metadata_mut().insert(k.clone(), v.clone());
-
-            if let Ok(v_str) = v.to_str() {
-                debug!("XDS header added: {}={}", k, v_str);
-            }
+            debug!("XDS header added: {}", k);
         });
 
         let ads_connection = AggregatedDiscoveryServiceClient::new(tls_grpc_channel)
