@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -362,6 +363,153 @@ async fn test_vip_request_local() {
 #[tokio::test]
 async fn test_hostname_request_local() {
     run_request_test(&format!("{TEST_SERVICE_HOST}:80"), "local").await;
+}
+
+struct CountingHandler(Arc<AtomicUsize>);
+
+impl ztunnel::admin::AdminHandler for CountingHandler {
+    fn key(&self) -> &'static str {
+        "counting"
+    }
+    fn handle(&self) -> anyhow::Result<serde_json::Value> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(serde_json::Value::Null)
+    }
+}
+
+// Runs an admin server on a free localhost port with the given proxy state,
+// one certificate per service account and a handler that counts its calls.
+// The server stops when the returned trigger is dropped.
+async fn admin_server(
+    proxy_state: ztunnel::state::DemandProxyState,
+    service_accounts: &[&str],
+) -> (SocketAddr, Arc<AtomicUsize>, ztunnel::drain::DrainTrigger) {
+    let cert_manager = new_secret_manager(Duration::from_secs(60 * 60));
+    for sa in service_accounts {
+        cert_manager
+            .fetch_certificate(&ztunnel::identity::Identity::Spiffe {
+                trust_domain: "cluster.local".into(),
+                namespace: "default".into(),
+                service_account: (*sa).into(),
+            })
+            .await
+            .unwrap();
+    }
+    let mut cfg = test_config();
+    cfg.admin_addr = config::Address::Localhost(false, 0);
+    let (drain_tx, drain_rx) = ztunnel::drain::new();
+    let mut admin = ztunnel::admin::Service::new(
+        Arc::new(cfg),
+        proxy_state,
+        Shutdown::new().trigger(),
+        drain_rx,
+        cert_manager,
+    )
+    .await
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    admin.add_handler(Arc::new(CountingHandler(calls.clone())));
+    let addr = admin.address();
+    admin.spawn();
+    (addr, calls, drain_tx)
+}
+
+async fn admin_get(addr: SocketAddr, path: &str) -> (hyper::StatusCode, Option<String>, String) {
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("http://{addr}{path}"))
+        .body(Empty::<Bytes>::new())
+        .unwrap();
+    let resp = ztunnel::hyper_util::pooling_client()
+        .request(req)
+        .await
+        .unwrap();
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(hyper::header::CONTENT_TYPE)
+        .map(|v| v.to_str().unwrap().to_string());
+    let body = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    (
+        status,
+        content_type,
+        String::from_utf8(body.to_vec()).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn test_config_dump_certificates() {
+    let (addr, calls, _drain) =
+        admin_server(new_proxy_state(&[], &[], &[]), &["sa-0", "sa-1"]).await;
+
+    let (status, content_type, certs) = admin_get(addr, "/config_dump?resource=certificates").await;
+    assert_eq!(status, hyper::StatusCode::OK);
+    assert_eq!(content_type.as_deref(), Some("application/json"));
+    for resource in [
+        "workloads",
+        "Certificates",
+        "cert",
+        "certs",
+        "certificates%20",
+    ] {
+        let (status, content_type, body) =
+            admin_get(addr, &format!("/config_dump?resource={resource}")).await;
+        assert_eq!(status, hyper::StatusCode::NOT_FOUND, "{resource}");
+        assert_eq!(content_type.as_deref(), Some("text/plain"));
+        // A fixed reply, so the request is never echoed back.
+        assert_eq!(
+            body,
+            "unsupported resource; only resource=certificates is supported\n"
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // An empty first value means no filter, as in Envoy.
+    let (_, _, empty_first) = admin_get(addr, "/config_dump?resource=&resource=certificates").await;
+    let (status, _, full) = admin_get(addr, "/config_dump").await;
+    assert_eq!(status, hyper::StatusCode::OK);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(empty_first, full);
+
+    // Only the certificates key, holding what the full dump holds, with the
+    // same formatting, so the two agree byte for byte.
+    let full: serde_json::Value = serde_json::from_str(&full).unwrap();
+    let want = serde_json::json!({ "certificates": full["certificates"] });
+    assert_eq!(want["certificates"].as_array().unwrap().len(), 2, "{full}");
+    assert_eq!(certs, serde_json::to_string_pretty(&want).unwrap());
+}
+
+#[tokio::test]
+async fn test_config_dump_certificates_skips_rest_of_dump() {
+    // Poison the proxy state lock, so serialising the proxy state fails. This
+    // relies on std's RwLock poisoning.
+    let state = Arc::new(std::sync::RwLock::new(ztunnel::state::ProxyState::new(
+        None,
+    )));
+    let _ = std::panic::catch_unwind(|| {
+        let _guard = state.write().unwrap();
+        std::panic::resume_unwind(Box::new(()));
+    });
+    let proxy_state = ztunnel::state::DemandProxyState::new(
+        state,
+        None,
+        Default::default(),
+        Default::default(),
+        helpers::test_proxy_metrics(),
+    );
+    let (addr, calls, _drain) = admin_server(proxy_state, &[]).await;
+
+    let (status, _, body) = admin_get(addr, "/config_dump?resource=certificates").await;
+    assert_eq!(status, hyper::StatusCode::OK, "{body}");
+    assert_eq!(body, "{\n  \"certificates\": []\n}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // The full dump serialises the proxy state, so it fails.
+    let (status, _, body) = admin_get(addr, "/config_dump").await;
+    assert_eq!(status, hyper::StatusCode::INTERNAL_SERVER_ERROR, "{body}");
 }
 
 #[tokio::test]
