@@ -53,6 +53,11 @@ pub struct Metrics {
     pub crl_policy_rejections: Family<CrlLabels, Counter>,
 
     pub crl_untracked_connections: Family<CrlLabels, Counter>,
+
+    /// Number of managed workload certificates currently revoked in loaded CRLs.
+    pub own_cert_revoked: Gauge,
+    /// Number of independent revocation episodes: how many times `own_cert_revoked` left 0.
+    pub own_cert_revoked_episodes: Counter,
 }
 
 #[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
@@ -419,6 +424,20 @@ impl Metrics {
             crl_untracked_connections.clone(),
         );
 
+        let own_cert_revoked = Gauge::default();
+        registry.register(
+            "own_cert_revoked",
+            "Number of managed workload certificates currently revoked in loaded CRLs (unstable)",
+            own_cert_revoked.clone(),
+        );
+
+        let own_cert_revoked_episodes = Counter::default();
+        registry.register(
+            "own_cert_revoked_episodes",
+            "Number of revocation episodes: times there has been at least one managed workload certificate revoked (unstable)", 
+            own_cert_revoked_episodes.clone()
+        );
+
         Self {
             connection_opens,
             connection_close,
@@ -430,6 +449,8 @@ impl Metrics {
             open_sockets,
             crl_policy_rejections,
             crl_untracked_connections,
+            own_cert_revoked,
+            own_cert_revoked_episodes,
         }
     }
 
@@ -451,6 +472,16 @@ impl Metrics {
         self.crl_untracked_connections
             .get_or_create(&CrlLabels { reporter })
             .inc();
+    }
+
+    /// Sync revocation metrics after a change in the manager workload revoked certificates.
+    /// Gauge always reflect current number of revoked certificates.
+    /// Counter tracks episodes (new episode when gauge goes from 0 to more than 0)
+    pub fn update_own_cert_revocation_state(&self, prev_count: usize, new_count: usize) {
+        self.own_cert_revoked.set(new_count as i64);
+        if prev_count == 0 && new_count > 0 {
+            self.own_cert_revoked_episodes.inc();
+        }
     }
 }
 
@@ -883,7 +914,7 @@ fn to_value<T: AsRef<str>>(t: &T) -> impl Value + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::h2::Teardown;
+    use crate::{proxy::h2::Teardown, test_helpers::helpers::test_proxy_metrics};
 
     #[test]
     fn teardown_failure_reason() {
@@ -896,5 +927,35 @@ mod tests {
             reason(proxy::Error::Teardown(Teardown::PingTimeout)),
             ResponseFlags::ConnectionFailure
         );
+    }
+
+    #[test]
+    fn test_own_cert_revocation_episode_semantics() {
+        let metrics = test_proxy_metrics();
+
+        // No-op: 0 -> 0
+        metrics.update_own_cert_revocation_state(0, 0);
+        assert_eq!(metrics.own_cert_revoked.get(), 0);
+        assert_eq!(metrics.own_cert_revoked_episodes.get(), 0);
+
+        // 0 -> 2: Episode 1 starts
+        metrics.update_own_cert_revocation_state(0, 2);
+        assert_eq!(metrics.own_cert_revoked.get(), 2);
+        assert_eq!(metrics.own_cert_revoked_episodes.get(), 1);
+
+        //2 -> 1: Same episode
+        metrics.update_own_cert_revocation_state(2, 1);
+        assert_eq!(metrics.own_cert_revoked.get(), 1);
+        assert_eq!(metrics.own_cert_revoked_episodes.get(), 1);
+
+        //1 -> 0: Episode ends
+        metrics.update_own_cert_revocation_state(1, 0);
+        assert_eq!(metrics.own_cert_revoked.get(), 0);
+        assert_eq!(metrics.own_cert_revoked_episodes.get(), 1);
+
+        // 0 -> 1: Episode 2 starts
+        metrics.update_own_cert_revocation_state(0, 1);
+        assert_eq!(metrics.own_cert_revoked.get(), 1);
+        assert_eq!(metrics.own_cert_revoked_episodes.get(), 2);
     }
 }
