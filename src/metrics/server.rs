@@ -15,6 +15,7 @@
 use ::hyper_util::service::TowerToHyperService;
 use bytes::Bytes;
 use std::sync::Mutex;
+use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
@@ -28,9 +29,13 @@ use prometheus_client::registry::Registry;
 use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::hyper_util;
+use crate::metrics::evict::Evictable;
 
 pub struct Server {
     s: hyper_util::Server<Mutex<Registry>>,
+    // If set, idle connection series are evicted on each scrape.
+    evict: Vec<Arc<dyn Evictable>>,
+    evict_ttl: Duration,
 }
 
 impl Server {
@@ -46,7 +51,17 @@ impl Server {
             Mutex::new(registry),
         )
         .await
-        .map(|s| Server { s })
+        .map(|s| Server {
+            s,
+            evict: vec![],
+            evict_ttl: config.metrics_eviction_ttl,
+        })
+    }
+
+    /// Evict idle connection metrics whenever metrics are scraped.
+    pub fn with_eviction(mut self, metrics: Arc<dyn Evictable>) -> Self {
+        self.evict.push(metrics);
+        self
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -54,14 +69,20 @@ impl Server {
     }
 
     pub fn spawn(self) {
-        self.s.spawn_service(|registry: Arc<Mutex<Registry>>| {
+        let evict: Arc<[Arc<dyn Evictable>]> = self.evict.into();
+        let evict_ttl = self.evict_ttl;
+        self.s.spawn_service(move |registry: Arc<Mutex<Registry>>| {
+            let evict = evict.clone();
             let service = ServiceBuilder::new()
                 .layer(CompressionLayer::new())
                 .service_fn(move |req: Request<Incoming>| {
                     let registry = registry.clone();
+                    let evict = evict.clone();
                     async move {
                         Ok::<_, std::convert::Infallible>(match req.uri().path() {
-                            "/metrics" | "/stats/prometheus" => handle_metrics(registry, req).await,
+                            "/metrics" | "/stats/prometheus" => {
+                                handle_metrics(registry, evict, evict_ttl, req).await
+                            }
                             _ => hyper_util::empty_response(hyper::StatusCode::NOT_FOUND),
                         })
                     }
@@ -73,15 +94,26 @@ impl Server {
 
 async fn handle_metrics(
     reg: Arc<Mutex<Registry>>,
+    evict: Arc<[Arc<dyn Evictable>]>,
+    evict_ttl: Duration,
     req: Request<Incoming>,
 ) -> Response<Full<Bytes>> {
     let mut buf = String::new();
-    let reg = reg.lock().expect("mutex");
-    if let Err(err) = encode(&mut buf, &reg) {
-        return Response::builder()
-            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-            .body(err.to_string().into())
-            .expect("builder with known status code should not fail");
+    {
+        let reg = reg.lock().expect("mutex");
+        if let Err(err) = encode(&mut buf, &reg) {
+            return Response::builder()
+                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(err.to_string().into())
+                .expect("builder with known status code should not fail");
+        }
+    }
+
+    // Evict only after a successful encode, so every series is exported at least once after its
+    // last activity, even if the scrape interval is longer than the TTL. The registry lock is
+    // released; the families take their own locks.
+    for m in evict.iter() {
+        m.evict_idle(evict_ttl);
     }
 
     let response_content_type = content_type(&req);
@@ -125,8 +157,8 @@ fn content_type<T>(req: &Request<T>) -> &str {
         .into()
 }
 
+#[cfg(test)]
 mod test {
-
     #[test]
     fn test_content_type() {
         let plain_text_req = http::Request::new("I want some plain text");
